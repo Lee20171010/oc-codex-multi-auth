@@ -48,6 +48,8 @@ export type LimitWindow = {
 	usedPercent?: number;
 	windowMinutes?: number;
 	resetAtMs?: number;
+	/** Set only when true; see {@link isUsageWindowNotStarted}. */
+	notStarted?: boolean;
 };
 
 export type UsageRateLimit = {
@@ -85,6 +87,8 @@ export type UsageLimitPayload = {
 	usedPercent: number | null;
 	leftPercent: number | null;
 	resetAtMs: number | null;
+	/** Nothing drawn yet, so `resetAtMs` is only "now plus the window". */
+	notStarted: boolean;
 	summary: string;
 };
 
@@ -194,6 +198,34 @@ function mapUsageWindowMinutes(
 	return Math.max(1, Math.ceil(limitWindowSeconds / 60));
 }
 
+/**
+ * Whether a window has not been drawn from since it last reset.
+ *
+ * A rolling window only starts counting at its first request, so an untouched
+ * one reports `reset_after_seconds` equal to its full length and a `reset_at`
+ * of "now plus the window" that moves forward on every read. Printing that as
+ * a renewal date states a moment nothing is scheduled for. A window used even
+ * fractionally - `used_percent` can round to `0` - has a countdown shorter
+ * than its length and is started.
+ */
+export function isUsageWindowNotStarted(
+	window: UsageWindow | undefined,
+	nowMs: number = Date.now(),
+): boolean {
+	if (!window) return false;
+	const { used_percent: used, limit_window_seconds: length } = window;
+	if (used !== 0 || typeof length !== "number" || !Number.isFinite(length) || length <= 0) {
+		return false;
+	}
+	const remaining =
+		typeof window.reset_after_seconds === "number" && Number.isFinite(window.reset_after_seconds)
+			? window.reset_after_seconds
+			: typeof window.reset_at === "number" && Number.isFinite(window.reset_at)
+				? window.reset_at - nowMs / 1000
+				: undefined;
+	return remaining !== undefined && remaining >= length - 1;
+}
+
 export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 	if (window === null) return { windowMinutes: 0 };
 	if (!window) return {};
@@ -211,7 +243,41 @@ export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 						window.reset_after_seconds > 0
 					? Date.now() + window.reset_after_seconds * 1000
 					: undefined,
+		...(isUsageWindowNotStarted(window) ? { notStarted: true } : {}),
 	};
+}
+
+/**
+ * `2026-10-03 14:26:48` in local time. Seconds are printed only when the
+ * timestamp is whole seconds, which is what `reset_at` carries; a reset derived
+ * from `reset_after_seconds` inherits the request's latency, so its seconds
+ * digit would claim a precision nobody measured.
+ */
+export function formatUsageResetTimestamp(resetAtMs: number): string | undefined {
+	if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return undefined;
+	const date = new Date(resetAtMs);
+	const pad = (value: number) => String(value).padStart(2, "0");
+	const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+	const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+	return resetAtMs % 1000 === 0
+		? `${day} ${time}:${pad(date.getSeconds())}`
+		: `${day} ${time}`;
+}
+
+/**
+ * `6d 21h`, `4h 12m`, `35m`: the two largest units, floored, so a countdown
+ * never claims more time remains than does. Under a minute still reads `1m`,
+ * because a reset that has not happened yet is not zero away.
+ */
+export function formatUsageCountdown(ms: number): string | undefined {
+	if (!Number.isFinite(ms) || ms <= 0) return undefined;
+	const totalMinutes = Math.floor(ms / 60_000);
+	const days = Math.floor(totalMinutes / 1440);
+	const hours = Math.floor((totalMinutes % 1440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+	if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+	return `${Math.max(1, minutes)}m`;
 }
 
 export function formatUsageLimitTitle(
@@ -229,7 +295,7 @@ export function formatUsageLimitSummary(
 	mode: QuotaDisplayMode = DEFAULT_QUOTA_DISPLAY_MODE,
 ): string {
 	const left = getUsageLeftPercent(window.usedPercent);
-	const reset = formatUsageReset(window.resetAtMs);
+	const reset = window.notStarted ? undefined : formatUsageReset(window.resetAtMs);
 	const percent =
 		left !== undefined ? formatNamedQuotaPercent(left, mode) : undefined;
 	if (percent && reset) return `${percent} (resets ${reset})`;
@@ -250,6 +316,7 @@ export function toUsageLimitPayload(
 			typeof window.usedPercent === "number" ? window.usedPercent : null,
 		leftPercent: getUsageLeftPercent(window.usedPercent) ?? null,
 		resetAtMs: window.resetAtMs ?? null,
+		notStarted: window.notStarted === true,
 		summary: formatUsageLimitSummary(window, mode),
 	};
 }

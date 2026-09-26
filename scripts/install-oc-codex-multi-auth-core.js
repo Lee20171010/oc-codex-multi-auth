@@ -50,11 +50,17 @@ function parseStandaloneArgs(argv) {
 		fix: false,
 		tag: undefined,
 		configPath: undefined,
+		sort: undefined,
+		direction: undefined,
 		help: false,
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
 		if (arg === "--json") options.json = true;
+		else if (arg === "--sort") options.sort = parseLimitsSortField(argv[++index]);
+		else if (arg.startsWith("--sort=")) options.sort = parseLimitsSortField(arg.slice("--sort=".length));
+		else if (arg === "--asc") options.direction = "asc";
+		else if (arg === "--desc") options.direction = "desc";
 		else if (arg === "--include-sensitive") options.includeSensitive = true;
 		else if (arg === "--deep") options.deep = true;
 		else if (arg === "--fix") options.fix = true;
@@ -66,6 +72,23 @@ function parseStandaloneArgs(argv) {
 		else throw new Error(`Unknown option for standalone command: ${arg}`);
 	}
 	return options;
+}
+
+const LIMITS_SORT_ALIASES = new Map([
+	["account", "account"],
+	["number", "account"],
+	["usage", "usage"],
+	["used", "usage"],
+	["reset", "reset"],
+	["renewal", "reset"],
+]);
+
+function parseLimitsSortField(value) {
+	const field = LIMITS_SORT_ALIASES.get(String(value ?? "").trim().toLowerCase());
+	if (!field) {
+		throw new Error(`Unknown --sort value: ${value ?? "(missing)"} (expected account, usage, or reset)`);
+	}
+	return field;
 }
 
 function getManagedPackageNames() {
@@ -103,6 +126,9 @@ function printHelp() {
 		"  health              Check local token/account health\n" +
 		"  diag                Alias for doctor --deep\n" +
 		"  warm                Open every enabled account's usage window now (one request each)\n\n" +
+		"Limits options:\n" +
+		"  --sort account|usage|reset  Order accounts by number, by usage, or by next reset\n" +
+		"  --asc, --desc               Direction (default --asc: lowest number, least used, earliest reset)\n\n" +
 		`Installer usage: ${PACKAGE_NAME} install [--plugin-only|--modern|--full|--legacy] [--dry-run] [--no-cache-clear]\n` +
 		`Updater usage:   ${PACKAGE_NAME} update [--dry-run]\n\n` +
 		"Default behavior:\n" +
@@ -954,7 +980,7 @@ async function loadWarmRuntime(env) {
 }
 
 async function loadLimitsRuntime(env) {
-	const [storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod] =
+	const [storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod, planTierMod] =
 		await loadDistModules(
 			[
 				"storage.js",
@@ -963,13 +989,14 @@ async function loadLimitsRuntime(env) {
 				"logger.js",
 				"config.js",
 				"plan-allotment.js",
+				"auth/plan-tier.js",
 			],
 			"limits",
 		);
 	// Fetching usage can refresh (and therefore persist) a token, so the same
 	// process-owns-termination rule as `warm` applies.
 	shutdownMod.setShutdownOwnsProcess(true);
-	return { storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod };
+	return { storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod, planTierMod };
 }
 
 export async function runWarmCommand(parsed, options = {}) {
@@ -1133,8 +1160,22 @@ export async function runLimitsCommand(parsed, options = {}) {
 		return { exitCode: 1, action: "limits", storagePath };
 	}
 
-	const { storageMod, usageMod, loggerMod, configMod, planMod } = runtime;
-	const quotaDisplay = configMod.getQuotaDisplay(configMod.loadPluginConfig());
+	const { storageMod, usageMod, loggerMod, configMod, planMod, planTierMod } = runtime;
+	const pluginConfig = configMod.loadPluginConfig();
+	const quotaDisplay = configMod.getQuotaDisplay(pluginConfig);
+	const configuredSort = configMod.getLimitsSort?.(pluginConfig) ?? { by: "account", direction: "asc" };
+	const sort = {
+		by: parsed.sort ?? configuredSort.by,
+		direction: parsed.direction ?? configuredSort.direction,
+	};
+	const render = {
+		usageMod,
+		quotaDisplay,
+		sort,
+		color: !parsed.json && shouldColorLimitsOutput(env),
+	};
+	const planNameOf = (planType) =>
+		planTierMod?.formatPlanType?.(planType) ?? planType ?? null;
 	// The badge is decoration; the report is the point. A runtime that arrived
 	// without the plan module drops the `(5x)` rather than failing the account
 	// it was attached to - the per-account catch below would otherwise turn one
@@ -1194,6 +1235,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 	// failed to report is left out entirely rather than counted as full or as
 	// empty, since either would state capacity nobody measured.
 	const poolMembers = [];
+	const sortKeys = new Map();
 	let failedCount = 0;
 
 	for (const index of indices) {
@@ -1254,7 +1296,9 @@ export async function runLimitsCommand(parsed, options = {}) {
 				primary: usage.primary,
 				secondary: usage.secondary,
 			});
+			sortKeys.set(entry, readLimitsSortKeys(usageMod, [usage.primary, usage.secondary]));
 			entry.planType = usage.planType;
+			entry.planName = planNameOf(usage.planType);
 			entry.planMultiplier = planMultiplierOf(usage.planType);
 			entry.credits = usage.credits;
 			// Raw counts stay in `resetCredits` and the rendered line lives in
@@ -1296,13 +1340,97 @@ export async function runLimitsCommand(parsed, options = {}) {
 		poolSummary: pool
 			? usageMod.formatUsagePoolSummary(pool, quotaDisplay)
 			: null,
-		accounts: results,
+		sort,
+		accounts: sortLimitsEntries(results, sortKeys, sort),
 	};
-	printLimitsResult(payload, parsed.json);
+	printLimitsResult(payload, parsed.json, render);
 	return { exitCode: failedCount > 0 ? 1 : 0, action: "limits", storagePath };
 }
 
-function printLimitsResult(payload, json) {
+/**
+ * What `--sort usage` and `--sort reset` compare. Only the two windows that
+ * govern ordinary requests count, matching the pool total: a spent code-review
+ * allowance does not stop a request. A window that has not started has no
+ * real renewal, so it contributes no reset.
+ */
+function readLimitsSortKeys(usageMod, windows) {
+	let usedPercent;
+	let resetAtMs;
+	for (const window of windows) {
+		if (!usageMod.hasUsageWindow(window)) continue;
+		const left = usageMod.getUsageLeftPercent(window.usedPercent);
+		if (left !== undefined) usedPercent = Math.max(usedPercent ?? 0, 100 - left);
+		if (!window.notStarted && Number.isFinite(window.resetAtMs)) {
+			resetAtMs = Math.min(resetAtMs ?? Infinity, window.resetAtMs);
+		}
+	}
+	return { usedPercent, resetAtMs };
+}
+
+/**
+ * Accounts whose key is unknown (a failed fetch, a window not yet started)
+ * sort last in either direction, and ties fall back to the account number so
+ * the order is stable between runs.
+ */
+function sortLimitsEntries(entries, sortKeys, sort) {
+	const keyOf = (entry) => {
+		if (sort.by === "account") return entry.index;
+		const keys = sortKeys.get(entry);
+		return sort.by === "usage" ? keys?.usedPercent : keys?.resetAtMs;
+	};
+	const direction = sort.direction === "desc" ? -1 : 1;
+	return [...entries].sort((left, right) => {
+		const leftKey = keyOf(left);
+		const rightKey = keyOf(right);
+		if (leftKey === undefined && rightKey !== undefined) return 1;
+		if (rightKey === undefined && leftKey !== undefined) return -1;
+		if (leftKey !== undefined && leftKey !== rightKey) {
+			return direction * (leftKey - rightKey);
+		}
+		return left.index - right.index;
+	});
+}
+
+function shouldColorLimitsOutput(env) {
+	if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
+	const force = env.FORCE_COLOR;
+	if (force !== undefined && force !== "") return force !== "0" && force !== "false";
+	return Boolean(process.stdout.isTTY);
+}
+
+const LIMITS_USAGE_COLORS = [
+	[99, "\u001b[31m"],
+	[80, "\u001b[38;5;208m"],
+	[60, "\u001b[33m"],
+	[0, "\u001b[32m"],
+];
+
+/** Colour keyed on consumption whatever `quotaDisplay` words it as. */
+function colorLimitsPercent(text, usedPercent, render) {
+	if (!render?.color) return text;
+	const code = LIMITS_USAGE_COLORS.find(([floor]) => usedPercent >= floor)?.[1];
+	return code ? `${code}${text}\u001b[0m` : text;
+}
+
+function formatLimitsPercent(limit, render) {
+	if (typeof limit.leftPercent !== "number") return "unavailable";
+	const mode = render?.quotaDisplay ?? "free";
+	const usedPercent = 100 - limit.leftPercent;
+	const text = mode === "used" ? `${usedPercent}% used` : `${limit.leftPercent}% left`;
+	return colorLimitsPercent(text, usedPercent, render);
+}
+
+function formatLimitsRenewal(limit, render, now) {
+	if (limit.notStarted) return "not started (the window opens on first use)";
+	const usageMod = render?.usageMod;
+	if (!Number.isFinite(limit.resetAtMs) || !usageMod?.formatUsageResetTimestamp) return undefined;
+	const at = usageMod.formatUsageResetTimestamp(limit.resetAtMs);
+	if (!at) return undefined;
+	const countdown = usageMod.formatUsageCountdown(limit.resetAtMs - now);
+	return countdown ? `${at} (in ${countdown})` : at;
+}
+
+function printLimitsResult(payload, json, render) {
 	if (json) {
 		console.log(JSON.stringify(payload, null, 2));
 		return;
@@ -1315,7 +1443,10 @@ function printLimitsResult(payload, json) {
 		return;
 	}
 	console.log(`Accounts: ${payload.totalAccounts}`);
+	if (payload.sort) console.log(`Sort: ${payload.sort.by} (${payload.sort.direction})`);
+	const now = Date.now();
 	for (const account of payload.accounts ?? []) {
+		console.log("");
 		const label = account.email ? `${account.label} (${account.email})` : account.label;
 		console.log(`- [${account.index}] ${label}`);
 		if (account.error) {
@@ -1323,21 +1454,27 @@ function printLimitsResult(payload, json) {
 			continue;
 		}
 		for (const limit of account.limits ?? []) {
-			console.log(`  ${limit.name}: ${limit.summary}`);
+			console.log(`  ${limit.name}: ${formatLimitsPercent(limit, render)}`);
+			const renewal = formatLimitsRenewal(limit, render, now);
+			if (renewal) console.log(`    Renews: ${renewal}`);
 		}
 		if ((account.limits ?? []).length === 0) {
 			console.log("  No usage windows reported yet.");
 		}
-		if (account.planType) {
+		const planName = account.planName ?? account.planType;
+		if (planName) {
 			const allotment = account.planMultiplier ? ` (${account.planMultiplier})` : "";
-			console.log(`  Plan: ${account.planType}${allotment}`);
+			console.log(`  Plan: ${planName}${allotment}`);
 		}
 		if (account.credits) console.log(`  Credits: ${account.credits}`);
 		if (account.resetCredits && account.resetCredits.available > 0) {
 			console.log(`  Resets: ${account.resetCreditsSummary}`);
 		}
 	}
-	if (payload.poolSummary) console.log(`Pool: ${payload.poolSummary}`);
+	if (payload.poolSummary) {
+		console.log("");
+		console.log(`Pool: ${payload.poolSummary}`);
+	}
 	if (payload.nextAction) console.log(`Next: ${payload.nextAction}`);
 }
 

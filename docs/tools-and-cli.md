@@ -170,13 +170,48 @@ pool holds between them:
 
 ```text
 - [0] work@example.com id:c487c4
-  Weekly limit: 100% used (resets 15:14 on Sep 30)
-  Plan: pro (20x)
+  Weekly limit: 100% used
+    Renews: 2026-09-30 15:14:08 (in 3d 22h)
+  Plan: Pro (20x)
   Resets: 1 banked
+
 - [1] team@example.com id:989a40
-  Weekly limit: 79% used (resets 08:33 on Oct 01)
-  Plan: self_serve_business_prolite (5x)
+  Weekly limit: 0% used
+    Renews: not started (the window opens on first use)
+  Plan: Business Premium (5x)
+
 Pool: 93% used of 81x across 11 accounts
+```
+
+Each window's renewal is printed on its own line as a local timestamp and a
+countdown. Seconds are shown only when the backend reported an exact reset
+time. A window that has not been drawn from since it last reset reports a
+reset of "now plus the window length" that moves forward on every read, so it
+is shown as `not started` instead of a date nothing is scheduled for.
+
+On a terminal the percentage is coloured by how much of the window is used:
+green below 60%, yellow from 60%, orange from 80%, red from 99%. The colour
+follows consumption whichever way `quotaDisplay` words the number. `NO_COLOR`
+turns it off and `FORCE_COLOR` turns it on without a terminal.
+
+Accounts are listed by account number. `--sort` changes the order:
+
+| Flag | Order |
+| --- | --- |
+| `--sort account` | account number (default) |
+| `--sort usage` | least used first; judged by the window with the least headroom |
+| `--sort reset` | earliest renewal first |
+| `--asc` / `--desc` | direction for any of the above (default `--asc`) |
+
+An account with no known value for the chosen key (a failed fetch, a window
+that has not started) sorts last in either direction. To make an order the
+default, set `limitsSort` in `~/.opencode/openai-codex-auth-config.json`; the
+flags still override each half:
+
+```json
+{
+  "limitsSort": { "by": "reset", "direction": "asc" }
+}
 ```
 
 The ratio is appended only when the plan publishes one, so Free, Go and

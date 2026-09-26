@@ -17,11 +17,11 @@ vi.mock("../scripts/install-oc-codex-multi-auth-core.js", async (importOriginal)
 				return { storageMod, usageMod, warmReqMod, warmMod, recoveryMod };
 			},
 			loadLimitsRuntime: async () => {
-				const [storageMod, usageMod, loggerMod, configMod, planMod] = await Promise.all([
+				const [storageMod, usageMod, loggerMod, configMod, planMod, planTierMod] = await Promise.all([
 					import("../lib/storage.js"), import("../lib/codex-usage.js"), import("../lib/logger.js"),
-					import("../lib/config.js"), import("../lib/plan-allotment.js"),
+					import("../lib/config.js"), import("../lib/plan-allotment.js"), import("../lib/auth/plan-tier.js"),
 				]);
-				return { storageMod, usageMod, loggerMod, configMod, planMod };
+				return { storageMod, usageMod, loggerMod, configMod, planMod, planTierMod };
 			},
 			...options,
 		});
@@ -1148,6 +1148,201 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(printed).toContain("Weekly limit: 58% left");
 	});
 
+	const mockUsageSequence = (payloads: unknown[]) => {
+		let call = 0;
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			const body = payloads[Math.min(call++, payloads.length - 1)];
+			return {
+				ok: true,
+				status: 200,
+				json: async () => body,
+				text: async () => JSON.stringify(body),
+			} as unknown as Response;
+		});
+	};
+
+	const weeklyPayload = (
+		planType: string,
+		usedPercent: number,
+		resetInSeconds: number,
+	) => ({
+		plan_type: planType,
+		rate_limit: {
+			primary_window: {
+				used_percent: usedPercent,
+				limit_window_seconds: 604_800,
+				reset_after_seconds: resetInSeconds,
+				reset_at: Math.floor(Date.now() / 1000) + resetInSeconds,
+			},
+			secondary_window: null,
+		},
+	});
+
+	const threeAccounts = () => [
+		freshAccount({ refreshToken: "rt-a", accountId: "acct_a" }),
+		freshAccount({ refreshToken: "rt-b", accountId: "acct_b" }),
+		freshAccount({ refreshToken: "rt-c", accountId: "acct_c" }),
+	];
+
+	const printedAccountOrder = (printed: string) =>
+		[...printed.matchAll(/^- \[(\d+)\]/gm)].map((match) => Number(match[1]));
+
+	it("limits: prints each renewal as a timestamp with a countdown on its own line", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, [freshAccount()]);
+		mockUsageSequence([weeklyPayload("self_serve_business_prolite", 65, 5 * 86_400 + 3 * 3_600 + 600)]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome, NO_COLOR: "1" },
+		});
+
+		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printed).toContain("Weekly limit: 35% left\n    Renews: ");
+		expect(printed).toMatch(/Renews: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(in 5d 3h\)/);
+		expect(printed).toContain("Plan: Business Premium (5x)");
+		// Every entry and the pool total are set apart by a blank line.
+		expect(printed).toMatch(/\n\n- \[0\]/);
+		expect(printed).toMatch(/\n\nPool: /);
+	});
+
+	it("limits: says an untouched window has not started instead of inventing a renewal", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, [freshAccount()]);
+		mockUsageSequence([weeklyPayload("pro", 0, 604_800)]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome, NO_COLOR: "1" },
+		});
+
+		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printed).toContain("Renews: not started");
+		expect(printed).not.toMatch(/Renews: \d{4}-/);
+		expect(printed).toContain("Plan: Pro (20x)");
+	});
+
+	it("limits: keeps a window used below one percent as started", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, [freshAccount()]);
+		mockUsageSequence([weeklyPayload("pro", 0, 604_000)]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.accounts[0].limits[0].notStarted).toBe(false);
+	});
+
+	it("limits: sorts by account number by default", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, threeAccounts());
+		mockUsageSequence([
+			weeklyPayload("plus", 90, 3 * 86_400),
+			weeklyPayload("plus", 10, 1 * 86_400),
+			weeklyPayload("plus", 50, 2 * 86_400),
+		]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome, NO_COLOR: "1" },
+		});
+
+		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printedAccountOrder(printed)).toEqual([0, 1, 2]);
+	});
+
+	it.each([
+		[["--sort", "reset"], [1, 2, 0]],
+		[["--sort=reset", "--desc"], [0, 2, 1]],
+		[["--sort", "usage"], [1, 2, 0]],
+		[["--sort", "usage", "--desc"], [0, 2, 1]],
+		[["--sort", "account", "--desc"], [2, 1, 0]],
+	])("limits: %j orders the accounts %j", async (flags, expected) => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, threeAccounts());
+		mockUsageSequence([
+			weeklyPayload("plus", 90, 3 * 86_400),
+			weeklyPayload("plus", 10, 1 * 86_400),
+			weeklyPayload("plus", 50, 2 * 86_400),
+		]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--json", ...flags], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.accounts.map((account: { index: number }) => account.index)).toEqual(expected);
+	});
+
+	it("limits: sorts a window that has not started after every real renewal", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, threeAccounts());
+		mockUsageSequence([
+			weeklyPayload("plus", 0, 604_800),
+			weeklyPayload("plus", 40, 2 * 86_400),
+			weeklyPayload("plus", 40, 1 * 86_400),
+		]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--json", "--sort", "reset", "--desc"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.accounts.map((account: { index: number }) => account.index)).toEqual([1, 2, 0]);
+	});
+
+	it("limits: rejects an unknown --sort value", async () => {
+		vi.resetModules();
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+		await expect(runInstaller(["limits", "--sort", "vibes"])).rejects.toThrow(/Unknown --sort value/);
+	});
+
+	it("limits: colours the percentage by how much of the window is used", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, [
+			freshAccount({ refreshToken: "rt-a", accountId: "acct_a" }),
+			freshAccount({ refreshToken: "rt-b", accountId: "acct_b" }),
+			freshAccount({ refreshToken: "rt-c", accountId: "acct_c" }),
+			freshAccount({ refreshToken: "rt-d", accountId: "acct_d" }),
+		]);
+		mockUsageSequence([
+			weeklyPayload("plus", 59, 86_400),
+			weeklyPayload("plus", 60, 86_400),
+			weeklyPayload("plus", 98, 86_400),
+			weeklyPayload("plus", 99, 86_400),
+		]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+		const env: NodeJS.ProcessEnv = { ...process.env, HOME: tempHome, USERPROFILE: tempHome, FORCE_COLOR: "1" };
+		delete env.NO_COLOR;
+
+		await runInstaller(["limits"], { env });
+
+		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printed).toContain("\u001b[32m41% left\u001b[0m");
+		expect(printed).toContain("\u001b[33m40% left\u001b[0m");
+		expect(printed).toContain("\u001b[38;5;208m2% left\u001b[0m");
+		expect(printed).toContain("\u001b[31m1% left\u001b[0m");
+	});
+
 	it("limits: names what a seat is worth and what the pool adds up to", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
@@ -1166,7 +1361,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		});
 
 		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-		expect(printed).toContain("Plan: plus (1x)");
+		expect(printed).toContain("Plan: Plus (1x)");
 		// The weekly window governs at 58% left, so that is what the pool holds.
 		expect(printed).toContain("Pool: 58% left of 1x across 1 account");
 	});
@@ -1209,8 +1404,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		});
 
 		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-		expect(printed).toContain("Plan: pro (20x)");
-		expect(printed).toContain("Plan: plus (1x)");
+		expect(printed).toContain("Plan: Pro (20x)");
+		expect(printed).toContain("Plan: Plus (1x)");
 		expect(printed).toContain("Pool: 5% left of 21x across 2 accounts");
 	});
 
