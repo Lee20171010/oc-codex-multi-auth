@@ -374,6 +374,13 @@ export type TuiQuotaOverviewAccount = {
 	resetCredits?: number;
 	resetCreditsApplicable?: number | null;
 	limits: TuiQuotaLimit[];
+	/**
+	 * When this account was read. The snapshot's own `fetchedAt` is its oldest
+	 * reading, so one account carried over from a failed poll would otherwise
+	 * date every other, fresher account with it. Absent in a snapshot an older
+	 * build wrote, where the snapshot's time is all there is.
+	 */
+	fetchedAt?: number;
 };
 
 /**
@@ -408,7 +415,8 @@ function isTuiQuotaOverviewAccount(
 		(value.resetCreditsApplicable === undefined || value.resetCreditsApplicable === null ||
 			(typeof value.resetCreditsApplicable === "number" && Number.isInteger(value.resetCreditsApplicable) && value.resetCreditsApplicable >= 0)) &&
 		Array.isArray(value.limits) &&
-		value.limits.every(isTuiQuotaLimit)
+		value.limits.every(isTuiQuotaLimit) &&
+		isOptionalFiniteNumber(value.fetchedAt)
 	);
 }
 

@@ -368,8 +368,9 @@ When the backend reports a fully spent 5-hour or weekly subscription window,
 the account is excluded from every model-family rotation until that window's
 reported reset. Failed or rate-limited usage queries fail open and wait for the
 next interval; they never block an account. Set `autoProtectCredits` to `false`
-to disable this periodic guard. A manual `codex-limits` or standalone `limits`
-check always persists an observed exhaustion block immediately. Quota
+to disable this periodic guard. A manual `codex-limits`, or any account the standalone `limits` reads live
+(every account under `--refresh`), persists an observed exhaustion block
+immediately. Quota
 notifications use the same poller. The 5-hour and
 weekly windows are tracked independently, and each
 threshold alerts once until that window rises above it after a reset. Each line
