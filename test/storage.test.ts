@@ -2547,12 +2547,12 @@ describe("storage", () => {
       }
     });
 
-    it("returns null when global fallback storage is corrupted", async () => {
+    it("rejects corrupted global fallback storage instead of seeding an empty pool", async () => {
       const fakeHome = join(testWorkDir, "home-fallback-corrupted");
       const projectDir = join(testWorkDir, "project-fallback-corrupted");
       const projectGitDir = join(projectDir, ".git");
       const globalConfigDir = join(fakeHome, ".opencode");
-      const globalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
+      const globalStoragePath = join(globalConfigDir, "oc-codex-multi-auth-accounts.json");
 
       await fs.mkdir(fakeHome, { recursive: true });
       await fs.mkdir(projectGitDir, { recursive: true });
@@ -2563,7 +2563,7 @@ describe("storage", () => {
 
       await fs.writeFile(globalStoragePath, "{ invalid json", "utf-8");
 
-      await expect(loadAccounts()).resolves.toBeNull();
+      await expect(loadAccounts()).rejects.toThrow(StorageError);
       expect(existsSync(getStoragePath())).toBe(false);
     });
   });

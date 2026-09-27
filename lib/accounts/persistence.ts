@@ -38,14 +38,21 @@ export class AccountPersistence {
 	 * further write degrades to {@link mergeVolatileState}.
 	 */
 	private disposed = false;
-	private readonly pendingDisabledAccounts = new Set<string>();
+	// Identity -> the refresh token that was failing when this manager disabled
+	// the account. Comparing it to the on-disk token at merge time keeps the
+	// disable from overriding a re-login: a rotated credential means another
+	// process already repaired the slot, so its enabled state wins.
+	private readonly pendingDisabledAccounts = new Map<string, string>();
 	private externalReloadSnapshot?: Map<string, Pick<AccountMetadataV3,
 		"rateLimitResetTimes" | "coolingDownUntil" | "quotaExhaustedUntil" | "quotaExhaustedStampAt">>;
 
 	constructor(private readonly state: AccountState) {}
 
 	markAccountDisabled(account: ManagedAccount): void {
-		this.pendingDisabledAccounts.add(getWorkspaceIdentityKey(account));
+		this.pendingDisabledAccounts.set(
+			getWorkspaceIdentityKey(account),
+			account.refreshToken,
+		);
 	}
 
 	async saveToDisk(repairScopes = false): Promise<void> {
@@ -137,8 +144,14 @@ export class AccountPersistence {
 					const mine = mineByIdentity.get(getWorkspaceIdentityKey(account));
 					if (!mine) return account;
 					// Take persisted enabled state from disk unless this manager just
-					// disabled the account. A stale snapshot must not undo a re-login.
-					if (this.pendingDisabledAccounts.has(getWorkspaceIdentityKey(account))) {
+					// disabled the account — and then only while the disk record still
+					// carries the credential that failed. A rotated token means a
+					// re-login already repaired the slot, and a stale snapshot must
+					// not put it back out of rotation.
+					const disabledToken = this.pendingDisabledAccounts.get(
+						getWorkspaceIdentityKey(account),
+					);
+					if (disabledToken !== undefined && disabledToken === account.refreshToken) {
 						return { ...mine, enabled: false };
 					}
 					if (repairScopes && account.enabled === false &&
@@ -147,6 +160,22 @@ export class AccountPersistence {
 					}
 					return { ...mine, enabled: account.enabled, accountNote: account.accountNote };
 				});
+				// Membership comes from disk, but accounts this manager added in
+				// memory are additions, not removals-in-waiting: append whichever
+				// the on-disk store still lacks or the save drops them again.
+				const addedKeys = this.state.peekAddedAccountIdentities();
+				if (addedKeys.size > 0) {
+					const mergedKeys = new Set(
+						storage.accounts.map((account) => getWorkspaceIdentityKey(account)),
+					);
+					for (const [identityKey, mine] of mineByIdentity) {
+						if (!addedKeys.has(identityKey) || mergedKeys.has(identityKey)) {
+							continue;
+						}
+						storage.accounts.push(mine);
+						mergedKeys.add(identityKey);
+					}
+				}
 				if (membershipChanged) {
 					storage.activeIndex = current.activeIndex;
 					storage.activeIndexByFamily = current.activeIndexByFamily;
@@ -154,6 +183,7 @@ export class AccountPersistence {
 			}
 			await persist(storage);
 			this.pendingDisabledAccounts.clear();
+			this.state.consumeAddedAccountIdentities();
 		});
 	}
 

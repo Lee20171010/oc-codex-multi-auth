@@ -29,6 +29,7 @@ import {
 } from "../auth/token-utils.js";
 import { extractPlanType } from "../auth/plan-tier.js";
 import { getMissingRequiredOAuthScopes, normalizeScope } from "../auth/scopes.js";
+import { getWorkspaceIdentityKey } from "../storage/identity.js";
 import { getHealthTracker, getTokenTracker } from "../rotation.js";
 import { remapRateLimitBackoffAfterRemoval } from "../request/rate-limit-backoff.js";
 import { logWarn } from "../logger.js";
@@ -216,7 +217,7 @@ export function hasMissingScopeReauthNote(accountNote: string | undefined): bool
  * operator-authored text that came before it. `appendReauthNote` always appends
  * its sentence last, so everything from the marker onward is ours to drop.
  */
-function stripReauthNote(accountNote: string | undefined): string | undefined {
+export function stripReauthNote(accountNote: string | undefined): string | undefined {
 	if (!accountNote) return undefined;
 	const markerIndex = accountNote.indexOf(MISSING_SCOPE_NOTE_MARKER);
 	if (markerIndex < 0) return accountNote;
@@ -284,6 +285,27 @@ export class AccountState {
 	 * `consumeScopeRepairs()` clears it, so the extra write happens once.
 	 */
 	private scopeRepairsPending = false;
+
+	/**
+	 * Identity keys of accounts this manager pushed in memory that no persisted
+	 * record is known to carry yet — the host OAuth credential bootstrap is the
+	 * main one. A live save takes membership from the on-disk store, so without
+	 * this marker the very save meant to persist such an account would drop it.
+	 * Persistence consumes the keys once the merged write carries the account.
+	 */
+	private readonly addedAccountIdentities = new Set<string>();
+
+	markAccountAdded(account: ManagedAccount): void {
+		this.addedAccountIdentities.add(getWorkspaceIdentityKey(account));
+	}
+
+	peekAddedAccountIdentities(): ReadonlySet<string> {
+		return this.addedAccountIdentities;
+	}
+
+	consumeAddedAccountIdentities(): void {
+		this.addedAccountIdentities.clear();
+	}
 
 	consumeScopeRepairs(): boolean {
 		const pending = this.scopeRepairsPending;
@@ -447,6 +469,8 @@ export class AccountState {
 						rateLimitResetTimes: {},
 					});
 				}
+				const pushed = this.accounts[this.accounts.length - 1];
+				if (pushed) this.markAccountAdded(pushed);
 			}
 
 			if (this.accounts.length > 0) {
@@ -494,6 +518,8 @@ export class AccountState {
 					rateLimitResetTimes: {},
 				},
 			];
+			const bootstrap = this.accounts[0];
+			if (bootstrap) this.markAccountAdded(bootstrap);
 			for (const family of MODEL_FAMILIES) {
 				this.currentAccountIndexByFamily[family] = 0;
 				this.cursorByFamily[family] = 0;

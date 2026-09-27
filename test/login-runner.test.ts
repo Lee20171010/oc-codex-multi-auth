@@ -13,7 +13,7 @@ import {
 	type TokenSuccessWithAccount,
 } from "../lib/auth/login-runner.js";
 import { JWT_CLAIM_PATH } from "../lib/constants.js";
-import { loadAccounts, setStoragePathDirect } from "../lib/storage.js";
+import { loadAccounts, saveAccounts, setStoragePathDirect } from "../lib/storage.js";
 import type { AccountMetadataV3, AccountStorageV3 } from "../lib/storage.js";
 import * as loadSaveModule from "../lib/storage/load-save.js";
 import * as loggerModule from "../lib/logger.js";
@@ -93,6 +93,35 @@ describe("login-runner persistAccountPool", () => {
 		// Case-insensitive email index => merged into the existing entry, not appended.
 		expect(second?.accounts).toHaveLength(1);
 		expect(second?.accounts[0]?.refreshToken).toBe("refresh-new");
+	});
+
+	it("re-enables a disabled slot on re-login and clears its re-auth note", async () => {
+		// A slot parked by auth-failure disabling keeps its credentials but
+		// stays out of rotation until a login repairs it.
+		await saveAccounts({
+			version: 3,
+			accounts: [
+				{
+					accountId: "acct-1",
+					refreshToken: "rt-old",
+					accessToken: "at-old",
+					expiresAt: Date.now() + 3_600_000,
+					enabled: false,
+					accountNote: "Re-auth required for missing OAuth scope(s): profile.",
+					addedAt: 1,
+					lastUsed: 1,
+				},
+			],
+			activeIndex: 0,
+		});
+
+		await persistAccountPool([createTokenResult("acct-1", "rt-new")], false);
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts).toHaveLength(1);
+		expect(loaded?.accounts[0]?.refreshToken).toBe("rt-new");
+		expect(loaded?.accounts[0]?.enabled).not.toBe(false);
+		expect(loaded?.accounts[0]?.accountNote).toBeUndefined();
 	});
 
 	// Issue #213: a blank scope reaching storage is indistinguishable from

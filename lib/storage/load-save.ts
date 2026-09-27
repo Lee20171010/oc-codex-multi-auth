@@ -345,7 +345,14 @@ async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
     }
 
     const normalized = normalizeAccountStorage(data, globalStoragePath);
-    if (!normalized) return null;
+    if (!normalized) {
+      throw new StorageError(
+        "Global account storage has an invalid format; refusing to seed a project pool from it.",
+        "INVALID_STORAGE",
+        globalStoragePath,
+        "Restore the accounts from a credential snapshot in the backups directory.",
+      );
+    }
 
     log.info("Loaded global account storage as project fallback", {
       from: globalStoragePath,
@@ -354,20 +361,23 @@ async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
     });
     return normalized;
   } catch (error) {
-    // Propagate forward-compat failures so the caller can surface them to the
-    // user instead of silently falling back to an empty global pool.
-    if (error instanceof StorageError && error.code === "UNSUPPORTED_SCHEMA_VERSION") {
-      throw error;
-    }
+    // An existing but unreadable global store must never look like "no global
+    // pool": the transaction caller would then seed a project pool without
+    // those accounts. Forward-compat and quarantined-V2 rejects already throw
+    // from normalizeAccountStorage; every other non-ENOENT failure wraps the
+    // same way the primary load path does.
+    if (error instanceof StorageError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      log.warn("Failed to load global fallback account storage", {
-        from: globalStoragePath,
-        to: currentStoragePath,
-        error: String(error),
-      });
+    if (code === "ENOENT") {
+      return null;
     }
-    return null;
+    throw new StorageError(
+      `Failed to load global account storage: ${error instanceof Error ? error.message : String(error)}`,
+      code ?? "INVALID_STORAGE",
+      globalStoragePath,
+      "The existing global account file is unreadable. Restore it from a credential snapshot in the backups directory.",
+      error instanceof Error ? error : undefined,
+    );
   }
 }
 

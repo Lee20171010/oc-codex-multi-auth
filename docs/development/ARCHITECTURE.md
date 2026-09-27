@@ -342,10 +342,10 @@ Unsupported-model behavior is strict by default. Default auto-fallbacks still co
 | :--- | :--- | :--- | :--- | :--- |
 | **429 (delay <= 5000ms)** | `rateLimitShort` | Jittered sleep `addJitter(max(100, delayMs), 0.2)` and retry on same account | None | None (no cooldown window written) |
 | **429 (delay > 5000ms)** | None (immediate rotate); `rateLimitGlobal` when all accounts blocked | Rotate to next candidate account; when all accounts are blocked, wait and retry | -10 | Records `rateLimitResetTimes` per model family |
-| **401 Invalidated** | None (`authRefresh` applies during token refresh) | Increment `authFailures`; if >= 3, remove account; else 30s group cooldown | None | Persists updated failure count or account removal |
+| **401 Invalidated** | None (`authRefresh` applies during token refresh) | Increment `authFailures`; if >= 3, disable account (credentials retained); else 30s group cooldown | None | Persists updated failure count or account disable |
 | **5xx / Server Error** | `server` | Trip circuit breaker, rotate to next account | -20 | None (unless server payload carries rate-limit reset) |
 | **Network Error** | `network` | Trip circuit breaker, rotate to next account | -20 | None |
-| **Workspace Deactivated** | None | Flag account and remove from active pool | -20 | Writes active pool and flagged storage files |
+| **Workspace Deactivated** | None | Flag account and disable it in the active pool (credentials retained) | -20 | Writes active pool disable and flagged storage files |
 | **Stream Interrupted** | `server` | Rotate to next account if within budget | -20 | None |
 | **Token Bucket Depleted** | None | Rotate immediately (`rate-limit-local`) | None | None (local throttle only, no upstream penalty) |
 
