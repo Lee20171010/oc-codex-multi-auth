@@ -1236,6 +1236,9 @@ export async function runLimitsCommand(parsed, options = {}) {
 	// empty, since either would state capacity nobody measured.
 	const poolMembers = [];
 	const sortKeys = new Map();
+	const workspaceNames = new Map();
+	const workspaceChecked = new Set();
+	const entryWorkspaceIds = new Map();
 	let failedCount = 0;
 
 	for (const index of indices) {
@@ -1257,12 +1260,14 @@ export async function runLimitsCommand(parsed, options = {}) {
 			rateLimitResetTimes: account.rateLimitResetTimes ?? {},
 			quotaExhaustedUntil: account.quotaExhaustedUntil,
 		};
+		entryWorkspaceIds.set(entry, account.accountId);
 		try {
 			const { accessToken } = await usageMod.ensureCodexUsageAccessToken({ storage, account });
 			const accountId = usageMod.resolveCodexUsageAccountId({ account, accessToken });
 			if (!accountId) {
 				throw new Error("could not resolve account id (re-login may be required)");
 			}
+			entryWorkspaceIds.set(entry, accountId);
 			const usage = usageMod.parseCodexUsagePayload(
 				await usageMod.fetchCodexUsage({
 					accountId,
@@ -1310,6 +1315,24 @@ export async function runLimitsCommand(parsed, options = {}) {
 				? usageMod.formatResetCredits(usage.resetCredits)
 				: null;
 			entry.limits = usage.limits;
+			// One answer lists every workspace the login belongs to, so an id
+			// another account already named is not asked about again. The name
+			// is decoration: failing to read it must not fail the account.
+			if (!workspaceNames.has(accountId) && !workspaceChecked.has(accountId)) {
+				workspaceChecked.add(accountId);
+				try {
+					const names = await usageMod.fetchCodexWorkspaceNames({
+						accountId,
+						accessToken,
+						organizationId: account.organizationId,
+					});
+					for (const [id, name] of names) workspaceNames.set(id, name);
+				} catch (error) {
+					loggerMod.logWarn(
+						`[${PACKAGE_NAME}] Failed to read workspace names: ${loggerMod.maskString(formatErrorForLog(error))}`,
+					);
+				}
+			}
 		} catch (error) {
 			// `ensureCodexUsageAccessToken` can surface a raw OAuth refresh
 			// response, so the message is redacted through the logger's token
@@ -1319,6 +1342,10 @@ export async function runLimitsCommand(parsed, options = {}) {
 			failedCount += 1;
 		}
 		results.push(entry);
+	}
+	for (const entry of results) {
+		const workspaceId = entryWorkspaceIds.get(entry);
+		entry.workspaceName = (workspaceId && workspaceNames.get(workspaceId)) ?? null;
 	}
 
 	const pool = usageMod.summarizeUsagePool(poolMembers);
@@ -1449,6 +1476,7 @@ function printLimitsResult(payload, json, render) {
 		console.log("");
 		const label = account.email ? `${account.label} (${account.email})` : account.label;
 		console.log(`- [${account.index}] ${label}`);
+		if (account.workspaceName) console.log(`  Business account: ${account.workspaceName}`);
 		if (account.error) {
 			console.log(`  Error: ${account.error}`);
 			continue;

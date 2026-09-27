@@ -1076,7 +1076,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(names).toContain("Weekly limit");
 		expect(output.accounts[0].limits[0].leftPercent).toBe(82);
 		expect(output.accounts[0].planType).toBe("plus");
-		expect(String(fetchSpy.mock.calls.at(-1)?.[0])).toContain("/wham/usage");
+		expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("/wham/usage");
 	});
 
 	it("limits: persists a spent weekly quota so rotation skips its Credits", async () => {
@@ -1148,10 +1148,15 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(printed).toContain("Weekly limit: 58% left");
 	});
 
-	const mockUsageSequence = (payloads: unknown[]) => {
+	const mockUsageSequence = (
+		payloads: unknown[],
+		workspaces: Array<Record<string, unknown>> = [],
+	) => {
 		let call = 0;
-		return vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-			const body = payloads[Math.min(call++, payloads.length - 1)];
+		return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const body = String(input).includes("/wham/accounts/check")
+				? { accounts: workspaces }
+				: payloads[Math.min(call++, payloads.length - 1)];
 			return {
 				ok: true,
 				status: 200,
@@ -1206,6 +1211,40 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Every entry and the pool total are set apart by a blank line.
 		expect(printed).toMatch(/\n\n- \[0\]/);
 		expect(printed).toMatch(/\n\nPool: /);
+	});
+
+	it("limits: names the Business workspace below the account line", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, [
+			freshAccount({ refreshToken: "rt-a", accountId: "acct_a" }),
+			freshAccount({ refreshToken: "rt-b", accountId: "acct_b" }),
+			freshAccount({ refreshToken: "rt-c", accountId: "acct_c" }),
+		]);
+		const fetchSpy = mockUsageSequence(
+			[weeklyPayload("self_serve_business_prolite", 10, 86_400)],
+			[
+				{ id: "acct_a", structure: "workspace", name: "dh" },
+				{ id: "acct_b", structure: "workspace", name: "Virtkick\u001b[31m 1\nBusiness" },
+				{ id: "acct_c", structure: "personal", name: null },
+			],
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome, NO_COLOR: "1" },
+		});
+
+		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(printed).toMatch(/- \[0\] .*\n  Business account: dh\n/);
+		// Owner-chosen text cannot smuggle a terminal escape or a fake line in.
+		expect(printed).toMatch(/- \[1\] .*\n  Business account: Virtkick \[31m 1 Business\n/);
+		expect(printed).toMatch(/- \[2\] .*\n  Weekly limit/);
+		// The first answer names both workspaces, so only the personal account
+		// (which no answer names) is asked about again.
+		const checks = fetchSpy.mock.calls.filter(([url]) => String(url).includes("/wham/accounts/check"));
+		expect(checks).toHaveLength(2);
 	});
 
 	it("limits: says an untouched window has not started instead of inventing a renewal", async () => {
@@ -1525,7 +1564,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// request and could persist refreshed credentials for it.
 		expect(output.accounts).toHaveLength(1);
 		expect(output.accounts[0].index).toBe(0);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes("/wham/usage"))).toHaveLength(1);
 	});
 
 	it("limits: --tag matches a workspace tagged on a deduplicated-away record", async () => {
@@ -1552,7 +1591,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 
 		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
 		expect(output.accounts).toHaveLength(1);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes("/wham/usage"))).toHaveLength(1);
 	});
 
 	it("limits: redacts token material leaked by a failing refresh", async () => {

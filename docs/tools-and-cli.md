@@ -176,12 +176,20 @@ pool holds between them:
   Resets: 1 banked
 
 - [1] team@example.com id:989a40
+  Business account: Example Corp
   Weekly limit: 0% used
     Renews: not started (the window opens on first use)
   Plan: Business Premium (5x)
 
 Pool: 93% used of 81x across 11 accounts
 ```
+
+A Business seat names the workspace it belongs to, as its owner titled it in
+ChatGPT. The name comes from the Codex backend's account list
+(`/wham/accounts/check`), which one request per login answers for every
+workspace that login is a member of. A personal account has no workspace name
+and gets no such line, and a failed lookup only drops the line. `--json`
+carries it as `workspaceName`.
 
 Each window's renewal is printed on its own line as a local timestamp and a
 countdown. Seconds are shown only when the backend reported an exact reset

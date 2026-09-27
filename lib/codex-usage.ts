@@ -801,6 +801,73 @@ export async function fetchCodexUsage(params: {
 	}
 }
 
+const MAX_WORKSPACE_NAME_LENGTH = 64;
+
+/**
+ * Names of the Business workspaces the token's user belongs to, keyed by
+ * account id.
+ *
+ * `/wham/accounts/check` is the Codex backend's copy of the account list the
+ * ChatGPT web app reads from `/backend-api/accounts/check`, and unlike that one
+ * it accepts a Codex OAuth token rather than a browser session behind
+ * Cloudflare. The list covers every workspace the user is a member of, not only
+ * the one the token is bound to, so one answer can name several accounts.
+ * Personal accounts carry no name and are left out.
+ *
+ * The name is chosen by the workspace owner and printed verbatim into a line,
+ * so control characters are dropped and the length is bounded.
+ */
+export async function fetchCodexWorkspaceNames(params: {
+	accountId: string;
+	accessToken: string;
+	organizationId: string | undefined;
+	timeoutMs?: number;
+}): Promise<Map<string, string>> {
+	const headers = createCodexHeaders(undefined, params.accountId, params.accessToken, {
+		organizationId: params.organizationId,
+	});
+	headers.set("accept", "application/json");
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(),
+		params.timeoutMs ?? getFetchTimeoutMs(loadPluginConfig()),
+	);
+	try {
+		const response = await fetch(`${CODEX_BASE_URL}/wham/accounts/check`, {
+			method: "GET",
+			headers,
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			const bodyText = (await response.text()).slice(0, usageErrorBodyMaxChars);
+			throw new Error(sanitizeCodexApiErrorMessage(response.status, bodyText));
+		}
+		const payload = (await response.json()) as { accounts?: unknown } | null;
+		const names = new Map<string, string>();
+		const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
+		for (const entry of accounts) {
+			if (typeof entry !== "object" || entry === null) continue;
+			const { id, name, structure } = entry as Record<string, unknown>;
+			if (typeof id !== "string" || typeof name !== "string") continue;
+			if (structure !== undefined && structure !== "workspace") continue;
+			const cleaned = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+			if (!cleaned) continue;
+			names.set(
+				id,
+				cleaned.length > MAX_WORKSPACE_NAME_LENGTH
+					? `${cleaned.slice(0, MAX_WORKSPACE_NAME_LENGTH - 1)}…`
+					: cleaned,
+			);
+		}
+		return names;
+	} catch (error) {
+		if (isCodexAbortError(error)) throw createUsageRequestTimeoutError();
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
 function applyRefreshedCredentials(
 	target: {
 		refreshToken: string;
