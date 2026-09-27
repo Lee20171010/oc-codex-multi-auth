@@ -229,13 +229,20 @@ export function isUsageWindowNotStarted(
 export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 	if (window === null) return { windowMinutes: 0 };
 	if (!window) return {};
+	const usedPercent =
+		typeof window.used_percent === "number" &&
+		Number.isFinite(window.used_percent)
+			? window.used_percent
+			: undefined;
+	const windowMinutes = mapUsageWindowMinutes(window.limit_window_seconds);
+	// The reset an untouched window reports is "now plus the window", which
+	// no surface should render as a renewal, so it is not carried at all.
+	if (isUsageWindowNotStarted(window)) {
+		return { usedPercent, windowMinutes, notStarted: true };
+	}
 	return {
-		usedPercent:
-			typeof window.used_percent === "number" &&
-			Number.isFinite(window.used_percent)
-				? window.used_percent
-				: undefined,
-		windowMinutes: mapUsageWindowMinutes(window.limit_window_seconds),
+		usedPercent,
+		windowMinutes,
 		resetAtMs:
 			typeof window.reset_at === "number" && window.reset_at > 0
 				? window.reset_at * 1000
@@ -243,7 +250,6 @@ export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 						window.reset_after_seconds > 0
 					? Date.now() + window.reset_after_seconds * 1000
 					: undefined,
-		...(isUsageWindowNotStarted(window) ? { notStarted: true } : {}),
 	};
 }
 
@@ -265,19 +271,22 @@ export function formatUsageResetTimestamp(resetAtMs: number): string | undefined
 }
 
 /**
- * `6d 21h`, `4h 12m`, `35m`: the two largest units, floored, so a countdown
- * never claims more time remains than does. Under a minute still reads `1m`,
- * because a reset that has not happened yet is not zero away.
+ * `6d 21h`, `4h 12m`, `1d 30m`, `35m`: the two largest non-zero units,
+ * floored, so a countdown never claims more time remains than does. Under a
+ * minute still reads `1m`, because a reset that has not happened yet is not
+ * zero away.
  */
 export function formatUsageCountdown(ms: number): string | undefined {
 	if (!Number.isFinite(ms) || ms <= 0) return undefined;
 	const totalMinutes = Math.floor(ms / 60_000);
-	const days = Math.floor(totalMinutes / 1440);
-	const hours = Math.floor((totalMinutes % 1440) / 60);
-	const minutes = totalMinutes % 60;
-	if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-	if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-	return `${Math.max(1, minutes)}m`;
+	const parts = [
+		[Math.floor(totalMinutes / 1440), "d"],
+		[Math.floor((totalMinutes % 1440) / 60), "h"],
+		[totalMinutes % 60, "m"],
+	] as const;
+	const nonZero = parts.filter(([value]) => value > 0);
+	if (nonZero.length === 0) return "1m";
+	return nonZero.slice(0, 2).map(([value, unit]) => `${value}${unit}`).join(" ");
 }
 
 export function formatUsageLimitTitle(
@@ -295,7 +304,7 @@ export function formatUsageLimitSummary(
 	mode: QuotaDisplayMode = DEFAULT_QUOTA_DISPLAY_MODE,
 ): string {
 	const left = getUsageLeftPercent(window.usedPercent);
-	const reset = window.notStarted ? undefined : formatUsageReset(window.resetAtMs);
+	const reset = formatUsageReset(window.resetAtMs);
 	const percent =
 		left !== undefined ? formatNamedQuotaPercent(left, mode) : undefined;
 	if (percent && reset) return `${percent} (resets ${reset})`;
