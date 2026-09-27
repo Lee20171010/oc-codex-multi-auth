@@ -363,6 +363,18 @@ describe("mergeOverviewWithLatestAccount", () => {
 		expect(merged.accounts[0]!.limits[0]!.leftPercent).toBe(0);
 	});
 
+	it("ignores a reading older than that account's own reading", () => {
+		const base = snapshot();
+		const fresher = {
+			...base,
+			accounts: base.accounts.map((account, position) =>
+				position === 1 ? { ...account, fetchedAt: NOW + 120_000 } : account,
+			),
+		};
+		const merged = mergeOverviewWithLatestAccount(fresher, latest);
+		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(60);
+	});
+
 	it("ignores a reading older than the poll", () => {
 		const merged = mergeOverviewWithLatestAccount(snapshot(), {
 			...latest,

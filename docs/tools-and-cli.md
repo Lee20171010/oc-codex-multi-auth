@@ -204,8 +204,12 @@ An account the plugin holds no reading for (added since its last poll, or a
 pool it has not polled) is read live, and so is every account when there is no
 snapshot at all. `--refresh` reads every account live. A live read of the whole
 pool is written back as the plugin's snapshot, so the status line and the next
-`limits` start from it; a `--tag` subset, or a snapshot that describes a
-different pool, is never written. A reading from the snapshot has no credit
+`limits` start from it. Nothing is written for a `--tag` subset or a
+`--config-path` store, when an account failed to read and has no earlier
+reading to keep, when the existing snapshot describes a different pool, or
+when another OpenCode process rewrote it during the run. An account is matched
+to its snapshot entry by credential fingerprint only, so an account whose token
+rotated since the plugin's last poll is read live. A reading from the snapshot has no credit
 balance, and its reset-credit line shows only the redeemable count the snapshot
 keeps. `--json` marks each account's `source` (`cache` or `live`) and `readAt`,
 and the whole report's `readings`.

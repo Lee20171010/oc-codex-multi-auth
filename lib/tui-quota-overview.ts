@@ -238,6 +238,11 @@ export function mergeOverviewWithLatestAccount(
 	let merged = false;
 	const accounts = snapshot.accounts.map((account) => {
 		if (account.fingerprint !== latest.fingerprint) return account;
+		// The snapshot's own time is its oldest reading, so the account's own
+		// time is what the header reading has to beat.
+		if (account.fetchedAt !== undefined && latest.fetchedAt <= account.fetchedAt) {
+			return account;
+		}
 		merged = true;
 		return {
 			...account,

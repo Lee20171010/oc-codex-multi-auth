@@ -1406,6 +1406,106 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(second.accounts[0].limits[0].leftPercent).toBe(80);
 	});
 
+	const snapshotPathOf = (home: string) =>
+		join(stateDirOf(home), "oc-codex-multi-auth-tui-quota-overview.json");
+
+	const fileExists = async (path: string) =>
+		readFile(path).then(() => true, () => false);
+
+	it("limits: does not write a snapshot that would leave out an account it failed to read", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		await writeAccounts(tempHome, threeAccounts().slice(0, 2));
+		let call = 0;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			if (String(input).includes("/wham/accounts/check")) return new Response(JSON.stringify({ accounts: [] }));
+			return call++ === 0
+				? new Response(JSON.stringify(weeklyPayload("plus", 20, 86_400)))
+				: new Response("upstream boom", { status: 500 });
+		});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		expect(await fileExists(snapshotPathOf(tempHome))).toBe(false);
+	});
+
+	it("limits: never reports one account's cached quota for another with the same email", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		const pool = [freshAccount({ refreshToken: "rt-seat", accountId: "acct_seat" })];
+		await writeAccounts(tempHome, pool);
+		// Same email, same pool position, different credential: another seat.
+		const personal = freshAccount({ refreshToken: "rt-personal", accountId: "acct_personal" });
+		await writePluginSnapshot(tempHome, Date.now() - 60_000, [
+			{ account: personal, email: "warm@example.com", planType: "pro", limits: [cachedWeekly(90, Date.now() + 86_400_000)] },
+		]);
+		const fetchSpy = mockUsageSequence([weeklyPayload("plus", 20, 86_400)]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes("/wham/usage"))).toHaveLength(1);
+		expect(output.accounts[0]).toMatchObject({ source: "live", planType: "plus" });
+	});
+
+	it("limits: leaves alone a snapshot another process wrote during the run", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		const pool = threeAccounts().slice(0, 1);
+		await writeAccounts(tempHome, pool);
+		await writePluginSnapshot(tempHome, Date.now() - 3_600_000, [
+			{ account: pool[0], planType: "plus", limits: [cachedWeekly(40, Date.now() + 86_400_000)] },
+		]);
+		const home = tempHome;
+		let concurrent = "";
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			if (String(input).includes("/wham/accounts/check")) return new Response(JSON.stringify({ accounts: [] }));
+			// The plugin's poller lands its own snapshot mid-run.
+			await writePluginSnapshot(home, Date.now(), [
+				{ account: pool[0], planType: "plus", limits: [cachedWeekly(55, Date.now() + 86_400_000)] },
+			]);
+			concurrent = await readFile(snapshotPathOf(home), "utf-8");
+			return new Response(JSON.stringify(weeklyPayload("plus", 20, 86_400)));
+		});
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--refresh", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		expect(await readFile(snapshotPathOf(tempHome), "utf-8")).toBe(concurrent);
+	});
+
+	it("limits: never writes an alternate --config-path pool into the plugin's snapshot", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		const alternate = join(tempHome, "alternate-accounts.json");
+		await writeFile(
+			alternate,
+			JSON.stringify({ version: 3, activeIndex: 0, accounts: threeAccounts().slice(0, 1) }),
+			"utf-8",
+		);
+		mockUsageSequence([weeklyPayload("plus", 20, 86_400)]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["limits", "--config-path", alternate, "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0])).accounts[0].source).toBe("live");
+		expect(await fileExists(snapshotPathOf(tempHome))).toBe(false);
+	});
+
 	it("limits: does not overwrite a snapshot of a different pool", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();

@@ -1378,7 +1378,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 			// An account the plugin has no reading for (added since its last
 			// poll, or a different pool than the one it polled) is read live
 			// rather than left blank.
-			const cachedAccount = cached && findPluginQuotaReading(cached, account, index, usageMod);
+			const cachedAccount = cached && findPluginQuotaReading(cached, account, usageMod);
 			const reading = cachedAccount
 				? toCachedLimitsReading(cachedAccount, usageMod, quotaDisplay)
 				: await readLive(account, index, entry);
@@ -1437,10 +1437,11 @@ export async function runLimitsCommand(parsed, options = {}) {
 	});
 
 	// Hand a full live read back to the plugin, so its status line and the next
-	// `limits` see it too. Only a read of the whole pool qualifies: a `--tag`
-	// subset would drop every other account from the snapshot.
+	// `limits` see it too. Only a read of the plugin's own pool qualifies: a
+	// `--tag` subset would drop every other account from the snapshot, and a
+	// `--config-path` store is not the pool the status line describes.
 	const allLive = results.every((entry) => entry.source !== "cache");
-	if (!normalizedTag && allLive && liveOverviewAccounts.length > 0) {
+	if (!normalizedTag && !parsed.configPath && allLive && liveOverviewAccounts.length > 0) {
 		try {
 			await writePluginQuotaReadings({
 				quotaCacheMod,
@@ -1526,28 +1527,19 @@ async function readPluginQuotaReadings(quotaCacheMod, quotaOverviewMod, stateDir
 }
 
 /**
- * Pair an account with its entry in a plugin snapshot. The fingerprint covers
- * the refresh token, which rotates on every token refresh, so an account the
- * plugin read just before a refresh is still recognized by its pool position
- * and email.
+ * Pair an account with its entry in a plugin snapshot, by the credential
+ * fingerprint alone. Pool position and email do not identify an account: one
+ * email can hold a personal account and several workspace seats, so a looser
+ * match could report one seat's quota as another's. An account whose token
+ * has rotated since the plugin's poll is simply read live.
  */
-function findPluginQuotaEntry(snapshot, account, index, usageMod) {
+function findPluginQuotaEntry(snapshot, account, usageMod) {
 	const fingerprint = usageMod.createUsageAccountFingerprint(account);
-	const email = typeof account.email === "string" ? account.email.trim().toLowerCase() : "";
-	return (
-		snapshot.accounts.find((candidate) => candidate.fingerprint === fingerprint) ??
-		(email
-			? snapshot.accounts.find(
-				(candidate) =>
-					candidate.index === index + 1 &&
-					candidate.email?.trim().toLowerCase() === email,
-			)
-			: undefined)
-	);
+	return snapshot.accounts.find((candidate) => candidate.fingerprint === fingerprint);
 }
 
-function findPluginQuotaReading(readings, account, index, usageMod) {
-	const found = findPluginQuotaEntry(readings.snapshot, account, index, usageMod);
+function findPluginQuotaReading(readings, account, usageMod) {
+	const found = findPluginQuotaEntry(readings.snapshot, account, usageMod);
 	if (!found) return undefined;
 	return { account: found, readAt: found.fetchedAt ?? readings.snapshot.fetchedAt };
 }
@@ -1605,33 +1597,50 @@ function toCachedLimitsReading(reading, usageMod, quotaDisplay) {
 
 /**
  * Write a live read of the whole pool as the plugin's snapshot, in the shape
- * its poller writes. An account this run failed to read keeps its previous
- * entry, and the snapshot then keeps the older time, exactly as the poller
- * does. A previous snapshot that describes a different pool is left alone:
- * the file is shared by every OpenCode window on the machine.
+ * its poller writes. The file is shared by every OpenCode window on the
+ * machine, so it is written only when the result is at least as complete and
+ * as current as what it replaces:
+ *
+ * - an account this run failed to read keeps its previous entry, and the
+ *   snapshot then keeps the older time, exactly as the poller does; an account
+ *   with no previous entry to keep means no write, because a snapshot missing
+ *   an account would judge the pool on a subset;
+ * - a previous snapshot that describes a different pool is left alone, judged
+ *   by fingerprint or by pool position and email, since a rotated token
+ *   changes a fingerprint without changing the pool;
+ * - a snapshot another process wrote while this run was reading is left
+ *   alone, since it is as new as this one or newer.
  */
 async function writePluginQuotaReadings({ quotaCacheMod, stateDir, now, live, previous, pool, usageMod }) {
 	if (!quotaCacheMod?.writeTuiQuotaOverviewSnapshot) return;
-	const matched = (entry) =>
-		pool.some(({ index, account }) => findPluginQuotaEntry({ accounts: [entry] }, account, index, usageMod));
-	if (previous && !previous.raw.accounts.every(matched)) return;
+	const samePoolAs = (entry) =>
+		pool.some(({ index, account }) =>
+			entry.fingerprint === usageMod.createUsageAccountFingerprint(account) ||
+			(entry.index === index + 1 &&
+				typeof account.email === "string" &&
+				entry.email?.trim().toLowerCase() === account.email.trim().toLowerCase()),
+		);
+	if (previous && !previous.raw.accounts.every(samePoolAs)) return;
 	const accounts = [...live];
 	let carriedOver = false;
 	for (const { index, account } of pool) {
 		if (accounts.some((entry) => entry.index === index + 1)) continue;
-		const kept = previous && findPluginQuotaEntry(previous.raw, account, index, usageMod);
-		if (!kept) continue;
+		const kept = previous && findPluginQuotaEntry(previous.raw, account, usageMod);
+		if (!kept) return;
 		accounts.push({ ...kept, fetchedAt: kept.fetchedAt ?? previous.raw.fetchedAt });
 		carriedOver = true;
 	}
 	accounts.sort((left, right) => left.index - right.index);
+	const path = quotaCacheMod.getTuiQuotaOverviewCachePath(stateDir);
+	const current = await quotaCacheMod.readTuiQuotaOverviewSnapshot(path);
+	if (JSON.stringify(current) !== JSON.stringify(previous?.raw)) return;
 	await quotaCacheMod.writeTuiQuotaOverviewSnapshot(
 		{
 			version: quotaCacheMod.TUI_QUOTA_CACHE_VERSION,
 			fetchedAt: carriedOver && previous ? Math.min(previous.raw.fetchedAt, now) : now,
 			accounts,
 		},
-		quotaCacheMod.getTuiQuotaOverviewCachePath(stateDir),
+		path,
 	);
 }
 
@@ -1662,18 +1671,13 @@ async function readWorkspaceNameCache(stateDir) {
 }
 
 async function writeWorkspaceNameCache(stateDir, names, now) {
-	const target = join(stateDir, WORKSPACE_NAME_CACHE_FILE);
 	const accounts = Object.fromEntries(
 		[...names].map(([id, name]) => [id, { name, checkedAt: now }]),
 	);
-	const temporary = `${target}.${process.pid}.${now}.tmp`;
-	await mkdir(stateDir, { recursive: true });
-	await writeFile(
-		temporary,
+	await writeFileAtomic(
+		join(stateDir, WORKSPACE_NAME_CACHE_FILE),
 		`${JSON.stringify({ version: WORKSPACE_NAME_CACHE_VERSION, accounts }, null, 2)}\n`,
-		{ encoding: "utf-8", mode: 0o600 },
 	);
-	await rename(temporary, target);
 }
 
 /**
