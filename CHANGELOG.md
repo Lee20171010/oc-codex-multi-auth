@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file. Dates are I
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.25.0] - 2026-09-28
+
+### Added
+- The standalone `limits` report now reads the plugin's last readings by default — no upstream calls unless `--refresh` is passed — sorts accounts by account, usage, or reset time with `--sort`, names the Business workspace each seat belongs to, and prints readable percentages, renewal times, and plan lines for large pools. (#274, thanks @Nowaker)
+- The V2 Codex accounts dialog explains whether the pool is project-scoped or shared globally, how `perProjectAccounts` and `CODEX_AUTH_PER_PROJECT_ACCOUNTS` change it, and that a restart is required to apply it. (#272, thanks @lubshad)
+
+### Changed
+- An account that fails auth three times in a row is now disabled with its credentials retained instead of removed, so a later `opencode auth login` repairs the slot in place. The same applies to a deactivated workspace entry. (#273, thanks @yuefdev)
+
+### Fixed
+- A background save from an older session no longer drops accounts another session added, restores ones it removed, or disables an account a re-login just repaired. Accounts the manager added in memory (like the host credential bootstrap) persist through the same save. (#273, thanks @yuefdev)
+- The V2 account sidebar no longer marks a serving account based on a stale headers snapshot or one shared from another project. (#272, thanks @lubshad)
+- `limits` no longer writes a quota snapshot that is incomplete, describes an alternate `--config-path` pool, or is older than one written concurrently; the optional workspace-name lookup is bounded and cached. (#274, thanks @Nowaker)
+- An unreadable or invalid global account store no longer looks like an empty pool to a project — it now reports the error instead of seeding past real credentials. (#273)
+
 ## [6.24.0] - 2026-09-25
 
 ### Added
