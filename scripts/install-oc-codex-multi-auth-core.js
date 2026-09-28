@@ -843,7 +843,13 @@ function resolveStandaloneStorage(options, env = process.env, projectDir) {
 	if (options.configPath) {
 		return { storagePath: resolve(options.configPath), scope: "explicit", projectRoot: null };
 	}
-	const homeDir = resolveHomeDirectory(env);
+	// The pool path must equal what the plugin runtime resolves — that is
+	// `join(os.homedir(), ".opencode")` in lib/storage/paths.ts. Deriving it
+	// from `resolveHomeDirectory(env)` (which prefers env.HOME) can diverge
+	// from homedir() under a redirected HOME, e.g. Windows shells, and the
+	// CLI would report a different pool than the plugin actually uses. The
+	// project-root bound uses the same home for the same reason.
+	const homeDir = homedir();
 	const opencodeDir = join(homeDir, ".opencode");
 	if (resolvePerProjectAccounts(env, opencodeDir)) {
 		const startDir = typeof projectDir === "string" && projectDir.trim()
@@ -1066,6 +1072,40 @@ async function readStandaloneStorage(path, kind = "main") {
 			error: standaloneStorageError(sanitizeJsonReadError(error)),
 		};
 	}
+}
+
+/**
+ * The flagged (quarantined) pool obeys the same keychain routing as the main
+ * store: with `CODEX_KEYCHAIN=1` a successful flagged save moves the pool into
+ * the OS keychain and migrates the sibling file away, so reading only the
+ * file reports zero flagged accounts while quarantined records still exist.
+ * Load through the compiled storage layer — which is keychain-aware and
+ * already pointed at the resolved pool — whenever the operator has not
+ * selected an explicit file (a `--config` selection means the file IS the
+ * pool; keychain stays suspended). Falls back to the direct file probe when
+ * the dist build cannot be loaded, preserving the pre-keychain behavior.
+ */
+async function readStandaloneFlaggedPool(storagePath, parsed, resolution, env = process.env, options = {}) {
+	if (!parsed.configPath && env.CODEX_KEYCHAIN === "1") {
+		const loadRuntime = options.loadFlaggedRuntime
+			?? (() => loadDistModules(["storage.js"], "flagged pool inspection"));
+		let storageMod = null;
+		try {
+			[storageMod] = await loadRuntime();
+		} catch {
+			// No built dist alongside the script — the file probe below keeps
+			// the pre-keychain behavior rather than failing the command.
+		}
+		if (storageMod && typeof storageMod.loadFlaggedAccounts === "function") {
+			try {
+				pointStorageModuleAtResolution(storageMod, resolution);
+				return { storage: (await storageMod.loadFlaggedAccounts()) ?? null, error: null };
+			} catch (error) {
+				return { storage: null, error: formatErrorForLog(error) };
+			}
+		}
+	}
+	return readStandaloneStorage(storagePath, "flagged");
 }
 
 function normalizeStandaloneIdentityPart(value) {
@@ -2598,7 +2638,7 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 	// file (same sibling placement as `getFlaggedAccountsPath` in the plugin):
 	// an unreadable flagged file is reported rather than silently skipped.
 	const flaggedProbe = command === "doctor"
-		? await readStandaloneStorage(storagePath, "flagged")
+		? await readStandaloneFlaggedPool(storagePath, parsed, resolution, env, options)
 		: null;
 	const flaggedAccounts = flaggedProbe?.storage
 		? summarizeStandaloneAccounts(flaggedProbe.storage, parsed.includeSensitive, parsed.tag)
@@ -3019,6 +3059,34 @@ async function readJson(filePath) {
 		}
 		throw error;
 	}
+}
+
+/**
+ * Detect `//` or `/* ... *\/` comments in JSONC source while ignoring `/`
+ * sequences inside string literals (URLs make a naive indexOf check
+ * false-positive on virtually every config). Used to warn before a rewrite
+ * that would silently drop the operator's notes.
+ */
+function jsoncContainsComments(text) {
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < text.length; i += 1) {
+		const ch = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === "\"") inString = false;
+			continue;
+		}
+		if (ch === "\"") {
+			inString = true;
+			continue;
+		}
+		if (ch === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) {
+			return true;
+		}
+	}
+	return false;
 }
 
 async function renameWithWindowsRetry(sourcePath, destinationPath) {
@@ -3561,11 +3629,27 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 
 	const configChanged = existingConfig === undefined || formatJson(existingConfig) !== formatJson(nextConfig);
 	const tuiConfigChanged = existingTuiConfig === undefined || formatJson(existingTuiConfig) !== formatJson(nextTuiConfig);
+	// A JSONC config rewrites as plain JSON — the parse strips comments, so an
+	// operator's notes are silently lost from the file even though a .bak
+	// copy keeps them on disk. Say so before the rewrite instead of letting
+	// the loss go unnoticed.
+	let existingConfigHadComments = false;
+	if (configChanged && existsSync(v1ConfigPath)) {
+		try {
+			existingConfigHadComments = jsoncContainsComments(await readFile(v1ConfigPath, "utf-8"));
+		} catch {
+			// The file raced away or became unreadable — the write path below
+			// surfaces its own error; skip the comment probe.
+		}
+	}
 	let wrote = false;
 	if (dryRun) {
 		log(`[dry-run] ${configChanged ? "Would write" : "Would leave unchanged"} ${v1ConfigPath} using ${effectiveConfigMode} config`);
 		log(`[dry-run] Diff for ${v1ConfigPath}:`);
 		log(formatRedactedConfigDiff(existingConfig, nextConfig));
+		if (existingConfigHadComments) {
+			log(`[dry-run] Note: ${v1ConfigPath} contains comments that a rewrite would not preserve; they remain only in the backup.`);
+		}
 		log(`[dry-run] ${tuiConfigChanged ? "Would write" : "Would leave unchanged"} ${paths.tuiConfigPath} with the TUI status plugin`);
 		log(`[dry-run] Diff for ${paths.tuiConfigPath}:`);
 		log(formatRedactedConfigDiff(existingTuiConfig, nextTuiConfig));
@@ -3574,6 +3658,9 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 			if (existsSync(v1ConfigPath)) {
 				const backupPath = await backupConfig(v1ConfigPath, false);
 				log(`Backup created: ${backupPath}`);
+			}
+			if (existingConfigHadComments) {
+				log(`Note: ${v1ConfigPath} contains comments that the rewrite does not preserve; your notes remain in the .bak backup above.`);
 			}
 			await writeFileAtomic(v1ConfigPath, formatJson(nextConfig));
 			wrote = true;
@@ -3637,6 +3724,7 @@ export const __test = {
 	getStandaloneStoragePath,
 	isKeychainMigratedBackupPath,
 	isUnsafeMergeKey,
+	jsoncContainsComments,
 	mergeFullTemplate,
 	mergeOpenaiProvider,
 	mergeTuiConfig,

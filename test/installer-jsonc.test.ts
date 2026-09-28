@@ -93,8 +93,49 @@ describe("installer JSONC support and config safety", () => {
 		expect(() => __test.parseJsonc('{ "a": tru }')).toThrow();
 	});
 
+	it("warns before rewriting a commented config — JSON rewrites drop the notes", async () => {
+		// The JSONC parse strips comments for reading, but the write path
+		// emits plain JSON — an operator's notes would vanish from the file
+		// silently (coderabbit minor on PR #275). The installer must say so.
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const { runInstaller, __test } = await importCore();
+		const configDir = join(tempHome, ".config", "opencode");
+		const configPath = join(configDir, "opencode.json");
+		await mkdir(configDir, { recursive: true });
+		await writeFile(
+			configPath,
+			`{
+				// operator note: do not remove the corporate proxy block
+				"plugin": ["existing-plugin"],
+				"urls": ["https://example.com/a//b"]
+			}`,
+			"utf-8",
+		);
+
+		// Unit-level: the scanner must see real comments and ignore `//`
+		// inside string literals (every URL would otherwise warn).
+		expect(__test.jsoncContainsComments('{ // note\n"a": "https://x/y" }')).toBe(true);
+		expect(__test.jsoncContainsComments('{ "a": "https://x//y" }')).toBe(false);
+		expect(__test.jsoncContainsComments('{ "a": 1 }')).toBe(false);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await expect(
+			runInstaller(["--modern", "--no-cache-clear"], {
+				env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			}),
+		).resolves.toMatchObject({ action: "install", exitCode: 0 });
+
+		const stdout = gatherStdout(logSpy);
+		expect(stdout).toContain("comments");
+		expect(stdout).toMatch(/not preserve|does not preserve/i);
+	});
+
 	it("merges a real-world JSONC opencode.json instead of failing the parse", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -134,6 +175,8 @@ describe("installer JSONC support and config safety", () => {
 		"catalog mode %s refuses to overwrite a malformed existing config",
 		async (mode) => {
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await importCore();
 			const configDir = join(tempHome, ".config", "opencode");
 			const configPath = join(configDir, "opencode.json");
@@ -160,6 +203,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("catalog mode refuses a malformed tui.json without touching it", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
 		const tuiPath = join(configDir, "tui.json");
@@ -177,6 +222,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("targets the opencode.jsonc sibling when opencode.json is absent", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
@@ -214,6 +261,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("rejects unknown installer flags with an error and usage output", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await importCore();
 
@@ -228,6 +277,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("rejects unknown standalone flags with an error and usage output", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await importCore();
 
@@ -265,6 +316,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("warns before replacing a config symlink with a regular file", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
@@ -291,6 +344,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("warns about managed provider.openai fields, dropped config keys, and pruned models", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
@@ -369,6 +424,8 @@ describe("installer JSONC support and config safety", () => {
 
 	it("blocks prototype-polluting keys in the end-to-end config write", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await importCore();
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -444,6 +501,8 @@ describe("standalone per-project account storage", () => {
 
 	it("status --json resolves the per-project pool by default and reports its scope", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		projectDir = await createProject();
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller, __test } = await importCore();
@@ -473,6 +532,8 @@ describe("standalone per-project account storage", () => {
 
 	it("status --json resolves the global pool when perProjectAccounts is off via env", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		projectDir = await createProject();
 		const { runInstaller } = await importCore();
 
@@ -494,6 +555,8 @@ describe("standalone per-project account storage", () => {
 
 	it("env semantics: only the literal \"1\" enables per-project storage", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		projectDir = await createProject();
 		const { __test } = await importCore();
 		const opencodeDir = join(tempHome, ".opencode");
@@ -506,6 +569,8 @@ describe("standalone per-project account storage", () => {
 
 	it("reads perProjectAccounts from the plugin config file, defaulting on", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { __test } = await importCore();
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
@@ -523,6 +588,8 @@ describe("standalone per-project account storage", () => {
 
 	it("honors an explicit --config-path as an explicit scope, not a project pool", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		projectDir = await createProject();
 		const { runInstaller } = await importCore();
 		const selected = join(tempHome, "selected-pool.json");
@@ -541,6 +608,8 @@ describe("standalone per-project account storage", () => {
 
 	it("doctor --json reports the flagged sibling pool beside the active file", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(
@@ -576,6 +645,8 @@ describe("standalone per-project account storage", () => {
 
 	it("doctor --json reports an unreadable flagged file as an error", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(
@@ -603,6 +674,8 @@ describe("standalone per-project account storage", () => {
 
 	it("the flagged kind resolves the sibling quarantine file", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { __test } = await importCore();
 		const mainPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		expect(__test.resolveStandaloneStorageFile(mainPath)).toBe(mainPath);
@@ -630,6 +703,8 @@ describe("standalone per-project account storage", () => {
 		"%s refuses a .migrated-to-keychain backup selection",
 		async (command) => {
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 			const { runInstaller } = await importCore();
 			const artifact = join(
@@ -655,6 +730,8 @@ describe("standalone per-project account storage", () => {
 		async (command) => {
 			vi.stubEnv("CODEX_KEYCHAIN", "1");
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			vi.spyOn(console, "log").mockImplementation(() => {});
 			const { runInstaller } = await importCore();
 			const selected = join(tempHome, "selected.json");

@@ -1097,6 +1097,17 @@ export async function clearAccounts(): Promise<void> {
               "keychain: delete during clearAccounts failed; a stale keychain copy may survive and resurrect the cleared accounts on the next opt-in load",
               { error: result.error },
             );
+          } else if (
+            !result.deleted &&
+            (await readFromKeychain(projectKey)) !== null
+          ) {
+            // `deleted:false` with no error is ambiguous between "entry was
+            // absent" and "backend refused without reporting" — a surviving
+            // entry serves the cleared pool on the next keychain-first load,
+            // so verify with a read rather than trusting the boolean.
+            log.error(
+              "keychain: account entry survived the clearAccounts delete; the cleared credentials remain reachable. Remove the keychain entry manually.",
+            );
           }
         }
 
