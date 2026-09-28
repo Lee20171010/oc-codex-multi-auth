@@ -77,6 +77,20 @@ function isContentBoundToEtag(content: string, etag: string | null): boolean {
 }
 
 /**
+ * Git-blob SHA-1 of a body — the same digest `raw.githubusercontent.com`
+ * publishes as the file's ETag. Recorded in the cache meta on every save so
+ * the offline disk-serve gate has something to hash-bind against even when
+ * the upstream response carried no usable etag (greptile P1 on PR #281).
+ */
+function computeGitBlobSha(content: string): string {
+	const payload = Buffer.from(content, "utf8");
+	return createHash("sha1")
+		.update(`blob ${payload.length}\0`)
+		.update(payload)
+		.digest("hex");
+}
+
+/**
  * One deadline and one controller cover request AND body: `fetch()` resolves
  * when headers arrive, so a signal scoped to `fetch` alone stops guarding
  * mid-body, and a timeout that only rejects the reader leaves the connection
@@ -127,6 +141,8 @@ interface CacheMeta {
 	lastFetch?: string; // Legacy field for backwards compatibility
 	lastChecked: number; // Timestamp for rate limit protection
 	sourceUrl?: string;
+	/** Git-blob SHA-1 of the cached body — hash-binds it for the offline gate. */
+	contentSha?: string;
 }
 
 interface CacheSnapshot {
@@ -233,6 +249,11 @@ async function saveDiskCache(
 		lastFetch: new Date().toISOString(),
 		lastChecked: Date.now(),
 		sourceUrl,
+		// Hash-bind the body about to be written: a successful response whose
+		// etag is absent or not a sha validator must still produce a cache the
+		// offline gate can verify, or a later outage dead-ends despite a valid
+		// earlier fetch (greptile P1 on PR #281).
+		contentSha: computeGitBlobSha(content),
 	};
 	await Promise.all([
 		writeFileAtomic(CACHE_FILE, content),
@@ -281,6 +302,7 @@ async function refreshPrompt(
 					lastFetch: cachedMeta?.lastFetch ?? new Date().toISOString(),
 					lastChecked: Date.now(),
 					sourceUrl,
+					contentSha: computeGitBlobSha(cachedContent),
 				};
 				memoryCache = { content: cachedContent, meta: refreshedMeta };
 				await mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
@@ -393,12 +415,19 @@ export async function getOpenCodeCodexPrompt(): Promise<string> {
 		}
 	}
 
-	// A disk body is servable offline only when the recorded etag hash-binds
-	// it — the same proof the 304 path requires. `isUsablePromptContent`
-	// alone checks plausibility, which is exactly what a same-UID planter
-	// produces; without the binding a failed fetch would open a 15-minute
-	// window that trusts planted bytes.
-	if (diskCache && isContentBoundToEtag(diskCache.content, diskCache.meta.etag)) {
+	// A disk body is servable offline only when a recorded digest hash-binds
+	// it — the same proof the 304 path requires. `contentSha` (written on
+	// every save) is the binding; `etag` covers entries written before the
+	// field existed. `isUsablePromptContent` alone checks plausibility,
+	// which is exactly what a same-UID planter produces; without the binding
+	// a failed fetch would open a 15-minute window that trusts planted bytes.
+	if (
+		diskCache &&
+		isContentBoundToEtag(
+			diskCache.content,
+			diskCache.meta.contentSha ?? diskCache.meta.etag,
+		)
+	) {
 		return diskCache.content;
 	}
 	throw new PromptError(

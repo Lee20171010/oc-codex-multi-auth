@@ -1036,6 +1036,54 @@ describe("Codex Prompts Module", () => {
 					).toBe(false);
 				});
 
+				it("serves a catalog-derived disk cache offline via its recorded contentSha", async () => {
+					// Catalog instructions persist with `etag: null` — there is no
+					// upstream validator for catalog-derived content. Without a
+					// recorded content hash the offline disk-serve gate could never
+					// accept that cache, so a restart + outage served bundled
+					// instructions instead of the cached model text (greptile P1
+					// on PR #281). Persisting `contentSha` on every write gives
+					// the gate something to hash-bind regardless of etag presence.
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+
+					const first = await getCodexInstructions("gpt-5.4");
+					expect(first).toContain("GPT54 CATALOG PROMPT");
+
+					const metaWrite = mockedWriteFileAtomic.mock.calls.find(([target]) =>
+						String(target).includes("catalog-gpt-5.4-instructions-meta.json"),
+					);
+					const bodyWrite = mockedWriteFileAtomic.mock.calls.find(
+						([target]) =>
+							String(target).includes("catalog-gpt-5.4-instructions.md") &&
+							!String(target).includes("meta"),
+					);
+					expect(metaWrite).toBeDefined();
+					expect(bodyWrite).toBeDefined();
+					const metaJson = String(metaWrite![1]);
+					const bodyContent = String(bodyWrite![1]);
+					const persisted = JSON.parse(metaJson) as {
+						etag: string | null;
+						contentSha?: string;
+					};
+					expect(persisted.etag).toBeNull();
+					expect(persisted.contentSha).toBe(gitBlobSha1(bodyContent));
+
+					// Simulate a restart: process caches cleared, upstream dead.
+					__clearCacheForTesting();
+					mockFetch.mockRejectedValue(new Error("offline"));
+					mockedReadFile.mockImplementation((filePath) =>
+						String(filePath).includes("meta")
+							? Promise.resolve(metaJson)
+							: Promise.resolve(bodyContent),
+					);
+
+					const second = await getCodexInstructions("gpt-5.4");
+					expect(second).toContain("GPT54 CATALOG PROMPT");
+				});
+
 				// Regression: slug-space and family-space overlap. gpt-5.4-nano has no
 				// catalog entry and lives in the `gpt-5.4` family, which IS a catalog
 				// slug. An un-namespaced cache key let them serve each other's

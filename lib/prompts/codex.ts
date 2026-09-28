@@ -114,6 +114,21 @@ function isUsableCacheTimestamp(lastChecked: unknown, now: number): lastChecked 
 }
 
 /**
+ * Git-blob SHA-1 of a body — the same digest `raw.githubusercontent.com`
+ * publishes as the file's ETag. Recorded in the cache meta on every persist
+ * so the offline disk-serve gate has something to hash-bind against even
+ * when the upstream response carried no usable etag (catalog-derived
+ * instructions, or a 200 with a non-sha validator).
+ */
+function computeGitBlobSha(content: string): string {
+	const payload = Buffer.from(content, "utf8");
+	return createHash("sha1")
+		.update(`blob ${payload.length}\0`)
+		.update(payload)
+		.digest("hex");
+}
+
+/**
  * `raw.githubusercontent.com` serves the git blob SHA as the ETag. When a 304
  * confirms the cached etag is still current, the disk body is only the real
  * upstream content if its git-blob hash (`sha1|sha256 "blob <len>\0<body>"`)
@@ -156,11 +171,20 @@ function parseCacheMetadata(metaContent: string, now: number): CacheMetadata | n
 	if (etag !== null && etag !== undefined && typeof etag !== "string") {
 		return null;
 	}
+	const contentSha = candidate.contentSha;
+	if (
+		contentSha !== null &&
+		contentSha !== undefined &&
+		typeof contentSha !== "string"
+	) {
+		return null;
+	}
 	return {
 		etag: etag ?? null,
 		tag: candidate.tag,
 		lastChecked: candidate.lastChecked,
 		url: candidate.url,
+		contentSha: contentSha ?? null,
 	};
 }
 
@@ -756,7 +780,10 @@ export async function getCodexInstructions(
 	// which a planted body is trusted (greptile P1 on PR #281).
 	const verifiedDiskContent =
 		usableDiskContent &&
-		isContentBoundToEtag(usableDiskContent, cachedMetadata?.etag ?? null)
+		isContentBoundToEtag(
+			usableDiskContent,
+			cachedMetadata?.contentSha ?? cachedMetadata?.etag ?? null,
+		)
 			? usableDiskContent
 			: null;
 
@@ -821,9 +848,17 @@ async function persistInstructions(
 	// system prompt, so it must not be world-readable or replaceable mid-read
 	// by a same-UID process racing the write.
 	await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
+	// `contentSha` hash-binds the body we are about to write so the offline
+	// disk-serve gate can verify it later even when `meta.etag` is null or a
+	// non-sha validator — without it a successful catalog fetch could never
+	// pass its own offline check (greptile P1 on PR #281).
+	const persistedMeta: CacheMetadata = {
+		...meta,
+		contentSha: computeGitBlobSha(instructions),
+	};
 	await Promise.all([
 		writeFileAtomic(source.cacheFile, instructions),
-		writeFileAtomic(source.cacheMetaFile, JSON.stringify(meta)),
+		writeFileAtomic(source.cacheMetaFile, JSON.stringify(persistedMeta)),
 	]);
 	setCacheEntry(source.key, { content: instructions, timestamp: Date.now() });
 	return instructions;
@@ -916,6 +951,7 @@ async function fetchAndPersistInstructions(
 						tag: latestTag,
 						lastChecked: Date.now(),
 						url: instructionsUrl,
+						contentSha: computeGitBlobSha(diskContent),
 					} satisfies CacheMetadata,
 				),
 			);

@@ -101,6 +101,55 @@ describe("opencode-codex", () => {
       expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
     });
 
+    it("serves a cache saved from an etag-less 200 offline via contentSha", async () => {
+      // A successful upstream response may carry no sha etag at all — the
+      // saved meta must still hash-bind the body or a later outage dead-ends
+      // in FETCH_AND_NO_CACHE despite a valid earlier fetch (greptile P1 on
+      // PR #281).
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      const body = padPrompt("Etagless upstream body");
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(body),
+        headers: new Map(),
+      });
+
+      const first = await getOpenCodeCodexPrompt();
+      expect(first).toContain("Etagless upstream body");
+
+      const metaWrite = vi
+        .mocked(writeFileAtomic)
+        .mock.calls.find(([target]) => String(target).includes("meta"));
+      expect(metaWrite).toBeDefined();
+      const metaJson = String(metaWrite![1]);
+      const persisted = JSON.parse(metaJson) as {
+        etag: string;
+        contentSha?: string;
+      };
+      expect(persisted.contentSha).toBe(
+        gitBlobEtag(body).replace(/"/g, ""),
+      );
+
+      // Restart with the upstream dead — the disk body must serve because
+      // contentSha binds it, not because an etag did.
+      vi.resetModules();
+      const { getOpenCodeCodexPrompt: getAgain } = await import(
+        "../lib/prompts/opencode-codex.js"
+      );
+      vi.mocked(readFile).mockImplementation((filePath) =>
+        String(filePath).includes("meta")
+          ? Promise.resolve(metaJson)
+          : Promise.resolve(body),
+      );
+      mockFetch.mockRejectedValue(new Error("offline"));
+
+      const second = await getAgain();
+      expect(second).toContain("Etagless upstream body");
+    });
+
     it("uses ETag for a conditional request and serves the hash-bound disk body on 304", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
