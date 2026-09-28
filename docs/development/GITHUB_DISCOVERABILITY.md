@@ -1,156 +1,54 @@
 # GitHub Discoverability Guide
 
-GitHub-facing audit and recommended presentation for `oc-codex-multi-auth`.
+How to present `oc-codex-multi-auth` on GitHub so developers searching for it actually find it. Meta-repo guidance — nothing here ships in the package.
 
----
+## Positioning
 
-## Product Summary
+- **What it is**: an OpenCode plugin for ChatGPT Plus/Pro OAuth, Codex/GPT-5 routing, multi-account rotation, account switching, health checks, quota status, diagnostics, and recovery tools.
+- **Who it is for**: individual OpenCode users who want ChatGPT OAuth-backed Codex workflows with visible local account state.
+- **What it is not**: a hosted auth service, shared multi-user credential pool, generic API-key tool, or a production path — that is the OpenAI Platform API.
 
-- Purpose: provide an OpenCode plugin for ChatGPT Plus/Pro OAuth, Codex/GPT-5 routing, multi-account rotation, account switching, health checks, quota status, diagnostics, recovery tooling, and TUI quota visibility
-- Target users: individual developers using OpenCode who want ChatGPT OAuth-backed Codex workflows, visible local account state, explicit account switching, health-aware account selection, redacted diagnostics, project-scoped account pools, and guided setup/recovery commands
-- Not the target: hosted auth services, commercial resale, shared multi-user credential pools, generic API-key users, or production workloads that should use the OpenAI Platform API
+## Search Terms
 
----
+Terms developers plausibly search: `opencode chatgpt oauth`, `opencode codex plugin`, `opencode multi account oauth`, `opencode chatgpt plus plugin`, `codex oauth opencode`, `opencode account switching`, `opencode quota status`, `opencode pkce oauth`, `gpt 5 codex opencode`, `opencode recovery tools`.
 
-## Natural Search Terms
+Use them naturally in the README intro, feature list, docs landing pages, package keywords, and GitHub topics — do not stuff every heading.
 
-Developers looking for a tool like this are likely to search for:
+## Recommended Metadata
 
-- opencode chatgpt oauth
-- opencode codex plugin
-- opencode gpt 5 plugin
-- opencode multi account oauth
-- opencode chatgpt plus plugin
-- codex oauth opencode
-- openai codex opencode
-- opencode account switching
-- opencode quota status
-- codex health checks opencode
-- opencode diagnostics plugin
-- opencode recovery tools
-- chatgpt plus codex routing
-- gpt 5 codex opencode
-- opencode pkce oauth
+- **Repo description**: `OpenCode plugin for ChatGPT Plus/Pro OAuth with Codex/GPT-5 routing, multi-account rotation, account switching, health checks, diagnostics, and recovery tools`
+- **README H1**: `oc-codex-multi-auth: ChatGPT OAuth and multi-account Codex routing for OpenCode`
+- **Topics** (≤20): `opencode`, `opencode-plugin`, `codex`, `gpt-5`, `openai`, `chatgpt`, `chatgpt-plus`, `oauth`, `oauth2`, `pkce`, `multi-account`, `account-switching`, `account-health`, `quota-management`, `diagnostics`, `recovery-tools`, `terminal-ui`, `typescript`, `nodejs`
+- **Badges**: npm version, npm downloads, CI status, license. Skip vanity badges.
 
-These terms belong naturally in the README intro, feature list, docs landing pages, package keywords, and GitHub topics. They should not be stuffed into every heading.
+`test/doc-parity.test.ts` pins `package.json` `description` and the `keywords` set (`opencode-plugin`, `codex-oauth`, `account-switching`, `account-health`, `quota-management`, `diagnostics`, `recovery-tools`), so drift there fails the suite.
 
----
+## Wording Rules
 
-## Recommended Repository Description
-
-Use this as the GitHub repository description:
-
-`OpenCode plugin for ChatGPT Plus/Pro OAuth with Codex/GPT-5 routing, multi-account rotation, account switching, health checks, diagnostics, and recovery tools`
-
-## Recommended README Title
-
-Use a descriptive H1 rather than a bare package name when possible:
-
-`oc-codex-multi-auth: ChatGPT OAuth and multi-account Codex routing for OpenCode`
-
----
-
-## Recommended Topics
-
-GitHub allows up to 20 topics. Recommended set:
-
-- opencode
-- opencode-plugin
-- codex
-- gpt-5
-- openai
-- chatgpt
-- chatgpt-plus
-- chatgpt-pro
-- oauth
-- oauth2
-- pkce
-- multi-account
-- account-switching
-- account-health
-- quota-management
-- diagnostics
-- recovery-tools
-- terminal-ui
-- typescript
-- nodejs
-
----
-
-## Suggested Badges
-
-Useful badges:
-
-- npm version
-- npm downloads
-- CI status
-- license
-
-Avoid vanity badges unless they add real trust or decision value.
-
----
-
-## Social Preview Concept
-
-Use a clean terminal-first image with:
-
-- project name: `oc-codex-multi-auth`
-- tagline: `ChatGPT OAuth and multi-account Codex routing for OpenCode`
-- a simple visual of `npx oc-codex-multi-auth -> opencode auth login -> codex-status -> codex-switch`
-- terminal/OpenCode styling rather than abstract marketing graphics
-
-The image should immediately communicate:
-
-- this is an OpenCode plugin
-- it uses ChatGPT Plus/Pro OAuth
-- it enables Codex/GPT-5 workflows
-- it gives users visible multi-account management and recovery tools
-
----
-
-## High-Confidence Wording Rules
-
-- First paragraph: say what it is, who it is for, and how it relates to OpenCode and ChatGPT OAuth.
-- Feature bullets: lead with outcomes such as account switching, health checks, recovery, diagnostics, quota visibility, and Codex/GPT-5 routing.
-- Metadata: keep package keywords and GitHub topics aligned with natural search terms.
-- Trust: explain local-only storage, redacted diagnostics, keychain opt-in, independent/non-official status, and OpenAI Platform API boundary.
-- Do not claim guaranteed GitHub ranking. The repo can improve relevance and click confidence, not control search placement.
-
----
-
-## What Makes A Developer Star The Repo
-
-- They understand the value in one screen: OpenCode can use ChatGPT OAuth-backed Codex workflows with visible multi-account management.
-- Install and first login are short and credible.
-- The docs explain `store: false`, `reasoning.encrypted_content`, and why stateless request handling matters.
-- Recovery commands are visible before a user needs them.
-- The project sounds honest about what it is and what it is not.
-
----
-
-## What Makes A Developer Leave The Repo
-
-- The README reads like a model catalog before it explains the product.
-- OpenCode plugin entry, installer, TUI plugin, and `codex-*` tools are blurred together.
-- Stale package names or release versions make the repo look abandoned.
-- The GitHub homepage points to an old package name.
-- Safety/trust language is missing or sounds like a hosted auth service.
-
----
+- First paragraph: what it is, who it is for, how it relates to OpenCode and ChatGPT OAuth.
+- Feature bullets lead with outcomes: account switching, health checks, quota visibility, diagnostics, recovery, Codex/GPT-5 routing.
+- Trust signals: local-only storage, redacted diagnostics, keychain opt-in, independent/non-official status, OpenAI Platform API boundary.
+- Explain `store: false` + `reasoning.encrypted_content` (stateless requests) — it is the detail that convinces technical readers the plugin is real.
+- Do not claim GitHub ranking. Relevance and click confidence are improvable; placement is not.
 
 ## Surfaces To Keep Aligned
 
-When the product summary or positioning changes, update all of these together so
-the repo does not present three different descriptions of itself:
+When positioning changes, update all of these together so the repo does not present different descriptions of itself:
 
-- `README.md`: H1, intro paragraph, feature bullets
-- `package.json`: `description` and `keywords`
-- `.codex-plugin/plugin.json`: `description`
-- GitHub repository **About** text and topics (set in the GitHub UI)
-- `AGENTS.md` and `lib/AGENTS.md`: overview paragraphs
-- `docs/README.md`, `docs/index.md`, `docs/DOCUMENTATION.md`
-- `docs/architecture.md` and `docs/development/ARCHITECTURE.md`
-- `docs/_config.yml`: docs site title/description
+| Surface | What to update |
+| --- | --- |
+| `README.md` | H1, intro paragraph, feature bullets |
+| `package.json` | `description`, `keywords` |
+| `.codex-plugin/plugin.json` | `description` |
+| GitHub About | description + topics (set in the GitHub UI) |
+| `AGENTS.md`, `lib/AGENTS.md` | overview paragraphs |
+| `docs/README.md`, `docs/index.md`, `docs/DOCUMENTATION.md` | portal copy |
+| `docs/architecture.md`, `docs/development/ARCHITECTURE.md` | architecture summaries |
+| `docs/_config.yml` | docs site title/description |
 
-`test/doc-parity.test.ts` pins the package description and keyword set against
-`package.json`, so a drift there fails the suite.
+## What Loses A Developer
+
+- README reads like a model catalog before it explains the product.
+- Plugin entry, installer, TUI plugin, and `codex-*` tools blurred together.
+- Stale package names or release versions — signals an abandoned repo.
+- Safety language missing or sounding like a hosted credential service.

@@ -1,29 +1,26 @@
 # Documentation
 
-This documentation set is split by purpose so the main README can stay focused on discovery, value, and quick onboarding for OpenCode ChatGPT OAuth/Codex workflows.
+## User guides
 
-## Start Here
+- [Getting Started](getting-started.md) — install, login methods, first prompt
+- [Tools and CLI](tools-and-cli.md) — all 24 `codex-*` tools and the standalone commands
+- [Configuration](configuration.md) — plugin config keys and environment variables
+- [Plan Allotments](plan-allotments.md) — how plan weights shape the pool quota total
+- [Troubleshooting](troubleshooting.md) — symptom-by-symptom fixes
+- [FAQ](faq.md) — short answers
+- [Privacy](privacy.md) — what is stored and where
+- [Architecture](architecture.md) — how the pieces fit together
 
-- [Getting Started](getting-started.md): full install, auth, configuration templates, model selectors, and first-run verification
-- [Tools and CLI](tools-and-cli.md): complete catalog of 24 `codex-*` tools and standalone bin commands
-- [Architecture Overview](architecture.md): public map of the installer, OpenCode plugin entry, TUI plugin, tool registry, request pipeline, rotation, and storage model
-- [Configuration Reference](configuration.md): config keys, environment variables, fallback behavior, and file locations
-- [Plan Allotments](plan-allotments.md): what each ChatGPT plan is worth relative to a 1x seat, and how the pool-wide quota total is weighted
-- [Troubleshooting](troubleshooting.md): common failure modes and recovery steps
-- [FAQ](faq.md): short answers for common questions
-- [Privacy & Data Handling](privacy.md): what is stored locally, what is sent upstream, and how to delete it
-
-## Maintainer and Architecture Docs
+## Maintainer guides
 
 - [Architecture](development/ARCHITECTURE.md)
-- [GitHub Discoverability](development/GITHUB_DISCOVERABILITY.md)
-- [Configuration Flow](development/CONFIG_FLOW.md)
-- [Configuration Fields](development/CONFIG_FIELDS.md)
-- [Testing Guide](development/TESTING.md)
+- [Configuration Flow](development/CONFIG_FLOW.md) / [Fields](development/CONFIG_FIELDS.md)
+- [Testing](development/TESTING.md)
 - [TUI Parity Checklist](development/TUI_PARITY_CHECKLIST.md)
+- [GitHub Discoverability](development/GITHUB_DISCOVERABILITY.md)
 
-## Notes
+## Elsewhere
 
-- The root [README](../README.md) is the landing page and 60-second start.
-- Use [CHANGELOG.md](../CHANGELOG.md) for release history instead of treating the README as a release log.
-- The docs in this folder are the canonical public docs surface for the repository.
+- [README](../README.md) — the landing page and 60-second start
+- [DOCUMENTATION.md](DOCUMENTATION.md) — full docs map
+- [CHANGELOG](../CHANGELOG.md) — release history

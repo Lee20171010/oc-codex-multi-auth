@@ -1,28 +1,29 @@
 # oc-codex-multi-auth Docs
 
-Use your ChatGPT Plus/Pro subscription inside OpenCode with OAuth login, Codex/GPT-5/GPT-6 model routing (including GPT-6 Astra and GPT-5.6), multi-account rotation, account switching, health checks, quota status, diagnostics, and recovery tools.
+Use your ChatGPT Plus/Pro subscription inside OpenCode: OAuth login,
+Codex/GPT-5/GPT-6 routing, multi-account rotation, quota status, and recovery
+tools.
 
-## User Guides
+## User guides
 
 - [Getting Started](getting-started.md)
 - [Tools and CLI](tools-and-cli.md)
-- [Configuration Reference](configuration.md)
+- [Configuration](configuration.md)
 - [Plan Allotments](plan-allotments.md)
 - [Troubleshooting](troubleshooting.md)
 - [FAQ](faq.md)
-- [Privacy & Data Handling](privacy.md)
-- [Architecture Overview](architecture.md)
+- [Privacy](privacy.md)
+- [Architecture](architecture.md)
 
-## Maintainer Guides
+## Maintainer guides
 
 - [Architecture](development/ARCHITECTURE.md)
-- [GitHub Discoverability](development/GITHUB_DISCOVERABILITY.md)
-- [Configuration Flow](development/CONFIG_FLOW.md)
-- [Configuration Fields](development/CONFIG_FIELDS.md)
-- [Testing Guide](development/TESTING.md)
+- [Configuration Flow](development/CONFIG_FLOW.md) / [Fields](development/CONFIG_FIELDS.md)
+- [Testing](development/TESTING.md)
 - [TUI Parity Checklist](development/TUI_PARITY_CHECKLIST.md)
+- [GitHub Discoverability](development/GITHUB_DISCOVERABILITY.md)
 
-## Repository Links
+## Repository links
 
 - [README](../README.md)
 - [Changelog](../CHANGELOG.md)

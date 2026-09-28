@@ -1,68 +1,68 @@
 # LIB KNOWLEDGE BASE
 
-## OVERVIEW
-
-Core plugin logic for authentication, request routing, account management, storage, model/prompt mapping, diagnostics, UI helpers, and TUI quota status support.
+Core plugin logic: auth, request pipeline, accounts/rotation, storage,
+prompts/model catalog, quota + TUI support, tools, terminal UI.
 
 ## STRUCTURE
 
 ```text
 lib/
-├── account-display.ts      # shared account identity rendering + maskEmail privacy behavior
-├── accounts.ts             # account manager facade, storage orchestration, health scoring helpers
-├── accounts/               # state, persistence, rotation, recovery, rate limits, warm requests, stale-state repair, pool identity
-├── auth/                   # OAuth PKCE, callback server, browser/device/manual login, scopes, plan tier, token claims
-├── auto-update-checker.ts  # npm version check and OpenCode cache refresh notification
+├── accounts.ts             # AccountManager facade composing the accounts/ services; keeps the pre-split public API
+├── accounts/               # state (registry + per-family cursors), persistence (debounced saves), rotation, rate-limits, recovery (auth-failure tracking + ~/.codex hydration), stale-state, pool-identity, warm + warm-request + warm-recovery
+├── auth/                   # auth (PKCE + token exchange), server (port-1455 callback), loopback-flow (listener-first shared session), device-code, login-runner (headless login), browser, scopes, plan-tier, token-utils (JWT claims)
+├── prompts/                # codex (model families + prompt-template fetch/ETag cache), codex-instructions (bundled offline fallback), opencode-codex, codex-opencode-bridge
+├── request/                # request-transformer (URL/body), fetch-helpers (headers, error mapping, refresh), response-handler (SSE→JSON, empty-response, stall timeout), retry-budget, rate-limit-backoff
+│   └── helpers/            # model-map, responses-lite, client-identity, user-agent, input-utils, tool-utils, effort-suffix
+├── storage.ts              # facade barrel re-exporting lib/storage/ (pre-split import surface)
+├── storage/                # paths, state (storage scope + path switching), load-save, migrations (V1→V3; V2 throws UNKNOWN_V2_FORMAT), normalize, identity (dedup/merge), atomic-write (0600 temp → fsync → rename → dir fsync), keychain (opt-in), backup, export-import, credential-snapshots, flagged, transaction-lock, worktree-lock, coordinated-refresh (cross-process token rotation), test-home-guard, errors
+├── recovery.ts             # facade barrel re-exporting lib/recovery/
+├── recovery/               # hook (auto-resume/repair engine), storage, constants, types
+├── opencode-v2.ts          # V2 adapter: auth methods, provider/model reroute, aisdk hooks, tool bridge, RPC, storage scope
+├── opencode-v2-provider.ts # distinct aisdk: package identity; re-exports createOpenAI from @ai-sdk/openai
+├── opencode-v2-rpc.ts      # CodexStatusRpc RPC definition (status method)
+├── opencode-v2-status.ts   # plugin-side quota/accounts formatting for the status RPC
+├── opencode-v2-tui.ts      # V2 TUI slots: status line, accounts sidebar, palette + /codex-accounts commands
+├── tools/                  # index (ToolContext + registry), args (shared arg constants), doctor-repair, refresh-account + 24 `codex-*` factories — see lib/tools/AGENTS.md
+├── ui/                     # ansi, auth-menu, beginner, confirm, format, runtime, select, theme — terminal UI
+├── types/                  # dependency type shims (napi-rs-keyring.d.ts)
+├── account-display.ts      # account identity rendering + maskEmail privacy
+├── auto-update-checker.ts  # npm latest-version check → cache refresh notice
 ├── circuit-breaker.ts      # failure isolation
 ├── cli.ts                  # auth/login CLI prompt helpers
-├── codex-reset.ts          # banked rate-limit reset credit client (list + redeem)
-├── codex-usage.ts          # usage/quota endpoint helpers for TUI status
-├── config.ts               # plugin config parsing and env overrides
+├── codex-reset.ts          # banked rate-limit reset-credit client (list + redeem)
+├── codex-usage.ts          # /wham/usage endpoint helpers (quota windows, reset-credit counts)
+├── config.ts               # plugin config parsing, env overrides, stat-gated config cache, resolveAccountIdOverride
 ├── constants.ts            # URLs, provider ids, limits, labels
-├── context-overflow.ts     # context length error handling
-├── desktop-notifications.ts # macOS Notification Center delivery via osascript
-├── error-sentinels.ts      # structured special-case errors
-├── errors.ts               # custom error types
-├── health.ts               # account health status
-├── logger.ts               # debug/request logging
-├── oauth-constants.ts      # OAuth port/path constants
-├── oauth-success.ts        # OAuth success HTML source copied during build
-├── opencode-v2.ts          # OpenCode V2 adapter: auth methods, provider/model reroute, aisdk hooks, tool bridge, RPC, storage scope
-├── opencode-v2-provider.ts # distinct `aisdk:` package identity re-exporting `@ai-sdk/openai` createOpenAI
-├── opencode-v2-rpc.ts      # `CodexStatusRpc` RPC definition shared by adapter and V2 TUI
-├── opencode-v2-status.ts   # server-side quota/accounts formatting for the V2 status RPC
-├── opencode-v2-tui.ts      # V2 TUI slots: status line, accounts sidebar, `/codex-accounts` + quota-details commands
-├── parallel-probe.ts       # parallel account probes, first success wins
-├── plan-allotment.ts       # ChatGPT plan_type -> allotment weight/multiplier/price
+├── context-overflow.ts     # "prompt too long" → synthetic SSE advising /compact
+├── desktop-notifications.ts # macOS Notification Center via osascript
+├── error-sentinels.ts      # structured sentinel errors (rotation/cooldown contract)
+├── errors.ts               # typed error hierarchy (CodexError, RequestError, …)
+├── health.ts               # account health status types
+├── logger.ts               # debug/request logging (env-gated)
+├── oauth-constants.ts      # port 1455, callback path, bind hosts
+├── oauth-success.ts        # OAuth callback success HTML renderer
+├── parallel-probe.ts       # candidate ranking + concurrent probes; first success wins, losers aborted
+├── plan-allotment.ts       # plan_type → allotment weight/multiplier/price
 ├── plugin-origin.ts        # published-package vs checkout detection + origin history file
-├── proactive-refresh.ts    # token refresh before expiry
-├── prompts/                # Codex/OpenCode prompts and ETag caches
+├── proactive-refresh.ts    # refresh tokens before expiry (tokenRefreshSkewMs)
 ├── quota-capacity.ts       # governing-window selection + plan-weighted pool headroom
-├── quota-display.ts        # free/used wording for every human-readable quota percentage
+├── quota-display.ts        # shared free/used percentage wording
 ├── quota-notification-state.ts # cross-process threshold/delivery state file
-├── quota-notifications.ts  # aggregate quota poller and threshold transitions
-├── quota-overview.ts       # pure pool-wide status line formatting + weighted total
-├── quota-recovery.ts       # chronological quota-recovery simulation for the resets/recovery forecast
-├── quota-windows.ts        # leaf parser for `x-codex-primary-*` / `x-codex-secondary-*` response headers
-├── recovery.ts             # recovery barrel / compatibility entry
-├── recovery/               # session recovery hook, storage, constants, types
-├── refresh-queue.ts        # queued token refresh (race prevention)
-├── request/                # URL/body/header transforms, SSE, retry budget, backoff
-├── rotation.ts             # shared rotation utilities
-├── runtime.ts              # pure runtime helpers and metrics/explainability types
-├── schemas.ts              # Zod schemas
-├── shutdown.ts             # graceful shutdown
-├── storage.ts              # barrel re-exporting lib/storage/ (V3 JSON account storage)
-├── storage/                # atomic writes, paths, migrations, keychain, backup/import/export, flagged accounts, transaction/worktree locks, coordinated refresh
-├── table-formatter.ts      # CLI table formatting
-├── tools/                  # 24 codex-* tool factories + registry
-├── tui-quota-cache.ts      # shared quota snapshot cache (active account + pool overview)
-├── tui-quota-overview.ts   # pool-wide quota gathering, caching, and live-account merge
-├── tui-status-slot.ts      # Yoga flex-shrink guard so the host cannot ellipsize the budgeted status slot
+├── quota-notifications.ts  # quota poller + threshold transitions
+├── quota-overview.ts       # pure pool-wide status-line formatter
+├── quota-recovery.ts       # reset simulation for recovery forecasts
+├── quota-windows.ts        # x-codex-primary/secondary-* header parser
+├── refresh-queue.ts        # serializes concurrent token refreshes
+├── rotation.ts             # health-score + token-bucket trackers, rotation strategy
+├── runtime.ts              # closure-free helpers, metrics + explainability types
+├── schemas.ts              # Zod schemas — single source of truth for data shapes
+├── shutdown.ts             # graceful-shutdown registry
+├── table-formatter.ts      # ASCII tables for CLI output
+├── tui-quota-cache.ts      # shared quota snapshot cache (active account + pool)
+├── tui-quota-overview.ts   # pool gathering/caching + live-account merge for the status line
 ├── tui-status.ts           # prompt quota status formatting
-├── types.ts                # TypeScript interfaces
-├── types/                  # dependency type shims
-├── ui/                     # terminal UI formatting, menus, theme, select/confirm
+├── tui-status-slot.ts      # Yoga flex-shrink guard for the status slot
+├── types.ts                # shared TypeScript types (inferred from schemas)
 └── utils.ts                # shared utilities
 ```
 
@@ -71,76 +71,61 @@ lib/
 | Task | Location | Notes |
 | --- | --- | --- |
 | Token exchange/refresh | `auth/auth.ts` | PKCE flow, JWT decode, skew window |
-| Device/manual login | `auth/device-code.ts`, `auth/login-runner.ts` | headless login, workspace/account persistence |
-| OAuth scopes | `auth/scopes.ts` | connector scope checks |
-| Browser launch | `auth/browser.ts` | platform-specific open |
-| Callback server | `auth/server.ts` | HTTP on port 1455 |
-| Browser/manual OAuth lifecycle | `auth/loopback-flow.ts` | listener-first shared session, opener handling, callback exchange, close-once cleanup |
-| Token claims / account ids | `auth/token-utils.ts` | JWT decode, `chatgpt_account_id` / `chatgpt_account_user_id` / organization extraction |
-| Subscription name | `auth/plan-tier.ts` | `chatgpt_plan_type` claim -> OpenAI plan label (`team` is Business, `self_serve_business_prolite` is Business Premium) |
-| OpenCode V2 adapter | `opencode-v2.ts`, `opencode-v2-provider.ts` | V2 `setup` entry; reuses the shared V1 runtime factory, re-points `openai` provider/models at a distinct `aisdk:` package identity, installs `sdk`/`language` hooks that enforce `store: false` + `reasoning.encrypted_content` on the wire, bridges `codex-*` tools through `tool.transform`, per-location `createStorageScope` |
-| V2 status RPC | `opencode-v2-rpc.ts`, `opencode-v2-status.ts` | `CodexStatusRpc.status` formats quota/account data on the plugin side so remote TUIs never need credentials; pool overview re-fetches on a 5-minute cadence gated on last attempt, not last success |
-| V2 TUI surface | `opencode-v2-tui.ts` | three `ui.slot`s (app poller, `prompt.footer.status`, `sidebar.content`), `codex.quota.details` + `codex.accounts` palette commands, `/codex-accounts` slash command |
-| Plugin origin | `plugin-origin.ts` | detects published-package vs checkout installs and appends sightings to `oc-codex-multi-auth-origin.json` under a short proper-lockfile lease; shared name with the installer |
-| URL/body transform | `request/request-transformer.ts` | model map, prompt injection, stateless compatibility |
-| Headers + errors | `request/fetch-helpers.ts` | Codex headers, rate limit handling, fallback, refresh |
-| Retry budgets | `request/retry-budget.ts` | bounded retry classes |
-| Rate limit backoff | `request/rate-limit-backoff.ts` | exponential + jitter |
-| SSE parsing | `request/response-handler.ts` | `response.done` extraction and empty responses |
-| Model family detection | `prompts/codex.ts` | GPT-5.x and Codex variants |
-| Bridge prompts | `prompts/codex-opencode-bridge.ts` | legacy OpenCode-to-Codex tool remapping instructions |
-| Account selection | `accounts/rotation.ts`, `rotation.ts` | hybrid health + token bucket |
-| Account rate limits | `accounts/rate-limits.ts` | per-account tracking |
-| Account persistence | `accounts/persistence.ts`, `accounts/state.ts` | account manager state and save/load coordination |
-| Model-pool identities | `accounts/pool-identity.ts` | stable pool keys for personal accounts and Business seats (`seat:` prefix) |
-| Stale-state repair | `accounts/stale-state.ts`, `tools/doctor-repair.ts` | clears leftover cooldowns/rate-limit stamps after a verified refresh (`codex-doctor fix` / CLI `doctor --fix`) |
-| Warm requests | `accounts/warm.ts`, `accounts/warm-request.ts`, `accounts/warm-recovery.ts` | minimal requests that open usage windows plus a post-warm `/wham/usage` re-check |
-| Storage format | `storage.ts`, `storage/load-save.ts` | V3, with V1 migrated to V3 on load |
-| Storage paths | `storage/paths.ts` | project root detection |
-| Storage keychain | `storage/keychain.ts` | optional native keychain backend |
-| Storage migrations | `storage/migrations.ts` | V1 → V3 upgrade; V2 files throw a StorageError with code UNKNOWN_V2_FORMAT |
-| Backups/import/export | `storage/backup.ts`, `storage/export-import.ts` | timestamped backups and dry-run import preview |
-| Credential snapshots | `storage/credential-snapshots.ts` | pre-write copy of the previous account store, denylist significance check, prefix-scoped retention |
-| Test-home write guard | `storage/test-home-guard.ts` | refuses storage writes inside the real home during a vitest run |
-| Transaction lease | `storage/transaction-lock.ts`, `storage/state.ts` | every mutation runs under the process mutex plus a `proper-lockfile` lease on `<storage>.transaction.lock` |
-| Refresh coordination | `storage/coordinated-refresh.ts` | single-use refresh-token exchange serialized across processes under a separate `<storage>.refresh.lock` |
-| Worktree collisions | `storage/worktree-lock.ts` | advisory detection of other live processes on the same account file; never blocks |
-| Flagged accounts | `storage/flagged.ts` | deactivated/flagged metadata beside the active accounts file (V1-only schema) |
-| Storage normalization | `storage/normalize.ts` | schema checks, forward-compat guard, V2 payload detection |
-| Tool registry | `tools/index.ts` | `ToolContext`, `createToolRegistry` |
-| TUI quota status | `tui-status.ts`, `tui-quota-cache.ts`, `codex-usage.ts` | prompt quota display and usage cache |
-| Status slot flex guard | `tui-status-slot.ts` | captures/restores the Yoga flex-shrink on the exclusive host wrapper so a budgeted forecast is not ellipsized |
-| Quota percentage wording | `quota-display.ts` | `quotaDisplay` free/used rendering shared by the TUI, `codex-limits`, the standalone CLI, and notifications; presentation only, so exhaustion and tone stay on the remaining percentage |
-| Pool-wide status line | `quota-overview.ts`, `tui-quota-overview.ts` | `quotaStatus.mode` `overview` / `resets` renders every account on one constant line; `quota-overview.ts` is a pure formatter (ordering, `accounts`/`aggregate`/`count` layouts, degradation ladder, reset-credit line), `tui-quota-overview.ts` gathers/caches the pool and merges the request path's live reading of the serving account |
-| Plan allotments | `plan-allotment.ts` | `plan_type` -> weight/multiplier/price, used to weight the pool total and to render `5x` badges; see `docs/plan-allotments.md` |
-| Quota response headers | `quota-windows.ts` | leaf parser for `x-codex-primary-*` / `x-codex-secondary-*` headers; shared by the request path and the TUI cache |
-| Pool headroom | `quota-capacity.ts` | governing-window selection per account and plan-weighted pool total |
-| Quota recovery forecast | `quota-recovery.ts` | telescoped reset simulation feeding `quotaStatus.recovery` and the `resets` screen |
-| Error types | `errors.ts`, `error-sentinels.ts` | StorageError and structured sentinel errors |
-| Health monitoring | `health.ts` | account health status |
-| Account display / masking | `account-display.ts` | label-preferred rendering, `maskEmail` behavior |
-| Reset credits | `codex-reset.ts`, `codex-usage.ts` | banked rate-limit reset credit list/redeem; `codex-usage.ts` reads the same counts off the usage endpoint for `codex-limits`, sharing `normalizeResetCreditCount` so both agree |
-| Parallel probes | `parallel-probe.ts` | races probe requests across candidate accounts, first success wins, losing probes aborted |
-| Runtime helpers | `runtime.ts` | routing visibility, metrics, pure helper types |
-| Graceful shutdown | `shutdown.ts` | cleanup on exit |
-| Table formatting | `table-formatter.ts` | CLI output tables |
-| Shared utilities | `utils.ts` | common helpers |
+| Callback server | `auth/server.ts` | binds `127.0.0.1:1455` + `[::1]:1455`; IPv6 failure tolerated |
+| Browser/manual OAuth lifecycle | `auth/loopback-flow.ts` | listener bound before any browser open; one close-once session shared by automatic + manual flows |
+| Device/manual login | `auth/device-code.ts`, `auth/login-runner.ts` | headless paths; login-runner validates env input through schemas (e.g. `CODEX_AUTH_ACCOUNT_ID` via `resolveAccountIdOverride` in `config.ts`) |
+| Scopes / plan / claims | `auth/scopes.ts`, `auth/plan-tier.ts`, `auth/token-utils.ts` | required scopes; `chatgpt_plan_type` → plan label; `chatgpt_account_*` claim extraction |
+| Account selection | `accounts/rotation.ts`, `rotation.ts` | `rotationStrategy` hybrid (default)/sticky/round-robin; health score + token bucket |
+| Account persistence/state | `accounts/persistence.ts`, `accounts/state.ts` | debounced saves + shutdown flush; in-memory registry + cursors |
+| Auth-failure recovery + hydration | `accounts/recovery.ts` | per-token failure counters; hydrates from Codex CLI `~/.codex/accounts.json` |
+| Model-pool identities | `accounts/pool-identity.ts` | stable pool keys; Business seats use `seat:` prefix |
+| Stale-state repair | `accounts/stale-state.ts`, `tools/doctor-repair.ts` | clears leftover cooldowns/rate-limit stamps after verified refresh (`codex-doctor --fix`) |
+| Warm requests | `accounts/warm.ts`, `accounts/warm-request.ts`, `accounts/warm-recovery.ts` | minimal request opens the usage window; post-warm `/wham/usage` re-check |
+| URL/body transform | `request/request-transformer.ts` | model normalization, prompt injection, stateless compatibility |
+| Headers + errors | `request/fetch-helpers.ts` | Codex headers, rate-limit handling, fallback, refresh |
+| SSE parsing | `request/response-handler.ts` | `convertSseToJson`, `isEmptyResponse`; 10 MB cap + stall timeout |
+| Retry/backoff | `request/retry-budget.ts`, `request/rate-limit-backoff.ts` | bounded retry classes; exponential + jitter |
+| Model map | `request/helpers/model-map.ts` | config IDs → API model names incl. retired + Daybreak/cyber routes |
+| Responses-lite + client identity | `request/helpers/responses-lite.ts`, `client-identity.ts`, `user-agent.ts` | lite reshape for catalog `use_responses_lite` models; `opencode` vs `codex_cli_rs` identity + UA |
+| Storage format | `storage/load-save.ts`, `storage/migrations.ts`, `storage/normalize.ts` | V3 current; V1 migrates on load; V2 payload throws `UNKNOWN_V2_FORMAT` |
+| Storage paths + scope | `storage/paths.ts`, `storage/state.ts` | project-root detection; `createStorageScope` for per-location isolation (V2) |
+| Atomic writes | `storage/atomic-write.ts` | 0600 temp → fsync(fd) → rename → fsync(dir) |
+| Cross-process refresh | `storage/coordinated-refresh.ts` | single-use refresh-token exchange serialized under a separate refresh lock; rotations propagate to sibling writers |
+| Locks | `storage/transaction-lock.ts`, `storage/worktree-lock.ts` | proper-lockfile lease on every mutation; advisory worktree-collision detection (never blocks) |
+| Keychain | `storage/keychain.ts` | opt-in (`CODEX_KEYCHAIN=1`); keychain holds the authoritative V3 blob when on; any keychain failure falls back to the JSON path — credentials are never silently lost |
+| Dedup/merge | `storage/identity.ts` | identity-key hierarchy (org + account + user ids, then refreshToken) |
+| Flagged accounts | `storage/flagged.ts` | deactivated metadata beside the accounts file; keychain-aware, JSON fallback on lock failure |
+| Backups/import/export | `storage/backup.ts`, `storage/export-import.ts`, `storage/credential-snapshots.ts` | timestamped backups, dry-run import preview, pre-write snapshots with prefix-scoped retention |
+| Test-home write guard | `storage/test-home-guard.ts` | refuses storage writes inside the real home during vitest |
+| Model families + prompts | `prompts/codex.ts` | `MODEL_FAMILIES`, template fetch/ETag cache, `instructions_template` rendering |
+| Prompt fallback | `prompts/codex-instructions.ts` | `BUNDLED_CODEX_INSTRUCTIONS` — last resort when fetch fails with no cache |
+| Bridge prompts | `prompts/codex-opencode-bridge.ts` | legacy OpenCode→Codex tool remapping instructions |
+| Config + env | `config.ts`, `schemas.ts` | stat-gated config cache (re-parse only when the file changes); env wins over file; bool env truthy only `"1"` |
+| OpenCode V2 | `opencode-v2*.ts` | see root AGENTS.md → OPENCODE V2; `missingV2SdkSurface` guards SDK drift |
+| Health / probes | `health.ts`, `parallel-probe.ts` | health status; concurrent probes across candidates, first success wins |
+| TUI quota status | `tui-status.ts`, `tui-quota-cache.ts`, `tui-quota-overview.ts`, `tui-status-slot.ts`, `codex-usage.ts` | status line, shared cache, pool merge, flex guard, usage endpoint |
+| Quota math | `quota-capacity.ts`, `quota-overview.ts`, `quota-recovery.ts`, `quota-windows.ts`, `quota-display.ts`, `quota-notifications.ts`, `quota-notification-state.ts`, `plan-allotment.ts` | header parsing → weighted pool totals → status line + notifications; `docs/plan-allotments.md` |
+| Tools | `tools/index.ts` | `ToolContext`, `createToolRegistry` — see lib/tools/AGENTS.md |
+| Errors | `errors.ts`, `error-sentinels.ts` | typed hierarchy; sentinels drive rotation/cooldown decisions |
+| Terminal UI | `ui/` | ANSI/theme/format/select/confirm/auth-menu/beginner checklists/runtime |
+| Misc | `account-display.ts`, `auto-update-checker.ts`, `circuit-breaker.ts`, `cli.ts`, `codex-reset.ts`, `context-overflow.ts`, `desktop-notifications.ts`, `plugin-origin.ts`, `proactive-refresh.ts`, `refresh-queue.ts`, `runtime.ts`, `shutdown.ts`, `table-formatter.ts`, `utils.ts` | see tree comments |
 
 ## CONVENTIONS
 
-- Internal code imports focused modules directly; there is no lib-wide barrel.
-- Model families are defined in `prompts/codex.ts` through `MODEL_FAMILIES` and helper functions.
-- Account health uses a 0-100 score, decrements on failure, and recovers on success/passive recovery paths.
-- Token bucket tracking is per account and helps avoid known rate-limit windows.
-- StorageError preserves original stack traces via `cause`.
-- Request defaults preserve `store: false` and `reasoning.encrypted_content` for ChatGPT-backed Codex compatibility.
-- Tool modules receive shared state through `ToolContext`, not through module-level mutable singletons.
+- Import the focused module, not a barrel — the former lib-wide barrel was deleted. The three remaining facades (`accounts.ts`, `storage.ts`, `recovery.ts`) exist only to keep the pre-split import surface stable.
+- Internal imports carry `.js` specifiers so `tsc` output resolves under Node ESM.
+- `schemas.ts` is the source of truth for data shapes; `types.ts` re-exports inferred types.
+- Account health is a 0–100 score: decremented on failure, recovered on success/passive paths; token-bucket state avoids known rate-limit windows.
+- The stateless contract — `store: false` + `reasoning.encrypted_content` — is enforced on every request path, including the V2 `aisdk` hooks.
+- `StorageError` preserves original stack traces via `cause`; debounced-save failures are logged, never fatal.
+- Tool modules get shared state via `ToolContext`, never module-level mutable singletons.
 
 ## ANTI-PATTERNS
 
 - Never import from `dist/`; use source paths.
-- Never suppress type errors.
-- Never hardcode OAuth ports; use `oauth-constants.ts` / auth constants.
-- Never remove `store: false` or `reasoning.encrypted_content` handling from the request path or templates.
-- Never expose raw tokens in logs, tool output, diagnostics, or response headers.
-- Never make keychain migration destructive without backup/rollback behavior.
+- Never suppress type errors (`as any`, `@ts-ignore`, `@ts-expect-error`, non-null `!` is a warning).
+- Never hardcode OAuth ports — `oauth-constants.ts` owns port 1455 and the bind hosts.
+- Never drop `store: false` / `reasoning.encrypted_content` from request paths or config templates.
+- Never log raw tokens, emails, or prompt/response bodies; use the redaction helpers.
+- Never delete JSON credentials when keychain operations fail — the JSON file is authoritative.
+- Never write storage outside the atomic-write + transaction-lock path.

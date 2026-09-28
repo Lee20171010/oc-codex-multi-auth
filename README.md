@@ -1,800 +1,260 @@
-# oc-codex-multi-auth: ChatGPT OAuth and multi-account Codex routing for OpenCode
+# oc-codex-multi-auth
 
 [![npm version](https://img.shields.io/npm/v/oc-codex-multi-auth.svg)](https://www.npmjs.com/package/oc-codex-multi-auth)
-[![npm downloads](https://img.shields.io/npm/dw/oc-codex-multi-auth.svg)](https://www.npmjs.com/package/oc-codex-multi-auth)
 [![CI](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/npm/l/oc-codex-multi-auth.svg)](LICENSE)
 
-`oc-codex-multi-auth` is an OpenCode plugin for ChatGPT Plus/Pro OAuth, Codex and GPT-5/GPT-6 model routing (including GPT-6 Astra/Sol/Luna, the Daybreak cyber tiers, and GPT-5.6 Sol/Terra/Luna), multi-account rotation, account switching, health checks, quota visibility, diagnostics, and recovery tools. It installs the OpenCode provider/TUI configuration, registers a 24-tool `codex-*` command toolkit, and routes OpenCode OpenAI SDK requests through the ChatGPT-backed Codex flow with local account state.
-
-Use it when you want OpenCode to run Codex-style coding workflows from your own ChatGPT subscription while keeping accounts visible, switchable, health-checked, and recoverable from the terminal.
-
-**OpenCode V2 is supported (2.0.16+).** The V2 adapter uses the existing OAuth account pool and Codex routing pipeline; the V1 entrypoint remains available for OpenCode 1.18.29+. See [OpenCode V2 installation](#opencode-v2) for setup and login instructions.
-
-<img width="1227" height="702" alt="oc-codex-multi-auth OpenCode plugin dashboard for ChatGPT OAuth, Codex routing, and multi-account health" src="https://github.com/user-attachments/assets/b796eb2f-282e-468a-ba6a-acadf09d731b" />
-
-
-
-> [!NOTE]
-> This package is the supported OpenCode plugin line.
-> Older package names and config entries should be replaced with `oc-codex-multi-auth`.
-
-## What You Get
-
-- OpenCode plugin support for ChatGPT Plus/Pro OAuth and Codex/GPT-5 coding workflows
-- GPT-6 Astra, GPT-6 Sol/Luna, GPT-5.6 Sol/Terra/Luna, and the Daybreak Blue/Red cyber tiers on the responses-lite request path, plus GPT-5.5, GPT-5.5 Fast, GPT-5.4 Nano, and GPT-5.1 templates
-- Routing for the Daybreak-gated cyber tiers (`gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-5.6-cyber`), deliberately kept out of the shipped templates since they need program approval
-- Compact modern OpenCode config with 10 base families and 53 variant presets; explicit legacy selector IDs when needed
-- Stateless Codex-compatible request handling with `store: false` and `reasoning.encrypted_content`
-- Multi-account rotation with hybrid health scoring, cooldowns, automatic token refresh, and failover
-- Explicit saved-account listing, account switching, labeling, tagging, notes, health checks, and diagnostics
-- Per-project account storage under `~/.opencode/projects/<project-key>/...`
-- Guided setup, doctor, next-action, dashboard, export/import, keychain, and troubleshooting tools
-- Optional OS-native keychain backend for stored account pools
-- TUI prompt quota status and quota detail views for OpenCode sessions
-- Request logging, runtime metrics, routing visibility, and redacted diagnostic snapshots for debugging
-- Stable docs for install, configuration, troubleshooting, privacy, architecture, testing, and release history
-
----
-
-## Why Developers Use It
-
-`oc-codex-multi-auth` makes OpenCode's ChatGPT OAuth state understandable and operable. Instead of treating auth as one opaque provider file, you get a local account pool, deterministic account switching, health-aware request selection, visible quota status, JSON-friendly diagnostics, and safe repair commands for stale or damaged state. The plugin is designed for personal development workflows: credentials stay local, OpenCode keeps owning the host runtime, and the plugin only handles the OAuth-backed Codex routing layer it is installed for.
-
----
-
-## Current Architecture At A Glance
-
-`oc-codex-multi-auth` ships four user-visible surfaces:
-
-| Surface | Purpose |
-| --- | --- |
-| `oc-codex-multi-auth` | npm CLI; explicit install modes manage OpenCode provider/TUI config, while `update` only clears the managed package cache. Also runs standalone commands: `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm` |
-| OpenCode plugin entry (`index.ts`) | auth loader, OAuth login modes, provider fetch pipeline, account rotation, retry/failover, and `codex-*` tool registry |
-| OpenCode TUI plugin (`tui.ts`) | prompt quota status, quota details, shared quota cache, and active-account-aware display |
-| 24 `codex-*` tools | setup, help, status, list, switch, warm, limits, health, metrics, doctor, dashboard, pool, backup, keychain, diagnostics, and repair actions |
-
-The plugin does not replace OpenCode. OpenCode remains the host; this package installs provider/TUI config and supplies the OAuth-backed Codex request pipeline that OpenCode calls.
-
----
-
-<details open>
-<summary><b>Terms and Usage Notice</b></summary>
+Use your ChatGPT Plus/Pro subscription inside OpenCode over OAuth. The plugin
+routes Codex, GPT-5, and GPT-6 models (including GPT-6 Astra/Sol/Luna and the
+GPT-5.6 tiers), rotates across multiple accounts, shows quota in the prompt,
+and ships a 24-tool `codex-*` command kit. Account state stays local under
+`~/.opencode`.
 
 > [!CAUTION]
-> This project is for personal development use with your own ChatGPT Plus/Pro subscription.
->
-> By using this plugin, you acknowledge:
-> - This is an independent open-source project, not an official OpenAI product
-> - It is not intended for commercial resale, shared multi-user access, or production services
-> - You are responsible for your own usage and policy compliance
-> - For production/commercial workloads, use the OpenAI Platform API
+> Personal development use with your own ChatGPT Plus/Pro subscription only.
+> This is an independent open-source project, not an official OpenAI product.
+> For production or commercial workloads, use the OpenAI Platform API.
 
-</details>
+## Install
 
----
-
-## Installation
-
-### OpenCode V2
-
-The V2 compatibility adapter targets OpenCode **2.0.16 or newer** and reuses the
-existing OAuth account pool, refresh, rotation, retry, and Codex request pipeline.
-Register the package in `opencode.json(c)`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["oc-codex-multi-auth"]
-}
-```
-
-For a working checkout, use its absolute directory path in `plugins`, then run
-`npm install` and `npm run build` in that checkout. The V2 terminal automatically
-loads the package's quota UI through its `./tui` export.
-
-The installer also accepts `--v2` to register the plugin without rewriting the
-model catalog. It refuses to modify an existing `opencode.jsonc` or convert a
-config with V1 `plugin` entries: edit the JSONC `plugins` list directly, or keep
-separate V1 and V2 configurations so the V1 registration is not lost. Restart
-the background service after installing or rebuilding:
-
-```bash
-opencode service restart
-```
-
-Run `opencode auth login` from your project directory and select **OpenAI** →
-**Codex OAuth (Add account — ChatGPT Plus/Pro)**. Repeat for each account, using
-a private browser window or switching browser accounts to select a different login.
-The built-in **ChatGPT Pro/Plus (browser)** method does not run the plugin's add-account flow.
-The plugin's **Device Code**, **Open URL Manually**, and **Manual URL Paste**
-methods are also available through login or `/connect`. Each adds to the pool;
-logging into the same account updates its existing entry. Pools are per-project
-by default, so log in from the directory where you use OpenCode. Existing
-plugin accounts remain usable; V2's own credentials are managed through its
-integration API. Use the plugin's `codex-list` and `codex-switch` tools to manage
-its pool. V2 normalizes tool names, so these appear as `codex_list`, `codex_switch`,
-and so on. The **Codex accounts** sidebar section lists the pool and marks its
-active account. Use `/codex-accounts` or **Codex accounts** in the command palette
-to view the list even when the sidebar is hidden. The quota details command is
-also available in the command palette.
-
-Existing supported V1 provider/model config can remain in place. The adapter
-uses HTTP Responses through the existing plugin transport. V1's interactive
-multi-account login menu and session-repair client calls are replaced by the
-V2 connection UI and host session handling. The V1 entrypoint remains available
-for OpenCode **1.18.29+**.
-
-### OpenCode V1
-
-<details open>
-<summary><b>For Humans</b></summary>
-
-### Option A: Standard install (preserve provider config)
-
-Default mode registers the OpenCode and TUI plugin entries without changing `provider.openai`.
+Requires Node.js `>=22.19` and [OpenCode](https://opencode.ai).
 
 ```bash
 npx -y oc-codex-multi-auth@latest
 ```
 
-Installer flags:
+With no flag, the installer only registers the plugin: it adds the plugin
+entry to `~/.config/opencode/opencode.json`, enables the TUI quota plugin in
+`~/.config/opencode/tui.json`, and refreshes the cached package. Your existing
+`provider.openai` model config is left alone. Add a flag to also install a
+model catalog:
 
 | Flag | Effect |
 | --- | --- |
-| (default) / `--plugin-only` | Register the plugin and TUI integration without changing `provider.openai` |
-| `--v2` | Register the plugin for OpenCode V2 (plugin only, includes automatic quota UI loading) |
-| `--modern` | Install compact modern catalog: 10 bases, 53 variants |
-| `--full` | Compact bases plus 53 explicit selector IDs |
-| `--legacy` | Explicit-only catalog for older OpenCode |
-| `--dry-run` | Show changed config paths without values or writes |
+| (none) / `--plugin-only` | Register the plugin entries only |
+| `--modern` | Also install the compact catalog: 10 base models with 53 variants |
+| `--full` | Also install the compact bases plus 53 explicit selector IDs (`openai/gpt-5.5-medium`) |
+| `--legacy` | Install the explicit-only catalog (53 entries) for older OpenCode |
+| `--v2` | Register for OpenCode V2 instead (plugin only; see below) |
+| `--dry-run` | Show what would change without writing |
 | `--no-cache-clear` | Skip clearing the OpenCode plugin cache |
+| `--version` | Print the installed version |
 
-### Option B: Compact modern model catalog
+Both `opencode.json` and `opencode.jsonc` are supported, comments and
+trailing commas included. When `opencode.jsonc` is your effective config, the
+installer merges into it; it refuses to overwrite a config it cannot parse,
+and unknown flags are errors. Changed files are backed up first.
 
-```bash
-npx -y oc-codex-multi-auth@latest --modern
-```
-
-Use this when OpenCode does not already provide the OAuth model definitions or you want the shipped variant presets.
-
-### Option C: Full explicit model catalog
-
-Use this when you want direct selector IDs such as `openai/gpt-5.5-medium` in addition to OpenCode variants.
-
-```bash
-npx -y oc-codex-multi-auth@latest --full
-```
-
-### Updating without config changes
+To update later without touching either config file:
 
 ```bash
 npx -y oc-codex-multi-auth@latest update
 ```
 
-`update` clears only the OpenCode-managed package cache. It does not read or write `opencode.json` or `tui.json`; restart OpenCode afterward to install the current package.
-
-### Option D: Verify wiring
+## Sign in and verify
 
 ```bash
-opencode --version
-opencode debug config
-opencode auth login
+opencode auth login            # choose OpenAI, then a Codex OAuth method
+oc-codex-multi-auth status     # account and storage summary
+oc-codex-multi-auth doctor     # diagnostics, or: doctor --fix
 ```
 
-The default installer only registers the plugin entry in `~/.config/opencode/opencode.json`, enables the TUI status plugin in `~/.config/opencode/tui.json`, and clears the cached plugin copy. Catalog modes also merge their selected `provider.openai` definitions. Changed config files are backed up before writing.
+Run `opencode auth login` once per ChatGPT account. Four OAuth methods are
+available (browser, open URL manually, device code, manual URL paste); see
+[Getting Started](docs/getting-started.md) for headless login.
 
-### Running from a local checkout
-
-You can point OpenCode at a clone of this repository instead of the published
-package, which is how the project is developed:
-
-```json
-{ "plugin": ["file:///path/to/oc-codex-multi-auth"] }
-```
-
-The installer leaves that entry exactly as written. It identifies an entry by
-the package it resolves to rather than by how the path is spelled, so a clone
-is recognized under any directory name, whether it is referenced as a path, a
-`file://` URL, or its build output. `oc-codex-multi-auth` is appended only when
-no entry in the config resolves to this plugin, so the installer never replaces
-a checkout with the published package or registers both at once.
-
-Stale references the installer itself produced are still retired: the bare
-package name repeated, version-pinned entries, the former
-`oc-chatgpt-multi-auth` name, and paths into `node_modules` or the OpenCode
-package cache.
-
-### Standalone CLI (no agent / no token cost)
+Then run a first prompt — catalog installs only:
 
 ```bash
-oc-codex-multi-auth status
-oc-codex-multi-auth list
-oc-codex-multi-auth warm
-oc-codex-multi-auth doctor
-oc-codex-multi-auth health
-oc-codex-multi-auth limits
-oc-codex-multi-auth dashboard
-oc-codex-multi-auth diag
-# or: npx -y oc-codex-multi-auth@latest warm --json
+opencode run "Explain this repository" --model=openai/gpt-5.5 --variant=medium
 ```
 
-</details>
+## OpenCode V2
 
-<details>
-<summary><b>For LLM Agents</b></summary>
-
-### Step-by-step
-
-1. Register the plugin without changing `provider.openai`:
-   - `npx -y oc-codex-multi-auth@latest`
-   - Use `--modern` only when the shipped compact model catalog is required.
-2. Run first login flow:
-   - `opencode auth login`
-3. Validate config:
-   - `opencode debug config`
-4. Run a smoke request (after OpenCode or `--modern` supplies the selector):
-   - `opencode run "Explain this repository" --model=openai/gpt-5.5 --variant=medium`
-5. Inspect plugin state with the OpenCode tool surface:
-   - `codex-status`
-   - `codex-doctor`
-   - `codex-list`
-
-### Verification
+OpenCode **2.0.16+** loads the plugin through a V2 adapter; the account pool,
+OAuth login, and request pipeline are shared with V1.
 
 ```bash
-opencode debug config
-opencode auth login
-opencode run "ping" --model=openai/gpt-5.5 --variant=medium
+npx -y oc-codex-multi-auth@latest --v2
 ```
 
-</details>
-
----
-
-## Quick Start
-
-Install and sign in:
+`--v2` writes a `plugins` entry only — no model catalog — and refuses an
+existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them
+(edit the JSONC `plugins` list by hand instead). Restart the background
+service after installing or rebuilding:
 
 ```bash
-npx -y oc-codex-multi-auth@latest
-opencode auth login
+opencode service restart
+opencode auth login   # OpenAI -> Codex OAuth (Add account - ChatGPT Plus/Pro)
 ```
 
-Run a prompt with compact modern selectors:
+V1's entrypoint remains for OpenCode 1.18.29+. In V2, tool names normalize to
+`codex_list`, `codex_switch`, and so on; `/codex-accounts` and the **Codex
+accounts** palette command list the pool, and **Codex quota details** shows
+quota. See [Troubleshooting](docs/troubleshooting.md) for V2-specific issues.
 
-```bash
-opencode run "Summarize the failing test and suggest a fix" --model=openai/gpt-5.5 --variant=medium
-opencode run "Summarize the failing test and suggest a fix" --model=openai/gpt-5.5-fast --variant=medium
-opencode run "Plan the refactor" --model=openai/gpt-6-astra --variant=high
-```
+## Accounts
 
-Use Codex-focused routing:
+Run `opencode auth login` once per account; each login adds to the pool, and
+logging into the same account updates its entry. Rotation picks the
+healthiest enabled account per request (`rotationStrategy`, default
+`hybrid`).
 
-```bash
-opencode run "Refactor the retry logic and update the tests" --model=openai/gpt-6-sol --variant=high
-```
+Account pools are **per-project by default**. The plugin walks up from the
+working directory to find a project root; without one it uses global storage.
 
-If browser launch is blocked, use the alternate login paths in [docs/getting-started.md](docs/getting-started.md#remote-or-headless-login).
-
----
-
-## Command Toolkit
-
-### Start here
-
-| Tool | What it answers |
+| File | Path |
 | --- | --- |
-| `codex-setup` | How do I finish first-run setup safely? |
-| `codex-help` | Which plugin commands exist and what do they do? |
-| `codex-doctor` | What is wrong with auth, config, storage, or routing? |
-| `codex-next` | What should I do next to get unstuck? |
-
-### Daily use
-
-| Tool | What it answers |
-| --- | --- |
-| `codex-list` | Which accounts are saved and which one is active? |
-| `codex-switch` | How do I move to a different saved account? |
-| `codex-warm` | How do I start every account's usage window now (stagger quota cooldowns)? |
-| `codex-status` | Which account, model family, and routing state are active? |
-| `codex-limits` | What quota is visible now, per account and across the pool? |
-| `codex-reset` | Do I have a banked rate-limit reset credit, and how do I redeem it? |
-| `codex-dashboard` | What does a read-only snapshot of account eligibility, retry budgets, and refresh queue health show? |
-| `codex-pool` | Which accounts are preferred for each model, and how do I change them? |
-
-Most of these also run as a **direct CLI** with no agent or model involvement, so there is no token cost. Examples are `oc-codex-multi-auth warm`, `oc-codex-multi-auth status`, or `npx -y oc-codex-multi-auth@latest warm`. Use `oc-codex-multi-auth warm` to open every enabled account's usage window at the start of a session and stagger the rolling quota cooldowns. Add `--json` for scriptable output.
-
-### Account management
-
-| Tool | What it answers |
-| --- | --- |
-| `codex-label` | How do I name an account? |
-| `codex-tag` | How do I group accounts with tags? |
-| `codex-note` | How do I attach a private note to an account? |
-| `codex-remove` | How do I remove a saved account safely? |
-| `codex-refresh` | How do I refresh the OAuth tokens of every saved account to verify they are still valid? |
-
-### Diagnostics and backup
-
-| Tool | What it answers |
-| --- | --- |
-| `codex-health` | Which accounts look healthy, limited, or disabled? |
-| `codex-metrics` | What runtime counters and request metrics are visible? |
-| `codex-diag` | Can I export a redacted diagnostic snapshot? |
-| `codex-diff` | What changed between account/config snapshots? |
-| `codex-export` | How do I back up account storage? |
-| `codex-import` | How do I restore accounts with a dry-run first? |
-| `codex-keychain` | Which credential backend is active and can I migrate it? |
-
-### Reliability behavior
-
-- stateless request handling forces `store: false`
-- `reasoning.encrypted_content` is preserved for multi-turn continuity
-- GPT-6 Astra/Sol/Luna, the Daybreak tiers and the GPT-5.6 tiers use the responses-lite request shape and default client identity `opencode`; other models default to `codex_cli_rs`
-- account rotation is health-aware (`rotationStrategy` default `hybrid`) and avoids repeatedly selecting cooling accounts
-- The quota guard checks each enabled account at a bounded interval (30 minutes by default). When it finds a fully spent 5-hour or weekly subscription quota, rotation skips that account until its reported reset instead of drawing from paid Credits. `codex-limits` applies the same guard immediately when run manually. After running standalone `limits --refresh` (a plain `limits` reports the plugin's last readings and reads live only accounts it has none for), restart an already-running OpenCode instance or wait for its next quota poll to reload the updated account state.
-- same-host OpenCode processes sharing an account file serialize refresh-token exchange and commit so one current single-use token is exchanged once
-- 5xx bursts, network failures, and quota responses penalize account health
-- token refresh is queued to avoid refresh races
-- unsupported-model handling is strict by default, with opt-in fallback controls
-- TUI quota status follows the account/workspace used by the latest request
-- Business workspace memberships and Personal accounts keep separate usage and quota windows. Business members sharing one workspace are distinguished by their member/seat identity, so their usage is not collapsed into one row.
-- An account identifies itself by its own ChatGPT email and the last 6 characters of its account id, with the email masked when `maskEmail` is on. An account id names a ChatGPT workspace and every member of a Business workspace shares it, so a record that also carries a member/seat id prints a short excerpt of that as `seat:`. The excerpt is a 6-character tail where that is enough to tell the listed accounts apart. Where it is not, it widens, moves to where those ids first differ, or joins two short excerpts with `..` - real member ids are long, share a leading prefix, and differ in more than one place, so a tail alone often cannot separate them. Where no excerpt that short can separate them, `seat:` is instead an **opaque hash prefix** such as `719f78b5`: it identifies the seat and stays stable, but it is not part of the member id and cannot be matched against anything ChatGPT shows you. Whichever form it takes, two distinct seats never render the same `seat:` and a `seat:` is never longer than 32 characters. A record with no member id renders exactly as before. The OAuth id_token also lists the API-platform organizations the login belongs to; those are not ChatGPT workspaces and are never used to name an account, so logging in clears a label left behind by one. A label you set with `codex-label` is always kept.
-- The ChatGPT plan (`Free`, `Plus`, `Pro`, `Business`, `Business Premium`, `Enterprise`) is read from the access token, refreshed on every token refresh, and shown by `codex-list` and `codex-status`. `codex-limits` and the TUI read the plan live from the usage endpoint and name it the same way. An unrecognized plan is reported verbatim rather than renamed.
-- `codex-limits` and the standalone `limits` CLI name what one of that plan's seats is worth beside the others (`Plan: Pro (20x)`) and close with what the pool holds between them (`Pool: 93% used of 81x across 11 accounts`). The percentage is a **weighted** mean over exactly that `81x`, since a spent Pro seat costs the pool twenty times what a spent Plus seat does, and an account whose usage could not be read is left out of both figures. A plan that publishes no ratio carries no badge but still weighs one baseline seat. See [docs/tools-and-cli.md](docs/tools-and-cli.md#what-limits-reports) and [docs/plan-allotments.md](docs/plan-allotments.md).
-
----
-
-## Storage Paths
-
-| File | Default path |
-| --- | --- |
-| OpenCode config | `~/.config/opencode/opencode.json` |
-| OpenCode TUI config | `~/.config/opencode/tui.json` |
-| OpenCode auth tokens | `~/.opencode/auth/openai.json` |
-| Plugin config | `~/.opencode/openai-codex-auth-config.json` |
-| Global account storage | `~/.opencode/oc-codex-multi-auth-accounts.json` |
 | Per-project accounts | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` |
-| Flagged accounts | `oc-codex-multi-auth-flagged-accounts.json`, written beside the active accounts file (per-project path when `perProjectAccounts` is on) |
-| Backups | `~/.opencode/backups/` or `~/.opencode/projects/<project-key>/backups/` |
-| Logs | `~/.opencode/logs/codex-plugin/` |
-| TUI quota cache | OpenCode state dir plus `oc-codex-multi-auth-tui-quota.json`, else `$OPENCODE_STATE_DIR/oc-codex-multi-auth-tui-quota.json` or `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json`. The request path rewrites it after every response carrying quota headers — each write lands a fresh `fetchedAt` even when the values are unchanged (a 500ms debounce absorbs bursts), which is what keeps the snapshot "fresh" for readers |
-| TUI pool quota cache | `oc-codex-multi-auth-tui-quota-overview.json`, in the same directory, written when `quotaStatus.mode` includes `overview` or `resets`. Each 5-minute poll upserts per-account readings with their own `fetchedAt` timestamps |
+| Global accounts | `~/.opencode/oc-codex-multi-auth-accounts.json` |
+| Flagged accounts | `oc-codex-multi-auth-flagged-accounts.json`, beside the active accounts file |
+| Pre-write snapshots | `backups/codex-credential-snapshot-*.json`, beside the active accounts file |
+| Plugin config | `~/.opencode/openai-codex-auth-config.json` |
+| OpenCode config | `~/.config/opencode/opencode.json` (or `opencode.jsonc`) |
+| Request logs | `~/.opencode/logs/codex-plugin/`, when logging is enabled |
 
-Per-project storage is enabled by default. The plugin walks up from the current directory to find a project root, then stores account pools under the project-specific key. If no project root is found, it falls back to global storage.
+The standalone CLI resolves the same pool — `status`, `list`, `limits`, and
+`warm` all print the `storagePath` they used, and `--config-path` points them
+at a specific file. Set `CODEX_AUTH_PER_PROJECT_ACCOUNTS=0` to force global
+storage.
 
----
+Prefer the OS keychain over JSON files? Opt in with `CODEX_KEYCHAIN=1`
+(macOS Keychain, Windows Credential Manager, Linux libsecret) and manage it
+with `codex-keychain`. JSON remains the default; nothing is migrated until
+you ask.
+
+## Models
+
+`--modern` and `--full` install **10 base models** covering **53 variants**
+(selectable via `--variant`); `--legacy` installs the 53 as explicit IDs.
+
+| Base | Notes |
+| --- | --- |
+| `gpt-6-astra` | frontier; rolled out 2026-09-03 |
+| `gpt-6-sol` | workhorse coding model |
+| `gpt-6-luna` | fast, affordable |
+| `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | GPT-5.6 tiers; entitlement-gated |
+| `gpt-5.5`, `gpt-5.5-fast` | retires from Codex 2026-10-14 |
+| `gpt-5.4-nano` | |
+| `gpt-5.1` | |
+
+GPT-6 and GPT-5.6 models use the responses-lite request shape and the
+`opencode` client identity; other models use `codex_cli_rs`. Requests stay
+stateless: `store: false` with `reasoning.encrypted_content` for multi-turn
+continuity.
+
+Retired IDs still route if typed — `gpt-5.4-mini`, `gpt-5-codex`,
+`gpt-5.1-codex`, `gpt-5.1-codex-max`, and `gpt-5.1-codex-mini` are rescued by
+the default fallback chains. The Daybreak-gated tiers
+(`gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-5.6-cyber`) are
+routed but deliberately not shipped; add them by hand if your workspace is
+approved. Full chain details live in
+[docs/configuration.md](docs/configuration.md).
+
+## Quota status
+
+The TUI prompt line shows quota for the account that served the last request.
+`quotaStatus.mode` in `~/.opencode/openai-codex-auth-config.json` controls it:
+
+- `active` (default): the serving account's remaining quota
+- `overview`: the whole pool on one line, weighted by plan
+- `resets`: banked rate-limit reset credits
+
+Pass a list (`["overview", "resets"]`) to rotate screens every `rotateMs`
+(default 5s). Percentages read as headroom left; set `quotaDisplay: "used"`
+to show consumption. All layout and forecast options are documented in
+[docs/configuration.md](docs/configuration.md).
+
+## The `codex-*` tools
+
+Inside OpenCode, 24 tools manage the pool without leaving the session:
+
+| Tool | What it does |
+| --- | --- |
+| `codex-setup` | Guided first-run setup checklist |
+| `codex-help` | Plugin help, by topic |
+| `codex-next` | Suggested next action to get unstuck |
+| `codex-status` | Active account, model family, routing state |
+| `codex-list` | Saved accounts and which is active |
+| `codex-switch` | Change the active account |
+| `codex-warm` | Open every enabled account's usage window now |
+| `codex-limits` | Per-account and pool quota |
+| `codex-reset` | List or redeem banked rate-limit reset credits |
+| `codex-health` | Which accounts look healthy, limited, or disabled |
+| `codex-doctor` | Diagnostics plus safe repairs (`fix=true`) |
+| `codex-diag` | Redacted diagnostic snapshot for bug reports |
+| `codex-dashboard` | Read-only eligibility, retry, and refresh snapshot |
+| `codex-metrics` | Runtime counters and request metrics |
+| `codex-pool` | Pin models to preferred accounts |
+| `codex-label` | Name an account |
+| `codex-tag` | Group accounts with tags |
+| `codex-note` | Attach a private note to an account |
+| `codex-remove` | Remove a saved account |
+| `codex-refresh` | Verify every account's refresh token still works |
+| `codex-export` / `codex-import` | Back up and restore account storage (import previews with `dryRun=true`) |
+| `codex-diff` | Compare account/config snapshots |
+| `codex-keychain` | Show or migrate the credential backend |
+
+Argument details: [docs/tools-and-cli.md](docs/tools-and-cli.md).
+
+## Standalone CLI
+
+The same package runs account commands directly — no agent, no token cost:
+
+```bash
+oc-codex-multi-auth status      # pool summary + storagePath
+oc-codex-multi-auth list        # accounts, --tag <name> to filter
+oc-codex-multi-auth limits      # 5h/weekly usage; --sort account|usage|reset --asc|--desc --refresh
+oc-codex-multi-auth warm        # open every enabled account's usage window
+oc-codex-multi-auth doctor      # diagnostics; --deep, --fix
+oc-codex-multi-auth diag        # alias for doctor --deep
+oc-codex-multi-auth health      # local token/account health
+oc-codex-multi-auth dashboard   # dashboard guidance
+```
+
+All accept `--json` and `--config-path <file>`; `status`/`list`/`limits`
+redact identifiers unless `--include-sensitive` is passed. Via npx:
+`npx -y oc-codex-multi-auth@latest status --json`.
 
 ## Configuration
 
-Primary config files:
+Plugin settings live in `~/.opencode/openai-codex-auth-config.json` and are
+re-read per request — most edits need no restart. Boolean env overrides are
+truthy only for the literal `"1"`. Common ones:
 
-- `~/.config/opencode/opencode.json`
-- `~/.config/opencode/tui.json`
-- `~/.opencode/openai-codex-auth-config.json`
-
-### Quota percentage display
-
-Every quota percentage a person reads is worded as the headroom still left,
-which is how Codex itself reports a quota:
-
-```text
-5h limit: 88% left      # codex-limits, quota details dialog
-5h 88%                  # TUI prompt status line
-```
-
-Set `quotaDisplay` to `"used"` to report consumption instead:
-
-```json
-{
-  "quotaDisplay": "used"
-}
-```
-
-```text
-5h limit: 12% used
-5h 12%
-```
-
-Add it to `~/.opencode/openai-codex-auth-config.json`, or set
-`CODEX_AUTH_QUOTA_DISPLAY=used`, then quit and restart OpenCode. The setting
-covers the TUI prompt status line and quota details dialog, `codex-limits`,
-the standalone `limits` CLI, the interactive account check, and the macOS
-quota notifications below.
-
-It changes wording only. Quota exhaustion, rotation blocks, notification
-thresholds, and the status line's warning/danger colouring all stay keyed on
-the percentage remaining, so a nearly spent account still colours red while
-reading `95%`. The `usedPercent` and `leftPercent` fields in `--json` /
-`format="json"` output are unaffected.
-
-### Pool-wide quota status
-
-The prompt status line describes the account that served the last request. On
-a pool of several accounts that account changes as rotation moves, so the line
-changes identity under you and no single glance shows where the pool stands.
-
-Set `quotaStatus.mode` to `"overview"` to describe the whole pool on one
-constant line instead, which only changes when a quota does:
-
-```json
-{
-  "quotaStatus": {
-    "mode": "overview",
-    "layout": "accounts",
-    "accountNames": "number",
-    "order": "number",
-    "multipliers": false,
-    "allotment": false,
-    "resetTimes": "low",
-    "resetCredits": false,
-    "recovery": false,
-    "rows": 1,
-    "showFor": "always"
-  }
-}
-```
-
-```text
-24%: #1 13%, #2 0% 3d, #3 12%               # defaults
-24%: 3 accounts                             # "layout": "count"
-24%: #1 5x 13%, #2 20x 0% 3d, #3 1x 12%     # "multipliers": true
-24%: #1 5x 13%, #2 20x 0% 3d 1r, #3 1x 12%  # + "resetCredits": true
-24%: 3 accounts, +12% in 3d                 # "layout": "count", "recovery": true
-24% of 26x: #1 13%, #2 0% 3d, #3 12%        # "allotment": true
-24%: #1 13% 2d, #2 0% 3d, #3 12% 5d         # "resetTimes": "always"
-24%: 13%, 0% 3d, 12%                        # "accountNames": "none"
-24%: damian 13%, work 0% 3d, spare 12%      # "accountNames": "label"
-24%: #2 0% 3d, #1 13%, #3 12%               # "order": "most-used"
-24%: 13% 2d, 0% 3d 4d 5d                    # "layout": "aggregate"
-```
-
-Each switch is independent, so any combination works. `#N` is the account
-number `codex-list` and `codex-switch` use. An account is shown by whichever
-of its windows has the least headroom, since that is the one that stops a
-request; a reset time (`3d`) is added for an account at or below 25% by
-default, for every account under `"resetTimes": "always"`, and for none under
-`"never"`. `1r` counts banked rate-limit resets that account can redeem now.
-
-`order` takes `number`, `most-used`, `least-used`, `renewing-earliest`, or
-`renewing-latest`. `layout: "aggregate"` prints a shared percentage once and
-keeps only what differs after it, which matters most on a pool where several
-accounts are spent.
-
-The leading figure is the pool total, and it is a **weighted** mean: a Pro seat
-spent to 50% has given up twenty times the capacity a Business Standard seat
-does at 50%, so an unweighted average would describe a pool nobody has. The
-per-plan ratios are listed in [docs/plan-allotments.md](docs/plan-allotments.md),
-and `"allotment": true` shows what they add up to.
-
-For just that total and its recovery forecast, use `"layout": "total"`,
-`"recovery": "all"`, and `"allotment": false`. This reads, for example,
-`25% +1% in 3h, +12% in 3d, +5% in 4d`: each positive figure is incremental
-capacity returned in percentage points, even with `quotaDisplay: "used"`.
-See the [forecast semantics](docs/configuration.md#what-the-line-says).
-
-`mode` also accepts a list, and the line then alternates between those screens
-every `rotateMs` (default 5000). The third screen, `resets`, appears by default
-once every readable account is spent. Set `resetsMinUsedPercent` (0-100) to
-show it earlier, for example at 90% total weighted usage. It lists known
-applicable banked reset credits,
-latest reset first - redeeming one on an account that renews by itself tomorrow
-throws it away:
-
-```json
-{
-  "quotaStatus": { "mode": ["overview", "resets"] }
-}
-```
-
-```text
-Free resets: 6d 1r damian@nowaker.net, 4d 2r work@example.com
-```
-
-`"rows"` (1-4, default 1) is a ceiling rather than a height: a rendering that
-fits on one row still takes one, so `"rows": 2` costs nothing on a wide terminal
-and buys the whole line back on a narrow one, where the agent/model label beside
-it has already wrapped to two rows anyway. `"showFor": "codex-models"` hides the
-line unless the session is running a model this plugin routes.
-
-Percentages follow `quotaDisplay`, so the first line above reads
-`76%: #1 87%, #2 100% 3d, #3 88%` under `"used"`. The whole setting is
-presentation only: rotation, quota blocks and the line's warning/danger
-colouring stay keyed on the headroom remaining.
-
-Add the object to `~/.opencode/openai-codex-auth-config.json`. It is read from
-that file only - a display preference belongs to a person, not to a shell - and
-the status line re-reads it while sessions are open, so an edit takes effect
-within a couple of seconds without a restart.
-New plugin code still needs a one-time process restart after an upgrade;
-subsequent changes to these settings reload live.
-
-### Desktop quota notifications
-
-Quota notifications are an optional macOS-only feature. Separately, the quota
-guard checks enabled accounts every 30 minutes by default and prevents rotation
-from drawing paid Credits after the backend reports a fully spent subscription
-window. While notifications are enabled, the same poll also alerts through
-Notification Center when the best remaining 5-hour or weekly pool quota crosses
-25%, 10%, or 0%. Alerts are disabled by default; the quota guard is enabled.
-
-Each line reports the enabled account with the most headroom in that window,
-together with that same account's reset time, so the pair always describes a
-quota that one account actually has. When a different account recovers sooner,
-that reset is appended under its own label rather than folded into the first
-one. Windows a plan has switched off are skipped rather than counted as full.
-Account identities are omitted for readability and lock-screen privacy:
-
-```text
-5h: 10% | resets 02:00 | another account resets 22:30
-Weekly: 72% | resets 22:30 on Aug 30
-```
-
-The percentage follows `quotaDisplay`, so the same two lines read `90%` and
-`28%` under `"used"`. `thresholds` are always remaining-percent values
-regardless.
-
-```json
-{
-  "quotaNotifications": {
-    "enabled": true,
-    "autoProtectCredits": true,
-    "intervalMs": 1800000,
-    "notifyEveryCheck": false,
-    "thresholds": [25, 10, 0]
-  }
-}
-```
-
-Add the object above to `~/.opencode/openai-codex-auth-config.json`, or set
-`CODEX_AUTH_QUOTA_NOTIFICATIONS=1`, then quit and restart OpenCode. The minimum
-interval is 30 seconds. If macOS blocks the alert, allow notifications for
-the process shown in **System Settings > Notifications**. The setting is
-ignored on Windows and Linux.
-
-Set `"notifyEveryCheck": true` to show the aggregate quota notification after
-every successful poll interval instead of only when a configured threshold is
-crossed. Set `"thresholds": []` to turn threshold alerts off entirely; pair it
-with `"notifyEveryCheck": true` to keep receiving alerts. The quota guard keeps
-polling unless `"autoProtectCredits": false` is set.
-
-Delivery state lives beside the accounts file the alerts are computed from, so
-OpenCode processes working in the same account scope show only one alert per
-interval. With the default `perProjectAccounts`, that scope is one project:
-two projects have separate account pools and therefore alert independently.
-
-### Route models to preferred accounts
-
-Use `modelAccountPools` to assign one or more preferred ChatGPT accounts or Business seats to a
-model. Account references use stable account or Business-seat identities, so
-adding, removing, or reordering accounts does not silently change a model's
-routing. A Business membership and a Personal account remain separate pool and
-usage identities even when they belong to the same login.
-
-```json
-{
-  "modelAccountPools": {
-    "gpt-5.6-sol": [
-      "org-example-account-id",
-      "00000000-0000-0000-0000-000000000000"
-    ],
-    "gpt-5.6-terra": [
-      "org-another-account-id"
-    ]
-  },
-  "modelAccountPoolModes": {
-    "gpt-5.6-sol": "strict",
-    "gpt-5.6-terra": "preferred"
-  }
-}
-```
-
-Save this configuration in `~/.opencode/openai-codex-auth-config.json`. The
-plugin re-reads that file at the start of every request, so edits apply to the
-next request without a restart. Model matching is case-insensitive and uses
-the effective model after request model normalization.
-
-Use `codex-pool` to manage these mappings with ordinary 1-based account
-numbers. The tool resolves those numbers and writes stable IDs to disk:
-
-```text
-codex-pool
-codex-pool action="set" model="gpt-5.6-sol" accounts=[7,8]
-codex-pool action="add" model="gpt-5.6-sol" accounts=[9]
-codex-pool action="remove" model="gpt-5.6-sol" accounts=[7]
-codex-pool action="set-mode" model="gpt-5.6-sol" poolMode="strict"
-codex-pool action="clear" model="gpt-5.6-sol"
-```
-
-Add `dryRun=true` to preview a mutation. Use `format="json"` for structured
-output; stable IDs remain redacted unless `includeSensitive=true` is also set.
-An applied mutation hot-reloads: the request path re-reads the plugin config
-before each fetch, so routing changes take effect on the next request without
-restarting OpenCode. The plugin configuration is global while account storage
-is per-project by default, so a reference unresolved in the current project is
-reported but never automatically deleted.
-
-Routing behavior:
-
-- A mapped model defaults to `preferred` mode and uses healthy, selectable accounts in its pool.
-- Existing rotation strategy, quota, cooldown, and token-health rules still apply within the preferred pool.
-- In `preferred` mode, an unavailable pool falls back to the healthy general account pool.
-- In `strict` mode, routing never leaves the configured pool and immediately returns `strict_pool_unavailable` when no pooled account is selectable.
-- An unmapped model or an empty account list uses the general account pool directly.
-- `codex-status`, `codex-dashboard`, and routing diagnostics also report `strict` and `strict-unavailable` modes.
-
-Account IDs are local account metadata but should still be treated as private
-configuration. Do not publish a populated configuration file.
-
-Selected runtime/environment overrides:
-
-| Variable | Effect |
+| Setting | Effect |
 | --- | --- |
-| `OPENAI_BASE_URL=https://gateway.example/v1` | OpenAI-compatible OAuth inference gateway; requires `CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1` |
-| `CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1` | Explicitly allow the trusted gateway to receive the ChatGPT OAuth access token; remote gateways require HTTPS, while HTTP is accepted only on literal loopback IPs |
-| `CODEX_AUTH_REQUEST_TRANSFORM_MODE=legacy` | Re-enable legacy Codex request rewriting |
-| `CODEX_MODE=0/1` | Disable/enable bridge prompt behavior |
-| `CODEX_TUI_V2=0/1` | Disable/enable codex-style tool output |
-| `CODEX_TUI_COLOR_PROFILE=truecolor\|ansi256\|ansi16` | Force terminal color profile |
-| `CODEX_TUI_GLYPHS=ascii\|unicode\|auto` | Force terminal glyph style |
-| `CODEX_TUI_MASK_EMAIL=0/1` | Mask account emails across account-display surfaces (list/status/limits/health/dashboard/menus + TUI quota status) |
-| `CODEX_TUI_MASK_EMAIL_DETAILS=0/1` | Also hide account email in quota details when prompt masking is enabled |
-| `CODEX_AUTH_QUOTA_DISPLAY=free\|used` | Word quota percentages as headroom left (default, matching Codex) or as consumption |
-
-| `CODEX_AUTH_PER_PROJECT_ACCOUNTS=0/1` | Disable/enable per-project account pools |
-| `CODEX_AUTH_CREDENTIAL_SNAPSHOTS=0/1` | Disable/enable pre-write snapshots of the credential store (default on) |
-| `CODEX_AUTH_CREDENTIAL_SNAPSHOTS_MAX_COUNT=<n>` | How many credential snapshots to keep (`0` keeps all of them) |
-| `CODEX_AUTH_AUTO_UPDATE=0/1` | Disable/enable daily npm update check and cache refresh |
+| `CODEX_AUTH_PER_PROJECT_ACCOUNTS=0` | Force the global account pool |
+| `CODEX_KEYCHAIN=1` | Store accounts in the OS keychain |
 | `CODEX_AUTH_ROTATION_STRATEGY=hybrid\|sticky\|round-robin` | Account selection strategy |
-| `CODEX_AUTH_UNSUPPORTED_MODEL_POLICY=strict\|fallback` | Control unsupported-model retry behavior |
-| `CODEX_AUTH_ACCOUNT_ID=<id>` | Force a specific workspace/account id |
-| `CODEX_AUTH_FETCH_TIMEOUT_MS=<ms>` | Request timeout override |
-| `CODEX_AUTH_STREAM_STALL_TIMEOUT_MS=<ms>` | SSE stream stall timeout override |
-| `CODEX_RETRY_ALL_UNBOUNDED=1` | Restore truly unbounded waits when every account is rate-limited; otherwise a configured `retryAllAccountsMaxWaitMs` of `0` is bounded by a 10-minute interactive ceiling |
-| `ENABLE_PLUGIN_REQUEST_LOGGING=1` | Enable request metadata logs |
-| `CODEX_PLUGIN_LOG_BODIES=1` | Include raw request/response bodies in logs; sensitive |
-| `CODEX_KEYCHAIN=1` | Opt in to OS-native keychain account storage |
-| `CODEX_AUTH_QUOTA_NOTIFICATIONS=1` | Enable desktop quota notifications (macOS only) |
-| `CODEX_AUTH_AUTO_PROTECT_CREDITS=0/1` | Disable/enable the quota guard that keeps rotation off paid Credits after a spent subscription window (default on) |
-| `CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS=<ms>` | Override the quota poll interval (default 1800000, minimum 30000) |
+| `CODEX_AUTH_QUOTA_DISPLAY=free\|used` | Quota percentages as headroom (default) or consumption |
+| `CODEX_RETRY_ALL_UNBOUNDED=1` | Let "wait as long as the backend asks" apply when every account is rate-limited; otherwise capped at 10 minutes |
+| `ENABLE_PLUGIN_REQUEST_LOGGING=1` | Write request metadata logs |
+| `CODEX_PLUGIN_LOG_BODIES=1` | Also log raw bodies (sensitive) |
 
-Boolean env overrides are truthy only for the literal string `"1"`.
-
-Validate config after changes:
-
-```bash
-opencode debug config
-opencode run "test" --model=openai/gpt-5.5 --variant=medium
-```
-
-Modern OpenCode versions use [config/opencode-modern.json](config/opencode-modern.json). Older versions can use [config/opencode-legacy.json](config/opencode-legacy.json). See [config/README.md](config/README.md) for the full model template matrix.
-
----
-
-## Credential Storage
-
-<details open>
-<summary><b>Default JSON backend</b></summary>
-
-By default, account pools are stored locally as V3 JSON files. File permissions are restricted where the platform supports them.
-
-Use JSON storage when you want predictable, inspectable local files and easy backup/export behavior.
-
-Before the store is changed in a way that matters, the plugin copies the previous version of the file into `backups/` as `codex-credential-snapshot-*.json`, mode `0600` in a `0700` directory. The snapshot holds the state being replaced, not the state replacing it, which is what makes it useful if the file is ever overwritten wholesale. Token refreshes count as significant, which bounds how stale a restore can be. Refresh tokens are single-use, so a snapshot taken just before a refresh holds the consumed token for the one account that refresh rotated - that account needs a fresh `opencode auth login` - while every other account in the pool comes back with the token that was live at that moment. A snapshot old enough to predate many refreshes restores a pool where most or all accounts can no longer authenticate, which is the failure this bounding exists to avoid. Rotation bookkeeping - `lastUsed`, rate-limit and cooldown state, quota stamps, and the rotation cursor - never triggers one on its own, so the kept snapshots are not churned away by ordinary traffic. The plugin keeps the 10 most recent and prunes strictly by that filename prefix, so nothing else in `backups/` is touched. Set `credentialSnapshots: false` to turn it off, or `credentialSnapshotsMaxCount` to keep a different number (`0` keeps all of them).
-
-Concurrent OpenCode sessions sharing a store preserve the on-disk account list during background saves. Three consecutive authentication failures disable the affected account instead of deleting its credentials; re-login can repair it. If an existing store is unreadable or has an invalid format, the plugin refuses to treat it as an empty pool and will not overwrite it through an account-storage transaction. See [troubleshooting](docs/troubleshooting.md) for recovery steps.
-
-</details>
-
-<details>
-<summary><b>Optional OS keychain backend</b></summary>
-
-Set `CODEX_KEYCHAIN=1` to store account pools in the OS keychain instead:
-
-- macOS: Keychain
-- Windows: Credential Manager
-- Linux: libsecret, with a running secret service such as GNOME Keyring or KWallet
-
-Manage the backend from OpenCode:
-
-```text
-codex-keychain command="status"
-codex-keychain command="migrate"
-codex-keychain command="rollback"
-```
-
-If the keychain is unavailable, the plugin logs a warning and falls back to JSON storage for that operation. Credentials are never silently deleted.
-
-</details>
-
----
+Full reference, field by field: [docs/configuration.md](docs/configuration.md).
 
 ## Troubleshooting
 
-<details open>
-<summary><b>60-second recovery</b></summary>
-
-```text
-codex-doctor fix=true
-codex-next
-codex-status format="json"
-```
-
-If still broken:
-
-```bash
-opencode auth login
-```
-
-</details>
-
-<details>
-<summary><b>Common symptoms</b></summary>
-
-- Plugin does not load: rerun `npx -y oc-codex-multi-auth@latest`, then restart OpenCode
-- Config looks wrong: run `opencode debug config` and confirm `"plugin": ["oc-codex-multi-auth"]`, or the path to your checkout when running one
-- OAuth callback fails: free port `1455`, then rerun `opencode auth login`
-- Browser launch is blocked: use the remote/headless login path from [docs/getting-started.md](docs/getting-started.md#remote-or-headless-login)
-- Wrong account is selected: run `codex-list`, then `codex-switch`
-- Account pool looks unhealthy: run `codex-health format="json"` and `codex-doctor deep=true format="json"`
-- Import/export feels risky: run `codex-import path="..." dryRun=true` before applying
-- Debugging model fallback: enable `ENABLE_PLUGIN_REQUEST_LOGGING=1` and inspect `~/.opencode/logs/codex-plugin/`
-
-</details>
-
-<details>
-<summary><b>Diagnostics pack</b></summary>
-
-```text
-codex-status format="json"
-codex-limits format="json"
-codex-health format="json"
-codex-next format="json"
-codex-list format="json"
-codex-dashboard format="json"
-codex-metrics format="json"
-codex-doctor deep=true format="json"
-```
-
-</details>
-
----
+Most issues resolve by signing in again (`opencode auth login`) or running
+`codex-doctor fix=true` / `oc-codex-multi-auth doctor --fix`. The callback
+listener needs port 1455 free. Symptom-by-symptom fixes:
+[docs/troubleshooting.md](docs/troubleshooting.md). Common questions:
+[docs/faq.md](docs/faq.md).
 
 ## Documentation
 
-- Docs portal: [docs/README.md](docs/README.md)
-- Documentation map: [docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)
-- Getting started: [docs/getting-started.md](docs/getting-started.md)
-- Configuration: [docs/configuration.md](docs/configuration.md)
-- Config templates: [config/README.md](config/README.md)
-- Troubleshooting: [docs/troubleshooting.md](docs/troubleshooting.md)
-- FAQ: [docs/faq.md](docs/faq.md)
-- Privacy: [docs/privacy.md](docs/privacy.md)
-- Public architecture: [docs/architecture.md](docs/architecture.md)
-- Maintainer architecture: [docs/development/ARCHITECTURE.md](docs/development/ARCHITECTURE.md)
-- Testing: [docs/development/TESTING.md](docs/development/TESTING.md)
-- Discoverability guide: [docs/development/GITHUB_DISCOVERABILITY.md](docs/development/GITHUB_DISCOVERABILITY.md)
-
----
-
-## Release Notes
-
-- Current published version: see the npm badge above, or run `npm view oc-codex-multi-auth version`
-- Changelog: [CHANGELOG.md](CHANGELOG.md)
-- Releases are automated with [release-please](https://github.com/googleapis/release-please)
-
-Merging the release-please PR cuts the tagged release and publishes the package through the configured release workflow. Manual `npm publish` is not required for routine releases.
+- [Getting Started](docs/getting-started.md) — install, login methods, first prompt
+- [Tools and CLI](docs/tools-and-cli.md) — full tool/CLI argument reference
+- [Configuration](docs/configuration.md) — every config key and env var
+- [Troubleshooting](docs/troubleshooting.md) / [FAQ](docs/faq.md)
+- [Architecture](docs/architecture.md) — how the pieces fit
+- [Privacy](docs/privacy.md) — what is stored and where
+- [Config templates](config/README.md) — modern vs. legacy catalogs
+- [Changelog](CHANGELOG.md) — release history
+- Maintainer docs: [docs/development/](docs/development/ARCHITECTURE.md)
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
-
-<details>
-<summary><b>Legal</b></summary>
-
-- Not affiliated with OpenAI.
-- "ChatGPT", "GPT-5", "Codex", and "OpenAI" are trademarks of OpenAI.
-- You assume responsibility for your own usage and compliance.
-
-</details>
+MIT — see [LICENSE](LICENSE). Not affiliated with OpenAI; "ChatGPT", "Codex",
+and "OpenAI" are trademarks of OpenAI.
