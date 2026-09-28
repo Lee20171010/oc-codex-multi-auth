@@ -293,20 +293,27 @@ otherwise reset every other setting in it.
 
 ### Numeric bounds
 
-`lib/schemas.ts` validates the config file with Zod. An out-of-bounds file value fails validation for that key, the loader logs a validation warning, and the key is dropped, so the default applies. It is never clamped to the nearest bound. Environment numeric overrides take a different path through `resolveNumberSetting` in `lib/config.ts`, which applies only a lower floor and no upper bound. The exception is `CODEX_AUTH_CREDENTIAL_SNAPSHOTS_MAX_COUNT`, which is strict instead of clamped: an env value that is not a non-negative integer is rejected outright and the config file / default applies, because flooring a negative value to `0` would silently select keep-everything.
+`lib/schemas.ts` validates the config file with Zod. An out-of-bounds file value fails validation for that key, the loader logs a validation warning, and the key is dropped, so the default applies. It is never clamped to the nearest bound. Environment numeric overrides take a different path through `resolveNumberSetting` in `lib/config.ts`, which clamps into the configured range instead of dropping: a duration env value above `MAX_CONFIG_DURATION_MS` (86400000, i.e. 24h) is capped rather than silently honoured as an infinite wait. `retryAllAccountsMaxWaitMs` is exempt from that ceiling because `0` is a documented "wait without a bound" for riding out multi-day quota resets. Integer-semantic env values are strict: a fractional `CODEX_AUTH_*=2.5` is rejected and the config file / default applies, the same contract `CODEX_AUTH_CREDENTIAL_SNAPSHOTS_MAX_COUNT` already had (flooring a negative value to `0` would silently select keep-everything, and truncating `2.5` would honour a count nobody wrote).
 
 | field | config-file bounds (Zod) | env bounds (resolver) |
 |-------|--------------------------|-----------------------|
-| `fastSessionMaxInputItems` | 8 to 200 | 8, no ceiling |
-| `parallelProbingMaxConcurrency` | 1 to 5 | 1 to 5 (clamped) |
-| `toastDurationMs` | at least 1000 | 1000 |
-| `fetchTimeoutMs` | at least 1000 | 1000 |
-| `streamStallTimeoutMs` | at least 1000 | 1000 |
-| `quotaNotifications.intervalMs` | at least 30000 | clamped up to 30000 |
+| `fastSessionMaxInputItems` | integer, 8 to 200 | integer, at least 8, no ceiling |
+| `retryAllAccountsMaxRetries` | integer, at least 0 | integer, at least 0 |
+| `retryAllAccountsMaxWaitMs` | at least 0 | at least 0 (`0` = unlimited; no 24h ceiling) |
+| `parallelProbingMaxConcurrency` | integer, 1 to 5 | integer, clamped 1 to 5 |
+| `emptyResponseMaxRetries` | integer, at least 0 | integer, at least 0 |
+| `toastDurationMs` | 1000 to 86400000 | clamped 1000 to 86400000 |
+| `tokenRefreshSkewMs` | 0 to 86400000 | clamped 0 to 86400000 |
+| `rateLimitToastDebounceMs` | 0 to 86400000 | clamped 0 to 86400000 |
+| `emptyResponseRetryDelayMs` | 0 to 86400000 | clamped 0 to 86400000 |
+| `fetchTimeoutMs` | 1000 to 86400000 | clamped 1000 to 86400000 |
+| `streamStallTimeoutMs` | 1000 to 86400000 | clamped 1000 to 86400000 |
+| `quotaNotifications.intervalMs` | 30000 to 86400000 | clamped 30000 to 86400000 |
+| `quotaStatus.rotateMs` | 1000 to 86400000 | (file only) |
 | `retryBudgetOverrides.*` | integer, at least 0 | (file only) |
 | `credentialSnapshotsMaxCount` | integer, at least 0 | integer, at least 0 (rejected, not clamped) |
 
-So `parallelProbingMaxConcurrency: 9` in the file falls back to the default `2`, while `CODEX_AUTH_PARALLEL_PROBING_MAX_CONCURRENCY=9` is accepted with no ceiling.
+So `parallelProbingMaxConcurrency: 9` in the file falls back to the default `2`, `CODEX_AUTH_PARALLEL_PROBING_MAX_CONCURRENCY=9` is clamped to `5`, and `CODEX_AUTH_PARALLEL_PROBING_MAX_CONCURRENCY=2.5` is rejected as non-integer so the file / default applies.
 
 ### `modelAccountPools`
 

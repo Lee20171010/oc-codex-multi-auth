@@ -1,4 +1,4 @@
-import { readFileSync, promises as fs } from "node:fs";
+import { readFileSync, statSync, promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -34,6 +34,8 @@ import {
 	EnvNumberSchema,
 	makeEnvEnumSchema,
 	makeEnvIntegerSchema,
+	MAX_CONFIG_DURATION_MS,
+	parseAccountIdOverride,
 } from "./schemas.js";
 
 const CONFIG_PATH = join(homedir(), ".opencode", "openai-codex-auth-config.json");
@@ -119,7 +121,25 @@ const DEFAULT_CONFIG: PluginConfig = {
 	streamStallTimeoutMs: 45_000,
 };
 
+/**
+ * File-signature the config cache is keyed on. `mtimeMs`+`size` alone miss
+ * an in-place rewrite that preserves both (the hot-reload contract requires
+ * detecting exactly that), so `ctimeMs` and `ino` ride along: POSIX bumps
+ * ctime on every inode-status change and a rename-based replace changes the
+ * inode. Fields are `| undefined` because partial Stats stand-ins (mocks,
+ * odd filesystems) may not supply all of them — a missing field simply
+ * compares equal on both sides.
+ */
+type PluginConfigFileStat = {
+	readonly mtimeMs: number | undefined;
+	readonly ctimeMs: number | undefined;
+	readonly size: number | undefined;
+	readonly ino: number | undefined;
+};
+
 let pluginConfigCache: {
+	/** Signature of the file at the time `content` was read; `undefined` means the file was missing. */
+	readonly stat: PluginConfigFileStat | undefined;
 	readonly content: string | undefined;
 	readonly config: PluginConfig;
 } | undefined;
@@ -128,24 +148,68 @@ export function resetPluginConfigCache(): void {
 	pluginConfigCache = undefined;
 }
 
+function statPluginConfigFile(): PluginConfigFileStat {
+	const stat = statSync(CONFIG_PATH);
+	return {
+		mtimeMs: stat.mtimeMs,
+		ctimeMs: stat.ctimeMs,
+		size: stat.size,
+		ino: stat.ino,
+	};
+}
+
+function sameConfigFileStat(
+	a: PluginConfigFileStat | undefined,
+	b: PluginConfigFileStat | undefined,
+): boolean {
+	if (a === undefined || b === undefined) return false;
+	return (
+		a.mtimeMs === b.mtimeMs &&
+		a.ctimeMs === b.ctimeMs &&
+		a.size === b.size &&
+		a.ino === b.ino
+	);
+}
+
 /**
  * Load plugin configuration from ~/.opencode/openai-codex-auth-config.json
  * Keeps the last usable configuration during incomplete writes; defaults on cold start.
+ *
+ * This runs on the per-request path, so the file is only re-read when its
+ * stat signature changed and only re-validated when its content did —
+ * an unchanged file costs one `statSync`, not a read+parse.
  *
  * @returns Plugin configuration
  */
 export function loadPluginConfig(): PluginConfig {
 	try {
+		const stat = statPluginConfigFile();
+		if (
+			pluginConfigCache !== undefined &&
+			sameConfigFileStat(pluginConfigCache.stat, stat)
+		) {
+			return pluginConfigCache.config;
+		}
 		const content = readFileSync(CONFIG_PATH, "utf-8");
 		if (pluginConfigCache?.content === content) {
+			pluginConfigCache = { stat, content, config: pluginConfigCache.config };
 			return pluginConfigCache.config;
 		}
 		const config = readPluginConfig(content) ?? pluginConfigCache?.config ?? DEFAULT_CONFIG;
-		pluginConfigCache = { content, config };
+		pluginConfigCache = { stat, content, config };
 		return config;
 	} catch (error) {
-		if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-			pluginConfigCache = { content: undefined, config: pluginConfigCache?.config ?? DEFAULT_CONFIG };
+		if (hasErrorCode(error, "ENOENT")) {
+			// A missing file was already recorded: no point probing the path
+			// again until something changes it, so answer from the cache.
+			if (pluginConfigCache !== undefined && pluginConfigCache.stat === undefined) {
+				return pluginConfigCache.config;
+			}
+			pluginConfigCache = {
+				stat: undefined,
+				content: undefined,
+				config: pluginConfigCache?.config ?? DEFAULT_CONFIG,
+			};
 		} else {
 			logWarn(`Failed to read config from ${CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -429,8 +493,19 @@ async function performModelAccountPoolMutation(
 		);
 	}
 
-	const pools = { ...(poolResult.data.modelAccountPools ?? {}) };
-	const poolModes = { ...(poolResult.data.modelAccountPoolModes ?? {}) };
+	// Null-prototype accumulators: `normalizedModel` is arbitrary caller input
+	// and `pools[model] = ids` on a plain object with model = "__proto__" would
+	// invoke the [[Set]] prototype write instead of creating an own property.
+	// `Object.assign` onto a null-prototype target keeps even that key inert.
+	// The same consideration already guards the fallback-chain normalizer.
+	const pools: Record<string, string[]> = Object.assign(
+		Object.create(null),
+		poolResult.data.modelAccountPools ?? {},
+	);
+	const poolModes: Record<string, ModelAccountPoolMode> = Object.assign(
+		Object.create(null),
+		poolResult.data.modelAccountPoolModes ?? {},
+	);
 	const matchingKeys = Object.keys(pools).filter(
 		(key) => key.trim().toLowerCase() === normalizedModel,
 	);
@@ -543,10 +618,16 @@ async function performModelAccountPoolMutation(
  * silently cast into place.
  */
 function salvageValidKeys(raw: Record<string, unknown>): Partial<PluginConfig> {
-	const salvaged: Record<string, unknown> = {};
+	// Null-prototype accumulator + an own-property read on the probe result:
+	// a config file can legitimately carry an own `__proto__` key (JSON.parse
+	// creates one), and `salvaged[key] = value` on a plain object would write
+	// to the prototype rather than the key. `Object.hasOwn` on the parsed
+	// data also skips keys the schema stripped instead of reading an
+	// inherited `__proto__` accessor.
+	const salvaged: Record<string, unknown> = Object.create(null);
 	for (const [key, value] of Object.entries(raw)) {
 		const probe = PluginConfigSchema.safeParse({ [key]: value });
-		if (probe.success) {
+		if (probe.success && Object.hasOwn(probe.data, key)) {
 			const candidate = (probe.data as Record<string, unknown>)[key];
 			if (candidate !== undefined) {
 				salvaged[key] = candidate;
@@ -625,6 +706,57 @@ function resolveNumberSetting(
 	return result;
 }
 
+/**
+ * Number resolver for count/index-semantic settings. The env value must be
+ * an integer — a fractional `CODEX_AUTH_*=2.5` falls back to config/default
+ * rather than being silently truncated — and the resolved candidate is
+ * truncated after clamping so a fractional value that bypassed file
+ * validation still yields an integer.
+ */
+function resolveIntegerSetting(
+	envName: string,
+	configValue: number | undefined,
+	defaultValue: number,
+	options?: { min?: number; max?: number },
+): number {
+	const envValue = parseIntegerEnv(
+		process.env[envName],
+		Number.MIN_SAFE_INTEGER,
+	);
+	const candidate = envValue ?? configValue ?? defaultValue;
+	const min = options?.min;
+	const max = options?.max;
+	let result = Math.trunc(candidate);
+	if (min !== undefined) {
+		result = Math.max(min, result);
+	}
+	if (max !== undefined) {
+		result = Math.min(max, result);
+	}
+	return result;
+}
+
+/**
+ * Number resolver for millisecond durations. Same clamp contract as
+ * {@link resolveNumberSetting}, but every duration gets a ceiling of
+ * {@link MAX_CONFIG_DURATION_MS} (24h) unless the caller passes a tighter
+ * one: an env value like `1e15` is not a long timeout, it is an infinite
+ * wait spelled with digits, and a poll interval that large silently
+ * disables the feature. Settings whose documented semantic is `0` =
+ * unlimited (`retryAllAccountsMaxWaitMs`) use resolveNumberSetting instead.
+ */
+function resolveDurationMsSetting(
+	envName: string,
+	configValue: number | undefined,
+	defaultValue: number,
+	options?: { min?: number; max?: number },
+): number {
+	return resolveNumberSetting(envName, configValue, defaultValue, {
+		min: options?.min,
+		max: options?.max ?? MAX_CONFIG_DURATION_MS,
+	});
+}
+
 function resolveStringSetting<T extends string>(
 	envName: string,
 	configValue: T | undefined,
@@ -645,6 +777,19 @@ function resolveStringSetting<T extends string>(
 		return configValue;
 	}
 	return defaultValue;
+}
+
+/**
+ * The effective `CODEX_AUTH_ACCOUNT_ID` override: the trimmed, length-bounded
+ * (256) value from {@link AccountIdOverrideSchema}, or `undefined` when the
+ * env var is unset, blank, or out of bounds. Reading `process.env` raw would
+ * accept whitespace-only or unbounded input, so every consumer should come
+ * through here — `resolveAccountSelection` in `lib/auth/login-runner.ts`
+ * already does, and the request path can adopt the same helper for runtime
+ * account pinning.
+ */
+export function resolveAccountIdOverride(): string | undefined {
+	return parseAccountIdOverride(process.env.CODEX_AUTH_ACCOUNT_ID);
 }
 
 /**
@@ -842,7 +987,7 @@ export function getModelAccountPoolMode(
 }
 
 export function getFastSessionMaxInputItems(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveIntegerSetting(
 		"CODEX_AUTH_FAST_SESSION_MAX_INPUT_ITEMS",
 		pluginConfig.fastSessionMaxInputItems,
 		30,
@@ -892,6 +1037,9 @@ export function getRetryAllAccountsRateLimited(pluginConfig: PluginConfig): bool
 }
 
 export function getRetryAllAccountsMaxWaitMs(pluginConfig: PluginConfig): number {
+	// Deliberately resolveNumberSetting, not resolveDurationMsSetting: `0` is
+	// a documented "wait without a bound" for riding out multi-day quota
+	// resets, so the 24h ceiling the other durations take must not apply.
 	return resolveNumberSetting(
 		"CODEX_AUTH_RETRY_ALL_MAX_WAIT_MS",
 		pluginConfig.retryAllAccountsMaxWaitMs,
@@ -901,7 +1049,7 @@ export function getRetryAllAccountsMaxWaitMs(pluginConfig: PluginConfig): number
 }
 
 export function getRetryAllAccountsMaxRetries(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveIntegerSetting(
 		"CODEX_AUTH_RETRY_ALL_MAX_RETRIES",
 		pluginConfig.retryAllAccountsMaxRetries,
 		Infinity,
@@ -999,7 +1147,7 @@ export function getUnsupportedCodexFallbackChain(
 }
 
 export function getTokenRefreshSkewMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_TOKEN_REFRESH_SKEW_MS",
 		pluginConfig.tokenRefreshSkewMs,
 		60_000,
@@ -1008,7 +1156,7 @@ export function getTokenRefreshSkewMs(pluginConfig: PluginConfig): number {
 }
 
 export function getRateLimitToastDebounceMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_RATE_LIMIT_TOAST_DEBOUNCE_MS",
 		pluginConfig.rateLimitToastDebounceMs,
 		60_000,
@@ -1041,7 +1189,7 @@ export function getAutoUpdate(pluginConfig: PluginConfig): boolean {
 }
 
 export function getToastDurationMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_TOAST_DURATION_MS",
 		pluginConfig.toastDurationMs,
 		5_000,
@@ -1116,7 +1264,7 @@ export function getParallelProbing(pluginConfig: PluginConfig): boolean {
 }
 
 export function getParallelProbingMaxConcurrency(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveIntegerSetting(
 		"CODEX_AUTH_PARALLEL_PROBING_MAX_CONCURRENCY",
 		pluginConfig.parallelProbingMaxConcurrency,
 		2,
@@ -1125,7 +1273,7 @@ export function getParallelProbingMaxConcurrency(pluginConfig: PluginConfig): nu
 }
 
 export function getEmptyResponseMaxRetries(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveIntegerSetting(
 		"CODEX_AUTH_EMPTY_RESPONSE_MAX_RETRIES",
 		pluginConfig.emptyResponseMaxRetries,
 		2,
@@ -1134,7 +1282,7 @@ export function getEmptyResponseMaxRetries(pluginConfig: PluginConfig): number {
 }
 
 export function getEmptyResponseRetryDelayMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_EMPTY_RESPONSE_RETRY_DELAY_MS",
 		pluginConfig.emptyResponseRetryDelayMs,
 		1_000,
@@ -1151,7 +1299,7 @@ export function getPidOffsetEnabled(pluginConfig: PluginConfig): boolean {
 }
 
 export function getFetchTimeoutMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_FETCH_TIMEOUT_MS",
 		pluginConfig.fetchTimeoutMs,
 		60_000,
@@ -1160,7 +1308,7 @@ export function getFetchTimeoutMs(pluginConfig: PluginConfig): number {
 }
 
 export function getStreamStallTimeoutMs(pluginConfig: PluginConfig): number {
-	return resolveNumberSetting(
+	return resolveDurationMsSetting(
 		"CODEX_AUTH_STREAM_STALL_TIMEOUT_MS",
 		pluginConfig.streamStallTimeoutMs,
 		45_000,
@@ -1195,7 +1343,7 @@ export function getQuotaNotifications(
 		true,
 	);
 
-	const intervalMs = resolveNumberSetting(
+	const intervalMs = resolveDurationMsSetting(
 		"CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS",
 		config?.intervalMs,
 		1_800_000,
@@ -1210,14 +1358,12 @@ export function getQuotaNotifications(
 		// Normalize: unique, in range, most-generous first. An explicitly empty
 		// array is honoured — it is the only way to run `notifyEveryCheck`
 		// without threshold alerts, so it must not fall back to the defaults.
+		// The range guard looks redundant next to the schema's own
+		// `min(0).max(100)`, and through the file path it is — it exists for
+		// callers that hand this function an unvalidated PluginConfig.
 		thresholds = Array.from(new Set(configured))
 			.filter((value) => Number.isFinite(value) && value >= 0 && value <= 100)
 			.sort((a, b) => b - a);
-		if (thresholds.length === 0 && configured.length > 0) {
-			logWarn(
-				"[quotaNotifications] every configured threshold was out of the 0-100 range; threshold alerts are disabled",
-			);
-		}
 	}
 
 	return {
@@ -1354,7 +1500,10 @@ export function getQuotaStatus(pluginConfig: PluginConfig): QuotaStatusConfig {
 		screens: resolveQuotaStatusScreens(config?.mode),
 		rotateMs:
 			typeof rotateMs === "number" && Number.isFinite(rotateMs)
-				? Math.max(MIN_QUOTA_STATUS_ROTATE_MS, rotateMs)
+				? Math.min(
+						MAX_CONFIG_DURATION_MS,
+						Math.max(MIN_QUOTA_STATUS_ROTATE_MS, rotateMs),
+					)
 				: DEFAULT_QUOTA_STATUS_ROTATE_MS,
 		// Per-account by default: someone switching to `overview` is asking
 		// where each account stands, and the count alone is the one form that

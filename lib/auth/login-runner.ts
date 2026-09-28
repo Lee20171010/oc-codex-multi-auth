@@ -16,6 +16,7 @@ import {
 import { extractPlanType } from "./plan-tier.js";
 import { hasMissingScopeReauthNote, stripReauthNote } from "../accounts/state.js";
 import { logInfo } from "../logger.js";
+import { resolveAccountIdOverride } from "../config.js";
 import { normalizeScope } from "./scopes.js";
 import { MODEL_FAMILIES, type ModelFamily } from "../prompts/codex.js";
 import { withAccountStorageTransaction } from "../storage.js";
@@ -249,7 +250,10 @@ const createSelectionVariant = (
 
 export function resolveAccountSelection(tokens: TokenSuccess): AccountSelectionResult {
 	const planType = extractPlanType(tokens.access);
-	const override = (process.env.CODEX_AUTH_ACCOUNT_ID ?? "").trim();
+	// Routed through AccountIdOverrideSchema: trimmed, non-empty and
+	// length-bounded. A raw env read would honour whitespace-only or
+	// unbounded input as a real account id.
+	const override = resolveAccountIdOverride();
 	if (override) {
 		const suffix = override.length > 6 ? override.slice(-6) : override;
 		logInfo(`Using account override from CODEX_AUTH_ACCOUNT_ID (id:${suffix}).`);
