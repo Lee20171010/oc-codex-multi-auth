@@ -823,9 +823,17 @@ async function readStandaloneFlaggedPool(storagePath, parsed, resolution, env = 
 		let storageMod = null;
 		try {
 			[storageMod] = await loadRuntime();
-		} catch {
-			// No built dist alongside the script — the file probe below keeps
-			// the pre-keychain behavior rather than failing the command.
+		} catch (error) {
+			// The file probe is only the fallback for a MISSING dist build (a
+			// dev checkout that never ran `npm run build`). When dist/storage.js
+			// exists the import should have succeeded — a throw here is a real
+			// runtime failure, and falling through would report zero flagged
+			// accounts while the keychain still holds them.
+			const distProbe = options.distFlaggedRuntimePresent
+				?? (() => existsSync(join(repoRoot, "dist", "lib", "storage.js")));
+			if (distProbe()) {
+				return { storage: null, error: formatErrorForLog(error) };
+			}
 		}
 		if (storageMod && typeof storageMod.loadFlaggedAccounts === "function") {
 			try {
@@ -3222,6 +3230,14 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 			// surfaces its own error; skip the comment probe.
 		}
 	}
+	let existingTuiConfigHadComments = false;
+	if (tuiConfigChanged && existsSync(paths.tuiConfigPath)) {
+		try {
+			existingTuiConfigHadComments = jsoncContainsComments(await readFile(paths.tuiConfigPath, "utf-8"));
+		} catch {
+			// Same as the main config: the write below surfaces its own error.
+		}
+	}
 	let wrote = false;
 	if (dryRun) {
 		log(`[dry-run] ${configChanged ? "Would write" : "Would leave unchanged"} ${v1ConfigPath} using ${effectiveConfigMode} config`);
@@ -3233,6 +3249,9 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		log(`[dry-run] ${tuiConfigChanged ? "Would write" : "Would leave unchanged"} ${paths.tuiConfigPath} with the TUI status plugin`);
 		log(`[dry-run] Diff for ${paths.tuiConfigPath}:`);
 		log(formatRedactedConfigDiff(existingTuiConfig, nextTuiConfig));
+		if (existingTuiConfigHadComments) {
+			log(`[dry-run] Note: ${paths.tuiConfigPath} contains comments that a rewrite would not preserve; they remain only in the backup.`);
+		}
 	} else {
 		if (configChanged) {
 			if (existsSync(v1ConfigPath)) {
@@ -3252,6 +3271,9 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 			if (existsSync(paths.tuiConfigPath)) {
 				const backupPath = await backupConfig(paths.tuiConfigPath, false);
 				log(`Backup created: ${backupPath}`);
+			}
+			if (existingTuiConfigHadComments) {
+				log(`Note: ${paths.tuiConfigPath} contains comments that the rewrite does not preserve; your notes remain in the .bak backup above.`);
 			}
 			await writeFileAtomic(paths.tuiConfigPath, formatJson(nextTuiConfig));
 			wrote = true;
