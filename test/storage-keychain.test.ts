@@ -55,6 +55,7 @@ interface MockBackend extends KeychainBackend {
 	calls: Array<{ op: string; service: string; account: string }>;
 	setShouldThrow: boolean;
 	available: boolean;
+	deleteShouldKeepEntry: boolean;
 }
 
 function createMockBackend(): MockBackend {
@@ -65,6 +66,7 @@ function createMockBackend(): MockBackend {
 		calls,
 		setShouldThrow: false,
 		available: true,
+		deleteShouldKeepEntry: false,
 		async get(service, account) {
 			calls.push({ op: "get", service, account });
 			return store.get(`${service}::${account}`) ?? null;
@@ -78,6 +80,11 @@ function createMockBackend(): MockBackend {
 		},
 		async delete(service, account) {
 			calls.push({ op: "delete", service, account });
+			if (backend.deleteShouldKeepEntry) {
+				// Refuses the delete without removing the entry — its `false`
+				// is indistinguishable from "entry was never there".
+				return false;
+			}
 			return store.delete(`${service}::${account}`);
 		},
 		async isAvailable() {
@@ -399,6 +406,62 @@ describe("load-save integration with CODEX_KEYCHAIN", () => {
 		await clearAccounts();
 		expect(mock.store.size).toBe(0);
 		expect(existsSync(storagePath)).toBe(false);
+	});
+
+	it("clearAccounts retires .migrated-to-keychain backups that still hold refresh tokens", async () => {
+		// Every opt-in save preserves the pre-keychain JSON as a rollback
+		// artefact — plaintext refresh tokens a clear must erase along with
+		// the canonical file (same leak class as the flagged-store P1 on
+		// PR #275).
+		setOptIn(true);
+		// The migration backup only appears when a canonical JSON precedes the
+		// keychain save — seed it like an existing opt-out user opting in.
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage(), null, 2), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		await saveAccounts(makeStorage());
+		const backupName = (await fs.readdir(storageDir)).find((name) =>
+			name.startsWith("accounts.json.migrated-to-keychain."),
+		);
+		expect(backupName).toBeDefined();
+		// Recreate the canonical pool so the clear retires all artefacts.
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage(), null, 2), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+
+		await clearAccounts();
+
+		expect(existsSync(storagePath)).toBe(false);
+		expect(existsSync(join(storageDir, backupName!))).toBe(false);
+		const survivors = (await fs.readdir(storageDir)).filter((name) =>
+			name.includes(".migrated-to-keychain."),
+		);
+		expect(survivors).toHaveLength(0);
+	});
+
+	it("clearAccounts verifies the keychain delete with a read — a surviving entry is surfaced", async () => {
+		// A backend that refuses the delete while the entry survives returns
+		// the same `false` as "entry absent". The clear must re-read the key
+		// rather than trust the boolean, or the cleared pool resurrects on
+		// the next keychain-first load.
+		setOptIn(true);
+		await saveAccounts(makeStorage());
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage(), null, 2), {
+			encoding: "utf-8",
+			mode: 0o600,
+		});
+		mock.deleteShouldKeepEntry = true;
+
+		await expect(clearAccounts()).resolves.toBeUndefined();
+
+		const ops = mock.calls.map((c) => `${c.op}:${c.account}`);
+		const deleteIdx = ops.indexOf(`delete:${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`);
+		expect(deleteIdx).toBeGreaterThanOrEqual(0);
+		expect(
+			ops.indexOf(`get:${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`, deleteIdx),
+		).toBeGreaterThan(deleteIdx);
 	});
 
 	// --- F1 post-merge review regression tests -----------------------------------

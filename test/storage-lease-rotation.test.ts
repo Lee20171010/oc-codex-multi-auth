@@ -25,7 +25,14 @@
  * the member guard, and the `updated > 0` no-op persist check.
  */
 
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	access,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -304,8 +311,12 @@ describe("exchange→commit gap recovery", () => {
 		const flagged = await loadFlaggedAccounts();
 		expect(flagged.accounts[0]?.refreshToken).toBe("r1");
 		expect((await loadAccounts())?.accounts).toHaveLength(0);
-		// and the journal is left for the next refresh to confirm the heal
-		await access(journalPath);
+		// and the journal is left for the next refresh to confirm the heal —
+		// now named with a per-token suffix rather than the legacy bare path
+		const pendingJournals = (await readdir(storageDir)).filter((name) =>
+			name.startsWith("accounts.json.refresh.pending"),
+		);
+		expect(pendingJournals).toHaveLength(1);
 
 		// a follow-up flagged refresh sees the healed copy and works normally
 		vi.mocked(queuedRefresh).mockImplementation(async (token: string) =>
@@ -320,7 +331,11 @@ describe("exchange→commit gap recovery", () => {
 			"r1",
 		]);
 		expect((await loadFlaggedAccounts()).accounts[0]?.refreshToken).toBe("r2");
-		await expect(access(journalPath)).rejects.toMatchObject({ code: "ENOENT" });
+		expect(
+			(await readdir(storageDir)).filter((name) =>
+				name.startsWith("accounts.json.refresh.pending"),
+			),
+		).toEqual([]);
 	});
 
 	it("salvages the rotated token when the record moved to the main store mid-exchange", async () => {
