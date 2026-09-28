@@ -2215,6 +2215,24 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(resolved.storagePath).not.toContain("decoy-home");
 	});
 
+	it("refuses to resolve the pool when os.homedir() is not absolute", async () => {
+		// homedir() echoes a relative $HOME verbatim on POSIX — without the
+		// absolute-path check the CLI would point account storage at a
+		// cwd-relative ".opencode" and `warm` would write token-bearing state
+		// outside the user's home (greptile P1 on PR #282).
+		vi.resetModules();
+		vi.stubEnv("HOME", "relative-home");
+		vi.stubEnv("USERPROFILE", "relative-home");
+		const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		expect(() =>
+			__test.resolveStandaloneStorage(
+				{},
+				{ HOME: "relative-home", USERPROFILE: "relative-home" },
+			),
+		).toThrow(/absolute home directory/i);
+	});
+
 	it("doctor: summarizes the keychain-held flagged pool, not just the sibling file", async () => {
 		// With CODEX_KEYCHAIN=1 a flagged save migrates the sibling file away,
 		// so a file-only probe reports zero flagged accounts while the

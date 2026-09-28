@@ -727,7 +727,18 @@ function resolveStandaloneStorage(options, env = process.env, projectDir) {
 	// from `resolveHomeDirectory(env)` (which prefers env.HOME) can diverge
 	// from homedir() under a redirected HOME, e.g. Windows shells, and the
 	// CLI would report a different pool than the plugin actually uses.
-	const opencodeDir = join(homedir(), ".opencode");
+	const homeDir = homedir();
+	// homedir() bypasses resolveHomeDirectory's absolute-path check — on
+	// POSIX it echoes $HOME verbatim, so a relative or empty HOME yields a
+	// relative home and `warm`/`status` would write token-bearing state
+	// under the working directory. Refuse exactly like the write root does.
+	if (!isAbsolute(homeDir)) {
+		throw new Error(
+			`Cannot resolve an absolute home directory (os.homedir()=${JSON.stringify(homeDir)}; HOME=${JSON.stringify(env.HOME)}). ` +
+				"Set HOME to an absolute path; refusing to point account storage at a relative path.",
+		);
+	}
+	const opencodeDir = join(homeDir, ".opencode");
 	if (resolvePerProjectAccounts(env, opencodeDir)) {
 		const startDir = typeof projectDir === "string" && projectDir.trim()
 			? projectDir
@@ -3250,13 +3261,13 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		log(`[dry-run] Diff for ${v1ConfigPath}:`);
 		log(formatRedactedConfigDiff(existingConfig, nextConfig));
 		if (existingConfigHadComments) {
-			log(`[dry-run] Note: ${v1ConfigPath} contains comments that a rewrite would not preserve; they remain only in the backup.`);
+			log(`[dry-run] Note: ${v1ConfigPath} contains comments that an actual install would not preserve; that install would create a backup containing them.`);
 		}
 		log(`[dry-run] ${tuiConfigChanged ? "Would write" : "Would leave unchanged"} ${paths.tuiConfigPath} with the TUI status plugin`);
 		log(`[dry-run] Diff for ${paths.tuiConfigPath}:`);
 		log(formatRedactedConfigDiff(existingTuiConfig, nextTuiConfig));
 		if (existingTuiConfigHadComments) {
-			log(`[dry-run] Note: ${paths.tuiConfigPath} contains comments that a rewrite would not preserve; they remain only in the backup.`);
+			log(`[dry-run] Note: ${paths.tuiConfigPath} contains comments that an actual install would not preserve; that install would create a backup containing them.`);
 		}
 	} else {
 		if (configChanged) {
