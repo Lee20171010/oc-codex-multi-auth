@@ -169,6 +169,34 @@ describe("writeFileWithTimeout", () => {
 			restore();
 		}
 	});
+
+	it("closes the abandoned fsync handle on timeout so cleanup can delete the file", async () => {
+		const { syncSpy, restore } = await spyOnFileSync();
+		syncSpy.mockImplementation(() => new Promise<void>(() => {}));
+		// `close` is an own property on each FileHandle in Node >=22, so a
+		// prototype spy cannot see it. Capture the handle the flush arm opens
+		// with mode "r+" and assert it ended up closed (fd === -1): an
+		// abandoned open handle would pin the file on Windows and fail the
+		// caller's temp-file unlink.
+		const openSpy = vi.spyOn(fs, "open");
+		try {
+			const target = join(dir, "backup.json");
+			await expect(writeFileWithTimeout(target, "payload", 100)).rejects.toThrow(
+				/Timed out/i,
+			);
+			const flushCalls = openSpy.mock.calls.filter((c) => c[1] === "r+");
+			expect(flushCalls).toHaveLength(1);
+			const idx = openSpy.mock.calls.indexOf(flushCalls[0]!);
+			const flushHandle = await openSpy.mock.results[idx]!.value;
+			expect(flushHandle.fd).toBe(-1);
+			// With the handle closed, the caller's cleanup unlink succeeds.
+			await fs.unlink(target);
+			expect(existsSync(target)).toBe(false);
+		} finally {
+			openSpy.mockRestore();
+			restore();
+		}
+	});
 });
 
 describe("storage-level crash durability", () => {
