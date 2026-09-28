@@ -90,6 +90,11 @@ describe("accounts live reload", () => {
 	};
 	beforeEach(async () => {
 		vi.useFakeTimers();
+		// This file exercises the wait-and-wake machinery (external quota
+		// clears, upstream re-probes, mid-sleep logins) with waits far past
+		// the interactive ceiling, so it opts into truly unbounded waits
+		// instead of the bounded-by-default production behavior.
+		vi.stubEnv("CODEX_RETRY_ALL_UNBOUNDED", "1");
 		directory = await fs.mkdtemp(join(tmpdir(), "accounts-live-reload-"));
 		path = join(directory, "accounts.json");
 		setStoragePathDirect(path);

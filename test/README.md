@@ -6,7 +6,7 @@ The tree evolves frequently. Use `rg --files test` (or `find test -name '*.test.
 as the source of truth rather than any list committed here; this file describes
 the **shape** of the suite, not an exhaustive inventory.
 
-Current size: 136 test files, 118 at the top level plus `chaos/` (9),
+Current size: 159 test files, 141 at the top level plus `chaos/` (9),
 `property/` (6), and `contracts/` (3).
 
 ## Layout
@@ -105,7 +105,18 @@ upstream wire shapes the plugin depends on.
 
 ### `property/`
 fast-check property tests for rotation invariants, transformer edge cases,
-refresh/rotation interaction, tracker remapping, and redaction.
+refresh/rotation interaction, tracker remapping, and redaction. Shared
+configuration lives in `property/setup.ts` (a vitest `setupFiles` entry).
+
+`FC_SEED=<integer>` pins the fast-check seed for the whole run so a failing
+property case can be replayed exactly:
+
+```bash
+FC_SEED=12345 npx vitest run test/property
+```
+
+Unset or empty means the default random-per-run seeding. A non-integer value
+fails at setup rather than silently running unseeded.
 
 ### `chaos/`
 Fault injection and stress: auth faults, invalidated-401 storms, concurrent

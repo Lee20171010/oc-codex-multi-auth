@@ -128,7 +128,7 @@ We will decline features that:
 ## Local Development
 
 ### Prerequisites
-- Node.js ≥ 18 (LTS recommended)
+- Node.js ≥ 22.19 (LTS recommended)
 - npm ≥ 9
 - Git
 

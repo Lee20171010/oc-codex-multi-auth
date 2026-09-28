@@ -95,14 +95,17 @@ The full runtime set (`dependencies` in `package.json`) is:
 
 | Dependency | Role |
 |------------|------|
-| `@openauthjs/openauth` | OAuth / PKCE handling |
-| `@opencode-ai/plugin` | OpenCode plugin interface |
+| `@ai-sdk/openai` | AI SDK OpenAI provider client the OpenCode V2 adapter builds around the shared fetch |
+| `@opencode-ai/plugin` | OpenCode V1 plugin interface |
+| `@opencode/plugin` | OpenCode V2 plugin interface (`Plugin.Context`, `Integration`) |
+| `@opentui/solid`, `solid-js` | Terminal UI rendering for the account dashboard |
 | `@napi-rs/keyring` | Native OS keychain access for the opt-in credential backend |
-| `hono` | Lightweight HTTP routing for the local OAuth callback server |
 | `zod` | Schema validation at every process boundary |
 | `proper-lockfile` | Advisory locking for concurrent config/account writes |
-| `@opentui/core`, `@opentui/solid`, `solid-js` | Terminal UI rendering for the account dashboard |
-| `web-tree-sitter` | Syntax-aware handling in tool output |
+
+`@opentui/core` and `web-tree-sitter` are no longer direct dependencies; they
+remain in the install tree only as transitive dependencies (`@opentui/core` via
+`@opentui/solid`, `web-tree-sitter` via `@opentui/core`).
 
 `npm run audit:ci` gates production dependencies plus a reviewed dev-advisory
 allowlist. There are no telemetry or analytics dependencies.

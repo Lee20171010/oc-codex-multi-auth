@@ -52,6 +52,7 @@ That file controls plugin behavior such as retry policy, rotation strategy, begi
    - `--modern`: `config/opencode-modern.json` (compact 10 bases / 53 variants)
    - `--full`: modern bases merged with `config/opencode-legacy.json` explicit entries
    - `--legacy`: `config/opencode-legacy.json` only (53 explicit IDs)
+   - `--v2`: no template at all — it is plugin-only, writes a V2 `plugins` entry, and returns before the merge path below. It refuses an existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them.
 2. Back up an existing `~/.config/opencode/opencode.json` only when the merged result changes.
 3. Normalize the plugin list so it ends with plain `oc-codex-multi-auth`.
 4. Merge `provider.openai` with the selected shipped template block; `--plugin-only` skips this step entirely.
@@ -65,6 +66,7 @@ Additional flags:
 | `--dry-run` | Print changed config paths without values or writes |
 | `--no-cache-clear` | Skip OpenCode plugin cache cleanup |
 | `--plugin-only` | Explicit alias for default plugin/TUI registration without changing `provider.openai` |
+| `--v2` | Register for OpenCode V2 (plugin only, includes automatic quota UI loading); cannot be combined with a catalog mode |
 | `update [--dry-run]` | Clear managed package caches without reading or writing OpenCode config |
 | standalone first arg | Run CLI without install: `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm` |
 

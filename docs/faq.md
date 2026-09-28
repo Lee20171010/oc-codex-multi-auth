@@ -80,7 +80,7 @@ The supported package/plugin name is `oc-codex-multi-auth`. The legacy name `oc-
 
 ## Which Node version do I need?
 
-Node.js `>=18`.
+Node.js `>=22.19`.
 
 ## Where is the full tool and CLI list?
 

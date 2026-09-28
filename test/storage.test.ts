@@ -26,6 +26,7 @@ import {
   withFlaggedAccountStorageTransaction,
   type AccountStorageV3,
 } from "../lib/storage.js";
+import { ACCOUNTS_FILE_NAME, LEGACY_ACCOUNTS_FILE_NAME } from "../lib/constants.js";
 import { AccountManager, formatWaitTime } from "../lib/accounts.js";
 import { resetTrackers } from "../lib/rotation.js";
 import { MAX_QUOTA_RESET_HORIZON_MS } from "../lib/quota-windows.js";
@@ -1113,16 +1114,47 @@ describe("storage", () => {
   });
 
   describe("filename migration (TDD)", () => {
+    const projectDir = join(tmpdir(), "codex-legacy-" + Math.random().toString(36).slice(2));
+    const legacyDir = join(projectDir, ".opencode");
+    const legacyPath = join(legacyDir, LEGACY_ACCOUNTS_FILE_NAME);
+
+    beforeEach(async () => {
+      // `.opencode` is itself a project marker, so creating it also gives
+      // findProjectRoot() a root to resolve for setStoragePath().
+      await fs.mkdir(legacyDir, { recursive: true });
+      setStoragePath(projectDir);
+    });
+
+    afterEach(async () => {
+      setStoragePathDirect(null);
+      await fs.rm(projectDir, { recursive: true, force: true });
+    });
+
     it("should migrate from old filename to new filename", async () => {
-      // This test is tricky because it depends on the internal state of getStoragePath()
-      // which we are about to change.
-      
-      const oldName = "openai-codex-accounts.json";
-      const newName = "codex-accounts.json";
-      
-      // We'll need to mock/verify that loadAccounts checks for oldName if newName is missing
-      // Since we haven't implemented it yet, this is just a placeholder for the logic
-      expect(true).toBe(true); 
+      await fs.writeFile(
+        legacyPath,
+        JSON.stringify({
+          version: 3,
+          activeIndex: 0,
+          accounts: [
+            { accountId: "legacy", refreshToken: "ref-legacy", addedAt: 1, lastUsed: 1 },
+          ],
+        }),
+      );
+
+      const loaded = await loadAccounts();
+
+      // The legacy file seeds the namespaced project store and is consumed.
+      expect(loaded?.accounts).toHaveLength(1);
+      expect(loaded?.accounts[0]?.accountId).toBe("legacy");
+      expect(existsSync(legacyPath)).toBe(false);
+      const migratedPath = getStoragePath();
+      expect(basename(migratedPath)).toBe(ACCOUNTS_FILE_NAME);
+      expect(existsSync(migratedPath)).toBe(true);
+
+      // A second load reads the migrated file, not the consumed legacy one.
+      const reloaded = await loadAccounts();
+      expect(reloaded?.accounts[0]?.accountId).toBe("legacy");
     });
   });
 

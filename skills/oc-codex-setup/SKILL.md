@@ -67,6 +67,7 @@ refresh a stale package cache, since it never opens either config file.
 
 ## Other installer flags
 
+- `--v2` — register for OpenCode V2 (plugin only, includes automatic quota UI loading); cannot be combined with a catalog mode
 - `--dry-run` — show changed config paths without values or writes
 - `--no-cache-clear` — skip clearing the OpenCode plugin cache
 - `--modern` — install the compact modern catalog
@@ -115,7 +116,7 @@ opencode run "Explain this repository" --model=openai/gpt-5.5-medium
 
 ## Troubleshooting
 
-- Confirm the OpenCode config registers the plugin, as `"plugin": ["oc-codex-multi-auth"]` or as a path to the user's own checkout.
+- Confirm the OpenCode config registers the plugin, as `"plugin": ["oc-codex-multi-auth"]` or as a path to the user's own checkout. OpenCode V2 installs use the `plugins` array instead.
 - Re-run `opencode auth login` if tokens expired or the wrong workspace was selected.
 - Inspect `~/.opencode/logs/codex-plugin/` after a failed request.
 - Set `ENABLE_PLUGIN_REQUEST_LOGGING=1` for deeper request logging.

@@ -84,35 +84,42 @@ describe("chaos/storage-faults — real fault injection", () => {
 			// the fault injection by target path to keep the chaos scenario
 			// focused on the actual storage write rather than the lock.
 			const originalWriteFile = fs.writeFile.bind(fs);
+			const originalOpen = fs.open.bind(fs);
 			const isAccountsWrite = (target: unknown): boolean => {
 				const p = typeof target === "string" ? target : String(target);
 				// Lock file writes always land on `<storage>.lock`; the
 				// accounts write targets the atomic tmp file alongside it.
 				return !p.endsWith(".lock");
 			};
+			// writeFileAtomic persists via fs.open + FileHandle.writeFile + sync
+			// rather than fs.writeFile, so the fault must be injected on both
+			// entry points — whichever surface the storage layer uses, the first
+			// accounts write gets ENOSPC.
 			let accountsWriteCalls = 0;
+			const injectOnFirstAccountsWrite = (target: unknown): void => {
+				if (!isAccountsWrite(target)) return;
+				accountsWriteCalls += 1;
+				if (accountsWriteCalls === 1) {
+					throw Object.assign(
+						new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException,
+						{ code: "ENOSPC" },
+					);
+				}
+			};
 			const spy = vi.spyOn(fs, "writeFile").mockImplementation(
 				async (path, data, options) => {
-					if (!isAccountsWrite(path)) {
-						return originalWriteFile(
-							path as Parameters<typeof originalWriteFile>[0],
-							data as Parameters<typeof originalWriteFile>[1],
-							options as Parameters<typeof originalWriteFile>[2],
-						);
-					}
-					accountsWriteCalls += 1;
-					if (accountsWriteCalls === 1) {
-						const err = Object.assign(
-							new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException,
-							{ code: "ENOSPC" },
-						);
-						throw err;
-					}
+					injectOnFirstAccountsWrite(path);
 					return originalWriteFile(
 						path as Parameters<typeof originalWriteFile>[0],
 						data as Parameters<typeof originalWriteFile>[1],
 						options as Parameters<typeof originalWriteFile>[2],
 					);
+				},
+			);
+			const openSpy = vi.spyOn(fs, "open").mockImplementation(
+				async (path, flags, mode) => {
+					if (flags === "w" || flags === "w+") injectOnFirstAccountsWrite(path);
+					return originalOpen(path, flags, mode);
 				},
 			);
 
@@ -142,7 +149,7 @@ describe("chaos/storage-faults — real fault injection", () => {
 			// successful recovery. Lock-file writes are counted separately
 			// and not asserted here.
 			expect(accountsWriteCalls).toBe(2);
-			expect(spy).toHaveBeenCalled();
+			expect(spy.mock.calls.length + openSpy.mock.calls.length).toBeGreaterThan(0);
 		});
 	});
 

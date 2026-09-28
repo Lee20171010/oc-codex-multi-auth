@@ -121,7 +121,7 @@ Account indices are **1-based**. Destructive tools require an explicit confirm f
 
 - **`codex-warm` / CLI `warm`.** One lightweight request per enabled account to open usage windows. CLI exits non-zero if any account fails; disabled accounts are skipped.
 - **`codex-reset`.** Banked WHAM/rate-limit reset credits. `action="consume"` is irreversible and requires `confirm=true` (use `dryRun=true` to preview).
-- **`codex-pool`.** Accepts 1-based numbers but persists **stable account IDs** in `~/.opencode/openai-codex-auth-config.json`. Restart OpenCode after mutations.
+- **`codex-pool`.** Accepts 1-based numbers but persists **stable account IDs** in `~/.opencode/openai-codex-auth-config.json`. Mutations hot-reload: the fetch path re-reads the plugin config at the start of every request, so pool changes take effect on the next request without restarting OpenCode.
 - **Tool `codex-health` vs CLI `health`.** The tool refreshes every account's token against the auth server, so it makes real network calls and reports the live result. The CLI `health` command scans the local JSON storage and counts accounts where `enabled && hasRefreshToken`, with no network calls.
 - **Standalone default storage.** CLI commands read the **global** accounts file unless `--config-path` points at a project pool. In-session tools use the active per-project path when `perProjectAccounts` is true.
 - **Keychain routing.** `status`, `list`, `health`, and `dashboard` parse the JSON accounts file directly. `warm` and `limits` load the plugin storage runtime, so they honor `CODEX_KEYCHAIN=1`. `doctor` reads the JSON file directly unless `--fix` is passed, and `--fix` repairs through the storage runtime (an explicit `--config-path` forces keychain off for the repair).
@@ -313,13 +313,14 @@ the warm result, and newer concurrent block writes are preserved.
 | Flag | Effect |
 |------|--------|
 | (default) / `--plugin-only` | Register plugin/TUI entries without changing `provider.openai` |
+| `--v2` | Register for OpenCode V2 (plugin only, includes automatic quota UI loading) |
 | `--modern` | Install compact modern config (10 bases + variants) |
 | `--full` | Compact bases plus explicit selector entries |
 | `--legacy` | Explicit-only catalog (53 entries) |
 | `--dry-run` | Show changed config paths without values or writes |
 | `--no-cache-clear` | Skip clearing OpenCode plugin cache |
 
-Choose only one of `--plugin-only`, `--modern`, `--full`, or `--legacy`. Use `update [--dry-run]` when refreshing the package. It clears the managed OpenCode cache without reading or writing `opencode.json` or `tui.json`.
+Choose only one of `--plugin-only`, `--modern`, `--full`, or `--legacy`. `--v2` is plugin-only too: it cannot be combined with a catalog mode, writes a V2 `plugins` entry, and refuses an existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them. Use `update [--dry-run]` when refreshing the package. It clears the managed OpenCode cache without reading or writing `opencode.json` or `tui.json`.
 
 ### Standalone options
 
@@ -327,6 +328,9 @@ Choose only one of `--plugin-only`, `--modern`, `--full`, or `--legacy`. Use `up
 |------|--------|
 | `--json` | Machine-readable JSON output |
 | `--include-sensitive` | Include sensitive identity fields in JSON where applicable |
+| `--refresh` | With `limits`, read every account live instead of reporting the plugin's last readings |
+| `--sort account\|usage\|reset` | With `limits`, order accounts by number, least used, or earliest renewal (aliases: `number`, `used`, `renewal`) |
+| `--asc` / `--desc` | Sort direction for `--sort` (default `--asc`) |
 | `--deep` | Deeper diagnostics (used with `doctor`; implied by `diag`) |
 | `--fix` | With `doctor`, refresh enabled accounts and clear stale cooldown, rate-limit, and quota-exhaustion markers only after successful verification. A cleared quota stamp re-establishes itself on the next quota 429 or usage poll. Exit nonzero if any repair fails, or if the storage file cannot be read (unparseable, wrong shape, or a newer schema version). |
 | `--tag <tag>` | Filter accounts by tag when listing |

@@ -141,6 +141,10 @@ vi.mock("../lib/cli.js", () => ({
 	promptAddAnotherAccount: vi.fn(async () => false),
 }));
 
+// The mock mirrors lib/config.ts defaults exactly: every getter returns what
+// production returns for an empty PluginConfig with no env overrides, and the
+// config-aware getters keep the real `config.field ?? default` shape so a test
+// can still steer behavior through the loadPluginConfig mock.
 vi.mock("../lib/config.js", () => ({
 	getCodexMode: () => true,
 	getRequestTransformMode: () => "native",
@@ -149,21 +153,31 @@ vi.mock("../lib/config.js", () => ({
 	getFastSessionMaxInputItems: () => 30,
 	getRetryProfile: () => "balanced",
 	getRetryBudgetOverrides: () => ({}),
-	getRateLimitToastDebounceMs: () => 5000,
-	getRetryAllAccountsMaxRetries: () => 3,
-	getRetryAllAccountsMaxWaitMs: () => 30000,
+	getRateLimitToastDebounceMs: (config: import("../lib/types.js").PluginConfig) => config.rateLimitToastDebounceMs ?? 60_000,
+	getRetryAllAccountsMaxRetries: (config: import("../lib/types.js").PluginConfig) => config.retryAllAccountsMaxRetries ?? Infinity,
+	getRetryAllAccountsMaxWaitMs: (config: import("../lib/types.js").PluginConfig) => config.retryAllAccountsMaxWaitMs ?? 0,
 	getRetryAllAccountsRateLimited: (config: import("../lib/types.js").PluginConfig) => config.retryAllAccountsRateLimited ?? true,
-	getUnsupportedCodexPolicy: vi.fn(() => "fallback"),
-	getFallbackOnUnsupportedCodexModel: vi.fn(() => true),
-	getFallbackToGpt52OnUnsupportedGpt53: vi.fn(() => false),
+	getUnsupportedCodexPolicy: vi.fn(
+		(config: import("../lib/types.js").PluginConfig) =>
+			config.unsupportedCodexPolicy ??
+			(config.fallbackOnUnsupportedCodexModel ? "fallback" : "strict"),
+	),
+	getFallbackOnUnsupportedCodexModel: vi.fn(
+		(config: import("../lib/types.js").PluginConfig) =>
+			(config.unsupportedCodexPolicy ??
+				(config.fallbackOnUnsupportedCodexModel ? "fallback" : "strict")) === "fallback",
+	),
+	getFallbackToGpt52OnUnsupportedGpt53: vi.fn(
+		(config: import("../lib/types.js").PluginConfig) => config.fallbackToGpt52OnUnsupportedGpt53 ?? true,
+	),
 	getUnsupportedCodexFallbackChain: () => ({}),
 	getTokenRefreshSkewMs: () => 60000,
-	getSessionRecovery: () => false,
-	getAutoResume: () => false,
+	getSessionRecovery: (config: import("../lib/types.js").PluginConfig) => config.sessionRecovery ?? true,
+	getAutoResume: (config: import("../lib/types.js").PluginConfig) => config.autoResume ?? true,
 	getAutoUpdate: () => true,
 	getToastDurationMs: () => 5000,
 	getAccountToastsEnabled: vi.fn(() => true),
-	getPerProjectAccounts: (config: import("../lib/types.js").PluginConfig) => config.perProjectAccounts ?? false,
+	getPerProjectAccounts: (config: import("../lib/types.js").PluginConfig) => config.perProjectAccounts ?? true,
 	getEmptyResponseMaxRetries: () => 2,
 	getEmptyResponseRetryDelayMs: () => 1000,
 	getPidOffsetEnabled: () => false,
@@ -172,12 +186,13 @@ vi.mock("../lib/config.js", () => ({
 	getModelAccountPoolMode: vi.fn(() => "preferred"),
 	getFetchTimeoutMs: () => 60000,
 	getStreamStallTimeoutMs: () => 45000,
-	getCodexTuiV2: () => false,
-	getCodexTuiColorProfile: () => "ansi16",
+	getCodexTuiV2: () => true,
+	getCodexTuiColorProfile: () => "truecolor",
 	getCodexTuiGlyphMode: () => "ascii",
 	getCodexTuiMaskEmail: vi.fn(() => false),
 	getQuotaDisplay: vi.fn(() => "free"),
 	getBeginnerSafeMode: () => false,
+	resolveAccountIdOverride: () => undefined,
 	loadPluginConfig: vi.fn((): import("../lib/types.js").PluginConfig => ({})),
 }));
 
@@ -1479,7 +1494,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns message when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-list"].execute();
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 			expect(result).toContain("opencode auth login");
 		});
 
@@ -1551,7 +1566,8 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "r2", email: "user2@example.com", accountId: "acc-2" },
 			];
 			const result = await plugin.tool["codex-list"].execute();
-			expect(result).toContain("Codex Accounts (2)");
+			expect(result).toContain("Codex accounts");
+			expect(result).toContain("Total: 2");
 			expect(result).toContain("Account 1");
 			expect(result).toContain("Account 2");
 		});
@@ -1595,7 +1611,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-switch"].execute({ index: 1 });
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("returns guidance when index is omitted in non-interactive mode", async () => {
@@ -1617,7 +1633,7 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "r2", email: "user2@example.com" },
 			];
 			const result = await plugin.tool["codex-switch"].execute({ index: 2 });
-			expect(result).toContain("Switched to account");
+			expect(result).toContain("Switched to Account 2");
 		});
 
 		it("reloads account manager from disk when cached manager exists", async () => {
@@ -1669,7 +1685,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-status"].execute();
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("shows detailed status for accounts", async () => {
@@ -1678,7 +1694,7 @@ describe("OpenAIOAuthPlugin", () => {
 			];
 			mockStorage.activeIndexByFamily = { codex: 0 };
 			const result = await plugin.tool["codex-status"].execute();
-			expect(result).toContain("Account Status");
+			expect(result).toContain("Account status");
 			expect(result).toContain("Active index by model family");
 		});
 
@@ -1742,7 +1758,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-limits"].execute();
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 			const parsed = JSON.parse(await plugin.tool["codex-limits"].execute({ format: "json" }));
 			expect(parsed).toHaveProperty("pool", null);
 		});
@@ -2147,11 +2163,13 @@ describe("OpenAIOAuthPlugin", () => {
 
 			expect(result).toContain("3 account");
 			expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-			expect(result).toContain("Account 1 (a@test.com, id:acc-1):");
-			expect(result).toContain("Account 2 (a@test.com, id:acc-2) [active]:");
+			expect(result).toContain("Account 1 (a@test.com, id:acc-1)");
+			expect(result).toContain("Account 2 (a@test.com, id:acc-2) [active]");
 			expect(result.match(/Account 2 \(a@test\.com, id:acc-2\)/g)).toHaveLength(1);
-			expect(result).toContain("Account 3 (b@test.com, id:acc-3):");
-			expect(result).not.toContain("Account 2 (a@test.com, id:acc-2):");
+			expect(result).toContain("Account 3 (b@test.com, id:acc-3)");
+			// The single acc-2 row must carry [active]; an unmarked duplicate row
+			// would end right after the closing parenthesis.
+			expect(result).not.toMatch(/Account 2 \(a@test\.com, id:acc-2\)\s*$/m);
 			expect(vi.mocked(createCodexHeaders)).toHaveBeenCalledWith(
 				undefined,
 				"acc-1",
@@ -2254,9 +2272,9 @@ describe("OpenAIOAuthPlugin", () => {
 
 			expect(result).toContain("3 account");
 			expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-			expect(result).toContain("Account 1 (missing-1@test.com, id:acc-1) [active]:");
-			expect(result).toContain("Account 2 (missing-2@test.com, id:acc-2):");
-			expect(result).toContain("Account 3 (other@test.com, id:acc-3):");
+			expect(result).toContain("Account 1 (missing-1@test.com, id:acc-1) [active]");
+			expect(result).toContain("Account 2 (missing-2@test.com, id:acc-2)");
+			expect(result).toContain("Account 3 (other@test.com, id:acc-3)");
 		});
 
 		it("propagates refreshed credentials to duplicate stored accounts", async () => {
@@ -2752,7 +2770,7 @@ describe("OpenAIOAuthPlugin", () => {
 	describe("codex-metrics tool", () => {
 		it("shows runtime metrics", async () => {
 			const result = await plugin.tool["codex-metrics"].execute();
-			expect(result).toContain("Codex Plugin Metrics");
+			expect(result).toContain("Codex plugin metrics");
 			expect(result).toContain("Total upstream requests");
 		});
 
@@ -2784,7 +2802,7 @@ describe("OpenAIOAuthPlugin", () => {
 	describe("codex-help tool", () => {
 		it("shows the default help overview", async () => {
 			const result = await plugin.tool["codex-help"].execute({ topic: "" });
-			expect(result).toContain("Codex Help");
+			expect(result).toContain("Codex help");
 			expect(result).toContain("Quickstart");
 			expect(result).toContain("codex-doctor");
 			expect(result).toContain("codex-setup --wizard");
@@ -2815,7 +2833,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("shows checklist with login guidance when no accounts exist", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-setup"].execute();
-			expect(result).toContain("Setup Checklist");
+			expect(result).toContain("Setup checklist");
 			expect(result).toContain("opencode auth login");
 			expect(result).toContain("codex-setup --wizard");
 		});
@@ -2823,7 +2841,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("shows healthy account progress when account exists", async () => {
 			mockStorage.accounts = [{ refreshToken: "r1", email: "user@example.com" }];
 			const result = await plugin.tool["codex-setup"].execute();
-			expect(result).toContain("Healthy accounts");
+			expect(result).toContain("Healthy: 1");
 			expect(result).toContain("Recommended next step");
 		});
 
@@ -2832,7 +2850,7 @@ describe("OpenAIOAuthPlugin", () => {
 			const result = await plugin.tool["codex-setup"].execute({ wizard: true });
 			expect(result).toContain("Interactive wizard mode is unavailable");
 			expect(result).toContain("Showing checklist view instead");
-			expect(result).toContain("Setup Checklist");
+			expect(result).toContain("Setup checklist");
 		});
 	});
 
@@ -2840,7 +2858,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("reports diagnostics when no accounts exist", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-doctor"].execute({ deep: false });
-			expect(result).toContain("Codex Doctor");
+			expect(result).toContain("Codex doctor");
 			expect(result).toContain("No accounts are configured");
 		});
 
@@ -3037,8 +3055,8 @@ describe("OpenAIOAuthPlugin", () => {
 
 			const result = (await plugin.tool["codex-doctor"].execute({ fix: true })) as string;
 
-			expect(result).toContain("healthy=0");
-			expect(result).not.toContain("healthy=8");
+			expect(result).toContain("Healthy: 0");
+			expect(result).not.toContain("Healthy: 8");
 			expect(result).toContain("8 account(s) failed refresh-token verification");
 			expect(result).toContain("8 account(s) need re-login");
 
@@ -3351,7 +3369,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-label"].execute({ index: 1, label: "Work" });
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("returns guidance when index is omitted in non-interactive mode", async () => {
@@ -3423,7 +3441,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-health"].execute();
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("checks health of accounts", async () => {
@@ -3431,7 +3449,7 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "r1", email: "user@example.com" },
 			];
 			const result = await plugin.tool["codex-health"].execute();
-			expect(result).toContain("Health Check");
+			expect(result).toContain("Health check");
 			expect(result).toContain("Healthy");
 
 			// Deterministic per-token rotations keep the shared credential tests
@@ -3685,7 +3703,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-remove"].execute({ index: 1, confirm: true });
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("returns guidance when index is omitted in non-interactive mode", async () => {
@@ -3755,7 +3773,7 @@ describe("OpenAIOAuthPlugin", () => {
 		it("returns error when no accounts", async () => {
 			mockStorage.accounts = [];
 			const result = await plugin.tool["codex-refresh"].execute();
-			expect(result).toContain("No Codex accounts configured");
+			expect(result).toContain("No accounts configured.");
 		});
 
 		it("refreshes accounts", async () => {
@@ -3763,7 +3781,7 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "r1", email: "user@example.com" },
 			];
 			const result = await plugin.tool["codex-refresh"].execute();
-			expect(result).toContain("Refreshing");
+			expect(result).toContain("Refresh accounts");
 			expect(result).toContain("Refreshed");
 		});
 	});
@@ -4143,6 +4161,15 @@ describe("OpenAIOAuthPlugin", () => {
 	// a single account duplicated. These drive the REAL `codex-list`, and so the
 	// real `formatCommandAccountLabel` closure behind every `codex-*` tool.
 	describe("seat identity across account-display surfaces", () => {
+		// The numbered table with a dedicated seat column is the CODEX_TUI_V2=0
+		// layout; under the production-default v2 renderer the seat moves inline
+		// into the label as `seat:<suffix>`. These cases target the column
+		// layout, so the supported legacy mode is pinned for this suite.
+		beforeEach(async () => {
+			const configModule = await import("../lib/config.js");
+			vi.spyOn(configModule, "getCodexTuiV2").mockReturnValue(false);
+		});
+
 		const setMaskEmail = async (value: boolean) => {
 			const configModule = await import("../lib/config.js");
 			vi.mocked(configModule.getCodexTuiMaskEmail).mockReturnValue(value);
@@ -4644,7 +4671,9 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 		beforeEach(async () => {
 			directory = await mkdtemp(join(tmpdir(), "request-config-reload-"));
 			configPath = join(directory, "config.json");
-			writeFileSync(configPath, '{"retryAllAccountsRateLimited":true,"perProjectAccounts":false}');
+			// maxRetries bounds the enabled case: production's default is an
+			// unbounded Infinity, which would wait out the rate limit forever.
+			writeFileSync(configPath, '{"retryAllAccountsRateLimited":true,"retryAllAccountsMaxRetries":3,"perProjectAccounts":false}');
 			const config = await import("../lib/config.js");
 			const { PluginConfigSchema } = await import("../lib/schemas.js");
 			vi.mocked(config.loadPluginConfig).mockImplementation(() =>
@@ -5502,6 +5531,10 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 
 		it.each([200, 429])("persists authoritative %i shared quota and never falls back into the spent account", async (status) => {
 			const manager = await makeManager([accountRecord()]);
+			// Production's unbounded wait cap (0) would sleep out the multi-day
+			// block under fake timers; a finite cap returns 429 without waiting.
+			const config = await import("../lib/config.js");
+			vi.spyOn(config, "getRetryAllAccountsMaxWaitMs").mockReturnValue(30_000);
 			const resetAt = Date.now() + 604_800_000;
 			vi.mocked(globalThis.fetch).mockImplementationOnce(async () => new Response(
 				JSON.stringify(status === 429 ? { error: { code: "usage_limit_reached" } } : { content: "ok" }),
@@ -5593,6 +5626,10 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 
 		it.each([undefined, "CODEX_AUTH_DISABLE_GPT56_AUTO_FALLBACK"])("preserves genuine model fallback and opt-out %s", async (optOut) => {
 			await makeManager([{ ...accountRecord(), rateLimitResetTimes: { [`${entryModel}:${entryModel}`]: Date.now() + 600_000 } }]);
+			// The opt-out case lands in the all-accounts-blocked wait; cap it so
+			// the 600s block resolves to 429 instead of sleeping under fake timers.
+			const config = await import("../lib/config.js");
+			vi.spyOn(config, "getRetryAllAccountsMaxWaitMs").mockReturnValue(30_000);
 			if (optOut) vi.stubEnv(optOut, "1");
 			const { sdk } = await setupPlugin();
 			expect((await send(sdk)).status).toBe(optOut ? 429 : 200);
@@ -8292,7 +8329,7 @@ describe("OpenAIOAuthPlugin showToast error handling", () => {
 		const plugin = await OpenAIOAuthPlugin({ client: mockClient } as never) as unknown as PluginType;
 
 		const result = await plugin.tool["codex-switch"].execute({ index: 1 });
-		expect(result).toContain("Switched to account");
+		expect(result).toContain("Switched to Account 1");
 	});
 });
 
