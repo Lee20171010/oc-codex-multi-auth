@@ -171,7 +171,10 @@ describe("codex-pool tool", () => {
 			["account-two", "account-one"],
 			{ dryRun: undefined, poolMode: undefined },
 		);
-		expect(output).toContain("Restart OpenCode");
+		// Pools hot-reload per request via loadPluginConfig(), so the message
+		// points at the next request rather than a restart.
+		expect(output).toContain("next request");
+		expect(output).not.toContain("Restart OpenCode");
 	});
 
 	it("persists distinct keys for Business seats in one workspace", async () => {
@@ -252,6 +255,7 @@ describe("codex-pool tool", () => {
 			"account-one",
 		]);
 		expect(output).not.toContain("Restart OpenCode");
+		expect(output).not.toContain("next request");
 	});
 
 	it("clears a pool without requiring account storage", async () => {
@@ -397,6 +401,11 @@ describe("codex-pool tool", () => {
 				{} as never,
 			)) as string,
 		) as Record<string, unknown>;
+
+		// An applied mutation hot-reloads on the next request, so the wire
+		// field reports false rather than asking for a restart.
+		expect(okPayload.applied).toBe(true);
+		expect(okPayload.restartRequired).toBe(false);
 
 		vi.mocked(updateModelAccountPool).mockRejectedValue(
 			new ConfigLockContentionError("/tmp/config.json"),

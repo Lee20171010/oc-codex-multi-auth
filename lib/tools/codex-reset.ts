@@ -45,6 +45,11 @@ import {
 	formatUiKeyValue,
 } from "../ui/format.js";
 import { normalizeToolOutputFormat, renderJsonOutput } from "../runtime.js";
+import {
+	TOOL_INCLUDE_SENSITIVE_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 type CodexResetArgs = {
@@ -160,15 +165,13 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					"1-based account number to act on. Defaults to the active Codex account.",
 				),
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 			includeSensitive: tool.schema
 				.boolean()
 				.optional()
-				.describe(
-					"Include raw account labels, emails, and account IDs in JSON output. Defaults to false.",
-				),
+				.describe(TOOL_INCLUDE_SENSITIVE_DESCRIPTION),
 		},
 		async execute({
 			action,

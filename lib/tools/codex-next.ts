@@ -10,6 +10,10 @@ import {
 } from "../ui/beginner.js";
 import { formatUiHeader, formatUiItem } from "../ui/format.js";
 import { normalizeToolOutputFormat, renderJsonOutput } from "../runtime.js";
+import {
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
@@ -24,9 +28,9 @@ export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
 			"Show the single most recommended next action for beginners.",
 		args: {
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 		},
 		async execute({ format }: { format?: string } = {}) {
 			const ui = resolveUiRuntime();

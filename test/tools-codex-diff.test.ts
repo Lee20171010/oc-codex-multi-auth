@@ -114,6 +114,80 @@ describe("computeCodexDiff key-aware redaction (audit fix #6)", () => {
 		expect(added?.rightValue).toContain("***");
 	});
 
+	it("masks every sensitive storage-account leaf key, including non-token shapes", () => {
+		// A storage-account-shaped object: every credential-bearing field the
+		// SENSITIVE_KEYS mirror in lib/logger.ts covers. Values are deliberately
+		// opaque (no JWT/sk-/Bearer shape) so only key-aware masking catches them.
+		const left = {
+			accounts: [
+				{
+					accessToken: "opaque-access-111111",
+					refreshToken: "opaque-refresh-2222",
+					idToken: "opaque-id-3333333333",
+					credential: "opaque-credential-444",
+					"x-auth-token": "opaque-xauth-55555",
+					authorization: "opaque-authz-66666",
+					clientSecret: "opaque-secret-7777",
+					password: "opaque-pass-8888888",
+					accountId: "acct-opaque-999999",
+				},
+			],
+		};
+		const right = {
+			accounts: [
+				{
+					accessToken: "opaque-access-AAAAAA",
+					refreshToken: "opaque-refresh-BBBB",
+					idToken: "opaque-id-CCCCCCCCCC",
+					credential: "opaque-credential-DDD",
+					"x-auth-token": "opaque-xauth-EEEEE",
+					authorization: "opaque-authz-FFFFF",
+					clientSecret: "opaque-secret-GGGG",
+					password: "opaque-pass-HHHHHHH",
+					accountId: "acct-opaque-IIIIII",
+				},
+			],
+		};
+
+		const entries = computeCodexDiff(left, right);
+		const serialized = JSON.stringify(entries);
+		for (const raw of [
+			"opaque-access-111111",
+			"opaque-refresh-2222",
+			"opaque-id-3333333333",
+			"opaque-credential-444",
+			"opaque-xauth-55555",
+			"opaque-authz-66666",
+			"opaque-secret-7777",
+			"opaque-pass-8888888",
+			"acct-opaque-999999",
+			"opaque-access-AAAAAA",
+			"opaque-refresh-BBBB",
+			"opaque-id-CCCCCCCCCC",
+			"opaque-credential-DDD",
+			"opaque-xauth-EEEEE",
+			"opaque-authz-FFFFF",
+			"opaque-secret-GGGG",
+			"opaque-pass-HHHHHHH",
+			"acct-opaque-IIIIII",
+		]) {
+			expect(serialized).not.toContain(raw);
+		}
+	});
+
+	it("masks a non-email-shaped value under an `email` key", () => {
+		const entries = computeCodexDiff(
+			{ accounts: [{ email: "main-workstation" }] },
+			{ accounts: [{ email: "backup-laptop" }] },
+		);
+		const change = entries.find((e) => e.path === "accounts[0].email");
+		// The key alone makes the value identifying, so it must not pass through
+		// verbatim even though it is not email-shaped.
+		expect(change?.leftValue).not.toBe("main-workstation");
+		expect(change?.leftValue).not.toContain("main-workstation");
+		expect(JSON.stringify(entries)).not.toContain("main-workstation");
+	});
+
 	it("does NOT over-mask a non-sensitive key like `label`", () => {
 		const labelValue = "primary-laptop-workspace";
 		const entries = computeCodexDiff(
