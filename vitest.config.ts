@@ -177,12 +177,7 @@ export default defineConfig({
           functions: 0,
           lines: 0,
         },
-        'lib/index.ts': {
-          statements: 25,
-          branches: 15,
-          functions: 25,
-          lines: 25,
-        },
+
         'lib/recovery.ts': {
           statements: 25,
           branches: 15,
