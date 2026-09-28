@@ -51,7 +51,14 @@ opencode run "Explain this repository" --model=openai/gpt-5.5-medium
 ## Standalone CLI (no agent cost)
 
 ```bash
-oc-codex-multi-auth status|list|limits|doctor|health|warm|dashboard|diag
+oc-codex-multi-auth status
+oc-codex-multi-auth list
+oc-codex-multi-auth limits
+oc-codex-multi-auth doctor
+oc-codex-multi-auth health
+oc-codex-multi-auth warm
+oc-codex-multi-auth dashboard
+oc-codex-multi-auth diag
 oc-codex-multi-auth limits --refresh   # live reads
 oc-codex-multi-auth doctor --fix       # verified refresh + stale-marker cleanup
 ```
@@ -65,7 +72,7 @@ All live in `~/.opencode/openai-codex-auth-config.json`; every boolean env overr
 | `perProjectAccounts` | `true` | Per-project pools under `~/.opencode/projects/<key>/` |
 | `rotationStrategy` | `hybrid` | `sticky` / `round-robin` alternatives |
 | `maskEmail` | `false` | Render emails as `us***@example.com` |
-| `autoProtectCredits` | `true` | 30-min `/wham/usage` poll that blocks spent accounts pre-429 |
+| `quotaNotifications.autoProtectCredits` | `true` | 30-min `/wham/usage` poll that blocks spent accounts pre-429 |
 | `autoUpdate` | `true` | Daily npm version check + cache eviction |
 | `CODEX_KEYCHAIN=1` | off | Opt-in OS-keychain credential backend |
 

@@ -153,6 +153,22 @@ describe("writeFileWithTimeout", () => {
 			restore();
 		}
 	});
+
+	it("times out when the post-write fsync stalls instead of blocking forever", async () => {
+		const { syncSpy, restore } = await spyOnFileSync();
+		// A wedged disk most often stalls inside fsync itself: make every
+		// FileHandle.sync hang and confirm the write still surfaces ETIMEDOUT
+		// on the caller's budget rather than outliving it.
+		syncSpy.mockImplementation(() => new Promise<void>(() => {}));
+		try {
+			const target = join(dir, "backup.json");
+			await expect(writeFileWithTimeout(target, "payload", 100)).rejects.toThrow(
+				/Timed out/i,
+			);
+		} finally {
+			restore();
+		}
+	});
 });
 
 describe("storage-level crash durability", () => {

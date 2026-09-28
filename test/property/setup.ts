@@ -14,9 +14,11 @@ let seed: number | undefined;
 if (rawSeed !== undefined && rawSeed !== "") {
 	seed = Number(rawSeed);
 	// A malformed value that silently fell back to random would read exactly
-	// like a successful replay, so the misconfiguration is made loud.
-	if (!Number.isInteger(seed)) {
-		throw new Error(`FC_SEED must be an integer, got ${JSON.stringify(rawSeed)}`);
+	// like a successful replay, so the misconfiguration is made loud. Safe
+	// integer specifically: `Number("9007199254740993")` parses fine but
+	// rounds to ...992, replaying a DIFFERENT seed than the one configured.
+	if (!Number.isSafeInteger(seed)) {
+		throw new Error(`FC_SEED must be a safe integer, got ${JSON.stringify(rawSeed)}`);
 	}
 }
 

@@ -39,7 +39,7 @@ Registered from per-file factories under `lib/tools/` via `createToolRegistry` i
 
 ### Tool arguments
 
-`format` is a real enum — only `text` (default) and `json` validate (`lib/tools/args.ts`, `TOOL_OUTPUT_FORMAT_VALUES`). `includeSensitive` opts raw labels/emails/account IDs into JSON output; `codex-pool` exposes stable account IDs instead. Destructive operations require an explicit `confirm`/`dryRun` gate.
+`format` is a real enum — only `text` (default) and `json` validate (`lib/tools/args.ts`, `TOOL_OUTPUT_FORMAT_VALUES`). `includeSensitive` opts raw labels/emails/account IDs into JSON output; `codex-pool` exposes stable account IDs instead. Mutation safeguards vary by operation: `codex-import` applies changes unless `dryRun: true`, and `codex-pool` remove/clear take effect immediately — read the per-tool args before automating against a live pool.
 
 | Tool | Args |
 |------|------|

@@ -152,9 +152,11 @@ describe("flagged-store low-level keychain helpers", () => {
 
 		expect(await readFlaggedFromKeychain(null)).toBe(blob);
 
-		expect(await deleteFlaggedFromKeychain(null)).toBe(true);
+		expect((await deleteFlaggedFromKeychain(null)).deleted).toBe(true);
 		expect(mock.store.size).toBe(0);
-		expect(await deleteFlaggedFromKeychain(null)).toBe(false);
+		const gone = await deleteFlaggedFromKeychain(null);
+		expect(gone.deleted).toBe(false);
+		expect(gone.error).toBeUndefined();
 	});
 
 	it("writeFlaggedToKeychain returns ok=false when backend throws", async () => {
@@ -259,10 +261,58 @@ describe("flagged-store load/save/clear with CODEX_KEYCHAIN", () => {
 		expect(mock.store.get(`${KEYCHAIN_SERVICE_NAME}::${FLAGGED_KEYCHAIN_KEY}`)).toBeUndefined();
 
 		// Resurrection check: the next load must NOT find the cleared pool on
-		// either side (keychain-first read returns null, JSON is gone, and the
-		// .migrated-to-keychain artefact is not a load target).
+		// any side (keychain-first read returns null, JSON is gone, and the
+		// .migrated-to-keychain artefact — which IS a load fallback — was
+		// retired by the clear).
 		const loaded = await loadFlaggedAccounts();
 		expect(loaded.accounts).toHaveLength(0);
+	});
+
+	it("flagged load recovers the pool from a migration marker when the canonical file is missing", async () => {
+		// Interrupted flagged migration: canonical renamed to a marker, then the
+		// process died before the keychain write — no canonical, no entry. The
+		// marker is the only copy and loads MUST see it.
+		setOptIn(true);
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify(makeFlagged(), null, 2),
+			{ encoding: "utf-8", mode: 0o600 },
+		);
+		const { migrateOnDiskJsonToKeychainBackup } = await import(
+			"../lib/storage/load-save.js"
+		);
+		await migrateOnDiskJsonToKeychainBackup(flaggedPath, async () => undefined);
+		expect(existsSync(flaggedPath)).toBe(false);
+
+		const loaded = await loadFlaggedAccounts();
+		expect(loaded.accounts[0]?.accountId).toBe("acct-flagged-1");
+	});
+
+	it("clearFlaggedAccounts retires migrated-to-keychain markers beside the flagged file", async () => {
+		setOptIn(false);
+		await saveFlaggedAccounts(makeFlagged());
+		const { migrateOnDiskJsonToKeychainBackup } = await import(
+			"../lib/storage/load-save.js"
+		);
+		await migrateOnDiskJsonToKeychainBackup(flaggedPath, async () => undefined);
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify(makeFlagged(), null, 2),
+			{ encoding: "utf-8", mode: 0o600 },
+		);
+		const markerPrefix = "oc-codex-multi-auth-flagged-accounts.json.migrated-to-keychain.";
+		const markersBefore = (await fs.readdir(storageDir)).filter((n) =>
+			n.startsWith(markerPrefix),
+		);
+		expect(markersBefore.length).toBeGreaterThan(0);
+
+		await clearFlaggedAccounts();
+
+		expect(existsSync(flaggedPath)).toBe(false);
+		const markersAfter = (await fs.readdir(storageDir)).filter((n) =>
+			n.startsWith(markerPrefix),
+		);
+		expect(markersAfter).toHaveLength(0);
 	});
 
 	it("clearFlaggedAccounts skips the keychain delete when the JSON unlink fails (sides stay in sync)", async () => {

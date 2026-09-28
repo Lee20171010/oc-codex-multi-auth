@@ -205,6 +205,21 @@ describe("Rate limit backoff", () => {
 			expect(second.delayMs).toBe(12000);
 		});
 
+		it("keeps the server-mandated delay as a floor under reason jitter", () => {
+			// Server says 8s. A bottom jitter roll (factor 0.75) would compute
+			// 6000 — below the mandated wait. The reason path re-applies the
+			// server floor after jitter.
+			const result = getRateLimitBackoffWithReason(9, "server-floor", 8000, "unknown", () => 0);
+			expect(result.delayMs).toBe(8000);
+		});
+
+		it("jitters freely below the fallback when the server gave no delay", () => {
+			// No Retry-After: the 1000ms fallback is ours, not an upstream
+			// mandate, so decorrelation may dip under it.
+			const result = getRateLimitBackoffWithReason(10, "no-server", null, "unknown", () => 0);
+			expect(result.delayMs).toBe(750);
+		});
+
 		it("applies jitter exactly once across the two layers", () => {
 			// Attempt 2: the inner layer resolves max(4000, 8000)=8000, then the
 			// reason layer computes 8000 * 2^1 * 1.0 * jitter. A top roll gives
