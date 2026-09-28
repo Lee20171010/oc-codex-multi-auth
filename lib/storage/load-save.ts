@@ -345,7 +345,14 @@ async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
     }
 
     const normalized = normalizeAccountStorage(data, globalStoragePath);
-    if (!normalized) return null;
+    if (!normalized) {
+      throw new StorageError(
+        "Global account storage has an invalid format; refusing to seed a project pool from it.",
+        "INVALID_STORAGE",
+        globalStoragePath,
+        "Restore the accounts from a credential snapshot in the backups directory.",
+      );
+    }
 
     log.info("Loaded global account storage as project fallback", {
       from: globalStoragePath,
@@ -354,20 +361,23 @@ async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
     });
     return normalized;
   } catch (error) {
-    // Propagate forward-compat failures so the caller can surface them to the
-    // user instead of silently falling back to an empty global pool.
-    if (error instanceof StorageError && error.code === "UNSUPPORTED_SCHEMA_VERSION") {
-      throw error;
-    }
+    // An existing but unreadable global store must never look like "no global
+    // pool": the transaction caller would then seed a project pool without
+    // those accounts. Forward-compat and quarantined-V2 rejects already throw
+    // from normalizeAccountStorage; every other non-ENOENT failure wraps the
+    // same way the primary load path does.
+    if (error instanceof StorageError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") {
-      log.warn("Failed to load global fallback account storage", {
-        from: globalStoragePath,
-        to: currentStoragePath,
-        error: String(error),
-      });
+    if (code === "ENOENT") {
+      return null;
     }
-    return null;
+    throw new StorageError(
+      `Failed to load global account storage: ${error instanceof Error ? error.message : String(error)}`,
+      code ?? "INVALID_STORAGE",
+      globalStoragePath,
+      "The existing global account file is unreadable. Restore it from a credential snapshot in the backups directory.",
+      error instanceof Error ? error : undefined,
+    );
   }
 }
 
@@ -447,6 +457,14 @@ async function loadAccountsInternal(
     }
 
     const normalized = normalizeAccountStorage(data, path);
+    if (!normalized) {
+      throw new StorageError(
+        "Account storage has an invalid format; refusing to replace it.",
+        "INVALID_STORAGE",
+        path,
+        "Restore the accounts from a credential snapshot in the backups directory.",
+      );
+    }
 
     const storedVersion =
       data && typeof data === "object" && !Array.isArray(data)
@@ -465,12 +483,8 @@ async function loadAccountsInternal(
 
     return normalized;
   } catch (error) {
-    // Forward-compat failures must reach the caller instead of being silently
-    // downgraded to an empty load, which would clobber the user's future-format
-    // credentials on the next save.
-    if (error instanceof StorageError && error.code === "UNSUPPORTED_SCHEMA_VERSION") {
-      throw error;
-    }
+    // An existing but unreadable store must never become an empty account
+    // pool: the next login or debounced save would replace its credentials.
     // Unknown-V2 detection must NOT be silently dropped: the catch below
     // swallows generic errors by design (keeps an unreadable file from
     // crashing the whole plugin), but V2 is a specific, recoverable case
@@ -497,6 +511,7 @@ async function loadAccountsInternal(
       }
       throw error;
     }
+    if (error instanceof StorageError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       const migrated = persistMigration
@@ -546,8 +561,16 @@ async function loadAccountsInternal(
 
       return globalFallback;
     }
+    const path = getStoragePath();
+    const storageError = new StorageError(
+      `Failed to load account storage: ${error instanceof Error ? error.message : String(error)}`,
+      code ?? "INVALID_STORAGE",
+      path,
+      "The existing account file is unreadable. Restore it from a credential snapshot in the backups directory.",
+      error instanceof Error ? error : undefined,
+    );
     log.error("Failed to load account storage", { error: String(error) });
-    return null;
+    throw storageError;
   }
 }
 

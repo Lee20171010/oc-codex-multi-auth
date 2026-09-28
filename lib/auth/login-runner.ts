@@ -14,6 +14,7 @@ import {
 	isGeneratedAccountLabel,
 } from "./token-utils.js";
 import { extractPlanType } from "./plan-tier.js";
+import { hasMissingScopeReauthNote, stripReauthNote } from "../accounts/state.js";
 import { logInfo } from "../logger.js";
 import { normalizeScope } from "./scopes.js";
 import { MODEL_FAMILIES, type ModelFamily } from "../prompts/codex.js";
@@ -1046,6 +1047,14 @@ export async function persistAccountPool(
 			if (index < 0) continue;
 			const account = accounts[index];
 			if (!account) continue;
+
+			// Fresh credentials are the repair a disabled slot asks for: the
+			// surviving record carries the login's token, so it re-enters
+			// rotation and any re-auth note that asked for the login is stale.
+			account.enabled = undefined;
+			if (hasMissingScopeReauthNote(account.accountNote)) {
+				account.accountNote = stripReauthNote(account.accountNote);
+			}
 
 			const identityParts: string[] = [];
 			const idSuffix = formatIdentitySuffix(account.accountId);
