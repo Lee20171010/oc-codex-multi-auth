@@ -21,7 +21,10 @@ import { fsyncParentDirectory, writeFileAtomic } from "./atomic-write.js";
 import { trySnapshotCredentialStoreBeforeWrite } from "./credential-snapshots.js";
 import { StorageError } from "./errors.js";
 import { getWorkspaceIdentityKey, isRecord } from "./identity.js";
-import { migrateOnDiskJsonToKeychainBackup } from "./load-save.js";
+import {
+  migrateOnDiskJsonToKeychainBackup,
+  retireKeychainMigrationBackups,
+} from "./load-save.js";
 import { getStoragePath, getCurrentProjectStorageKey, withStorageLock } from "./state.js";
 import {
   assertTestRunNeverTouchesRealHome,
@@ -398,13 +401,31 @@ export async function clearFlaggedAccounts(): Promise<void> {
     // resurrect every cleared flagged account on the next keychain-first
     // load — the exact failure mode this function exists to prevent.
     if (jsonCleared && isKeychainOptInEnabled()) {
+      const projectKey = getCurrentProjectStorageKey();
       try {
-        await deleteFlaggedFromKeychain(getCurrentProjectStorageKey());
+        await deleteFlaggedFromKeychain(projectKey);
+        // `false` is ambiguous between "entry absent" and "backend refused"
+        // — and a surviving entry serves the cleared pool on the next
+        // keychain-first load. Verify with a read instead of trusting the
+        // boolean, and surface a survivor loudly rather than reporting a
+        // clear that did not happen.
+        if ((await readFlaggedFromKeychain(projectKey)) !== null) {
+          log.error(
+            "keychain: flagged entry survived the clearFlaggedAccounts delete; the cleared credentials remain reachable. Remove the keychain entry manually.",
+          );
+        }
       } catch (err) {
         log.warn("keychain: flagged delete during clearFlaggedAccounts failed", {
           error: String(err),
         });
       }
+    }
+
+    // Flagged saves preserve the pre-keychain JSON as `.migrated-to-keychain`
+    // backups — each one still carries flagged refresh tokens in plaintext
+    // after the pool is cleared.
+    if (jsonCleared) {
+      await retireKeychainMigrationBackups(path);
     }
   });
 }
