@@ -108,9 +108,6 @@ describe('Plugin Configuration', () => {
 	describe('loadPluginConfig', () => {
 		it('should return default config when file does not exist', () => {
 			mockExistsSync.mockReturnValue(false);
-			mockReadFileSync.mockImplementationOnce(() => {
-				throw Object.assign(new Error('missing config'), { code: 'ENOENT' });
-			});
 
 			const config = loadPluginConfig();
 
@@ -155,9 +152,13 @@ describe('Plugin Configuration', () => {
 				fetchTimeoutMs: 60_000,
 				streamStallTimeoutMs: 45_000,
 			});
-			expect(mockReadFileSync).toHaveBeenCalledWith(
-				path.join(os.homedir(), '.opencode', 'openai-codex-auth-config.json'), 'utf-8'
+			// The stat gate answers "does the file exist" without a read
+			// syscall: the loader probes the path but must not call
+			// readFileSync for a file statSync already reported as missing.
+			expect(vi.mocked(fs.statSync)).toHaveBeenCalledWith(
+				path.join(os.homedir(), '.opencode', 'openai-codex-auth-config.json')
 			);
+			expect(mockReadFileSync).not.toHaveBeenCalled();
 		});
 
 		it('should load config from file when it exists', () => {

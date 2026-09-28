@@ -92,4 +92,83 @@ describe("V2 accounts UI", () => {
 		dispose();
 		expect(unregister).toHaveBeenCalledTimes(3);
 	});
+
+	it("removes stored OpenAI OAuth connections on codex.logout, keeping the pool", async () => {
+		vi.useFakeTimers();
+		const slots = new Map<string, { render: (props: object) => { children: string } | null }>();
+		const commands: Array<{ id: string; run: () => Promise<void> }> = [];
+		const status = vi.fn().mockResolvedValue({
+			text: "quota ready", details: "Quota details", showFor: "always",
+			accountStorage: "project", accounts: [],
+		});
+		const alert = vi.fn();
+		const confirm = vi.fn().mockResolvedValue(true);
+		const remove = vi.fn().mockResolvedValue(undefined);
+		const list = vi.fn().mockResolvedValue({
+			data: [
+				{ id: "openai", connections: [
+					{ type: "credential", id: "cred-1", label: "ChatGPT Plus", method: "oauth" },
+					{ type: "credential", id: "cred-2", label: "API key", method: "key" },
+					{ type: "env", name: "OPENAI_API_KEY" },
+				] },
+				{ id: "anthropic", connections: [{ type: "credential", id: "cred-9", label: "Claude", method: "oauth" }] },
+			],
+		});
+		const context = {
+			location: { directory: "/tmp/opencode/project" }, renderer: { width: 100 },
+			client: {
+				rpc: () => ({ status }),
+				integration: { list },
+				credential: { remove },
+			},
+			theme: { text: { base: "white" } },
+			data: { session: { get: () => undefined, message: { list: () => [] } }, location: { default: () => ({ directory: "/tmp/opencode/project" }) } },
+			keymap: { layer: (factory: () => { commands: typeof commands }) => commands.push(...factory().commands) },
+			ui: { dialog: { alert, confirm }, slot: (claim: { append: string }) => { slots.set(claim.append, claim as never); return vi.fn(); } },
+		} as unknown as Plugin.Context;
+		setupV2Tui(context);
+		slots.get("app")!.render({});
+		await vi.advanceTimersByTimeAsync(0);
+		const logout = commands.find((command) => command.id === "codex.logout");
+		expect(logout).toBeDefined();
+		await logout!.run();
+		expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Codex logout" }));
+		// Only the openai integration's OAuth credential is removed — API-key
+		// connections, other providers, and the plugin's own pool stay put.
+		expect(remove).toHaveBeenCalledTimes(1);
+		expect(remove).toHaveBeenCalledWith({ credentialID: "cred-1" });
+		expect(alert).toHaveBeenCalledWith(expect.objectContaining({
+			title: "Codex logout",
+			message: expect.stringContaining("account pool is unchanged"),
+		}));
+	});
+
+	it("aborts codex.logout when the user declines the confirmation", async () => {
+		vi.useFakeTimers();
+		const slots = new Map<string, { render: (props: object) => { children: string } | null }>();
+		const commands: Array<{ id: string; run: () => Promise<void> }> = [];
+		const status = vi.fn().mockResolvedValue({
+			text: "quota ready", details: "Quota details", showFor: "always",
+			accountStorage: "project", accounts: [],
+		});
+		const confirm = vi.fn().mockResolvedValue(false);
+		const remove = vi.fn().mockResolvedValue(undefined);
+		const context = {
+			location: { directory: "/tmp/opencode/project" }, renderer: { width: 100 },
+			client: {
+				rpc: () => ({ status }),
+				integration: { list: vi.fn().mockResolvedValue({ data: [{ id: "openai", connections: [{ type: "credential", id: "cred-1", label: "x", method: "oauth" }] }] }) },
+				credential: { remove },
+			},
+			theme: { text: { base: "white" } },
+			data: { session: { get: () => undefined, message: { list: () => [] } }, location: { default: () => ({ directory: "/tmp/opencode/project" }) } },
+			keymap: { layer: (factory: () => { commands: typeof commands }) => commands.push(...factory().commands) },
+			ui: { dialog: { alert: vi.fn(), confirm }, slot: (claim: { append: string }) => { slots.set(claim.append, claim as never); return vi.fn(); } },
+		} as unknown as Plugin.Context;
+		setupV2Tui(context);
+		slots.get("app")!.render({});
+		await vi.advanceTimersByTimeAsync(0);
+		await commands.find((command) => command.id === "codex.logout")!.run();
+		expect(remove).not.toHaveBeenCalled();
+	});
 });

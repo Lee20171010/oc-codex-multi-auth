@@ -1071,11 +1071,25 @@ const module: TuiPluginModule = {
 			onCleanup,
 		};
 
+		// `slots.register` returns the slot plugin's registry id and `TuiSlots`
+		// exposes no `unregister` counterpart for it; the registry's teardown
+		// channel is the plugin's own `dispose` hook (invoked on unregister and
+		// registry clear). The flag stops a registration that outlives this
+		// plugin from rendering into — and polling — a disposed api.
+		let statusSlotDisposed = false;
 		api.slots.register({
 			slots: {
 				session_prompt_right: (_ctx, props) =>
-					createPromptStatus(api, solid, promptOptions, props.session_id),
+					statusSlotDisposed
+						? null
+						: createPromptStatus(api, solid, promptOptions, props.session_id),
 			},
+			dispose: () => {
+				statusSlotDisposed = true;
+			},
+		});
+		api.lifecycle.onDispose(() => {
+			statusSlotDisposed = true;
 		});
 		const disposeCommand = api.command.register(() => [
 			{

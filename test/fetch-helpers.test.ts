@@ -204,6 +204,36 @@ describe('Fetch Helpers Module', () => {
 			expect(result).toBe(`${CODEX_BASE_URL}/v1/other`);
 		});
 
+		it('should not double-insert /codex on an already Codex-shaped path', () => {
+			// /responses is a substring of /codex/responses — the naive replace
+			// used to produce /backend-api/codex/codex/responses.
+			expect(
+				rewriteUrlForCodex('https://chatgpt.com/backend-api/codex/responses'),
+			).toBe('https://chatgpt.com/backend-api/codex/responses');
+		});
+
+		it('should not re-prepend /codex when the path already carries it', () => {
+			expect(rewriteUrlForCodex('https://chatgpt.com/codex/responses')).toBe(
+				'https://chatgpt.com/backend-api/codex/responses',
+			);
+		});
+
+		it('should treat /backend-api/codex/ paths consistently', () => {
+			expect(
+				rewriteUrlForCodex(
+					'https://chatgpt.com/backend-api/codex/responses?foo=bar',
+				),
+			).toBe('https://chatgpt.com/backend-api/codex/responses?foo=bar');
+		});
+
+		it('is idempotent over its own output', () => {
+			// The /responses -> /codex/responses replace keeps a /v1 prefix in
+			// place; a second pass must not grow a second /codex segment.
+			const once = rewriteUrlForCodex('https://example.com/v1/responses');
+			expect(once).toBe('https://chatgpt.com/backend-api/v1/codex/responses');
+			expect(rewriteUrlForCodex(once)).toBe(once);
+		});
+
 		it('should throw for invalid URL input', () => {
 			expect(() => rewriteUrlForCodex('not-a-valid-url')).toThrow(TypeError);
 		});
@@ -499,6 +529,74 @@ describe('Fetch Helpers Module', () => {
 			expect(info.unsupportedModel).toBe('gpt-5.5');
 		});
 
+		it('flags the normalized plugin-shaped unsupported wording as an entitlement verdict', () => {
+			// The wording normalizeErrorPayload emits (and peer proxies echo)
+			// differs from the raw upstream phrasing — it must still resolve
+			// through the fallback chain without the dedicated code field.
+			const info = getUnsupportedCodexModelInfo({
+				error: {
+					message:
+						"The model 'gpt-5.6-sol' is not currently available for this ChatGPT account when using Codex OAuth.",
+				},
+			});
+
+			expect(info.isUnsupported).toBe(true);
+			expect(info.unsupportedModel).toBe('gpt-5.6-sol');
+		});
+
+		it('flags normalized wording on a top-level detail payload', () => {
+			const info = getUnsupportedCodexModelInfo({
+				detail:
+					"The model 'gpt-5.5' is not currently available for this ChatGPT account when using Codex OAuth.",
+			});
+
+			expect(info.isUnsupported).toBe(true);
+			expect(info.unsupportedModel).toBe('gpt-5.5');
+		});
+
+		it('resolves a fallback for a normalized-wording error body', () => {
+			const normalizedBody = {
+				error: {
+					message:
+						"The model 'gpt-5.6-sol' is not currently available for this ChatGPT account when using Codex OAuth.",
+				},
+			};
+
+			const fallback = resolveUnsupportedCodexFallbackModel({
+				requestedModel: 'gpt-5.6-sol',
+				errorBody: normalizedBody,
+				attemptedModels: ['gpt-5.6-sol'],
+				fallbackOnUnsupportedCodexModel: true,
+				fallbackToGpt52OnUnsupportedGpt53: true,
+			});
+			expect(fallback).toBe('gpt-5.6-terra');
+		});
+
+		it('marks a 400 carrying only the normalized wording as an entitlement gate', async () => {
+			// The bodyText verdict (isUnsupportedCodexModelForChatGpt) feeds
+			// normalizeErrorPayload — it must fire on the normalized shape too.
+			const body = {
+				error: {
+					message:
+						"The model 'gpt-5.6-sol' is not currently available for this ChatGPT account when using Codex OAuth.",
+				},
+			};
+			const response = new Response(JSON.stringify(body), {
+				status: 400,
+				statusText: 'Bad Request',
+			});
+
+			const { response: result, errorBody } = await handleErrorResponse(response);
+			const json = await result.json() as {
+				error: { type?: string; code?: string; unsupported_model?: string };
+			};
+
+			expect(json.error.type).toBe('entitlement_error');
+			expect(json.error.code).toBe('model_not_supported_with_chatgpt_account');
+			expect(json.error.unsupported_model).toBe('gpt-5.6-sol');
+			expect(getUnsupportedCodexModelInfo(errorBody).isUnsupported).toBe(true);
+		});
+
 		it('resolves Spark fallback chain to canonical gpt-5-codex first', () => {
 			const errorBody = {
 				error: {
@@ -710,6 +808,57 @@ describe('Fetch Helpers Module', () => {
 				fallbackToGpt52OnUnsupportedGpt53: true,
 			});
 			expect(gpt54Fallback).toBe('gpt-5.6-terra');
+		});
+
+		it('rescues typed gpt-5.1-codex-max/mini via their documented successors', () => {
+			// Docs name gpt-5.6-sol the max successor and gpt-5.6-terra the mini
+			// successor (both API-shutdown 2026-07-23). Without chain rows a typed
+			// selector dead-ended with no fallback at all.
+			const unsupportedBody = (model: string) => ({
+				error: {
+					code: 'model_not_supported_with_chatgpt_account',
+					message: `The '${model}' model is not supported when using Codex with a ChatGPT account.`,
+				},
+			});
+
+			const maxFallback = resolveUnsupportedCodexFallbackModel({
+				requestedModel: 'gpt-5.1-codex-max',
+				errorBody: unsupportedBody('gpt-5.1-codex-max'),
+				attemptedModels: ['gpt-5.1-codex-max'],
+				fallbackOnUnsupportedCodexModel: true,
+				fallbackToGpt52OnUnsupportedGpt53: true,
+			});
+			expect(maxFallback).toBe('gpt-5.6-sol');
+
+			const miniFallback = resolveUnsupportedCodexFallbackModel({
+				requestedModel: 'gpt-5.1-codex-mini',
+				errorBody: unsupportedBody('gpt-5.1-codex-mini'),
+				attemptedModels: ['gpt-5.1-codex-mini'],
+				fallbackOnUnsupportedCodexModel: true,
+				fallbackToGpt52OnUnsupportedGpt53: true,
+			});
+			expect(miniFallback).toBe('gpt-5.6-terra');
+
+			// Once the named successor is blocked the walk still reaches the
+			// chain terminal, like every other retired-model row.
+			const maxWalk = resolveUnsupportedCodexFallbackModel({
+				requestedModel: 'gpt-5.1-codex-max',
+				errorBody: unsupportedBody('gpt-5.6-sol'),
+				attemptedModels: ['gpt-5.1-codex-max', 'gpt-5.6-sol'],
+				fallbackOnUnsupportedCodexModel: true,
+				fallbackToGpt52OnUnsupportedGpt53: true,
+			});
+			expect(maxWalk).toBe('gpt-5.6-terra');
+
+			// An effort-suffixed variant canonicalizes onto the same row.
+			const maxXhighFallback = resolveUnsupportedCodexFallbackModel({
+				requestedModel: 'gpt-5.1-codex-max-xhigh',
+				errorBody: unsupportedBody('gpt-5.1-codex-max'),
+				attemptedModels: ['gpt-5.1-codex-max'],
+				fallbackOnUnsupportedCodexModel: true,
+				fallbackToGpt52OnUnsupportedGpt53: true,
+			});
+			expect(maxXhighFallback).toBe('gpt-5.6-sol');
 		});
 
 		it('auto-fallbacks canonical gpt-5-codex even when fallback policy is disabled', () => {
@@ -1078,6 +1227,33 @@ describe('Fetch Helpers Module', () => {
 			const json = await result.json() as { error: { message: string } };
 			
 			expect(json.error.message).toBe('top-level message');
+		});
+
+		it('maps a top-level detail string to the user-facing message', async () => {
+			const body = { detail: 'The upstream rejected the request' };
+			const response = new Response(JSON.stringify(body), { status: 400 });
+
+			const { response: result } = await handleErrorResponse(response);
+			const json = await result.json() as { error: { message: string } };
+
+			// Before this, the raw JSON of the whole body was the message.
+			expect(json.error.message).toBe('The upstream rejected the request');
+		});
+
+		it('maps a detail record to message plus code/type', async () => {
+			const body = {
+				detail: { message: 'quota window gone', code: 'quota_gone', type: 'quota_error' },
+			};
+			const response = new Response(JSON.stringify(body), { status: 500 });
+
+			const { response: result } = await handleErrorResponse(response);
+			const json = await result.json() as {
+				error: { message: string; code?: string; type?: string };
+			};
+
+			expect(json.error.message).toBe('quota window gone');
+			expect(json.error.code).toBe('quota_gone');
+			expect(json.error.type).toBe('quota_error');
 		});
 
 		it('uses trimmed body text when JSON parses to non-record (line 463 coverage)', async () => {
@@ -1471,6 +1647,50 @@ describe('Fetch Helpers Module', () => {
 		expect(rateLimit?.retryAfterMs).toBe(60000);
 	});
 
+	it('parses an RFC 7231 HTTP-date retry-after into a capped delta', async () => {
+		// parseInt on an HTTP-date is NaN, so the header used to be ignored.
+		const headers = new Headers({
+			'retry-after': 'Wed, 21 Oct 2099 07:28:00 GMT',
+		});
+		const response = new Response(
+			JSON.stringify({ error: { message: 'rate limited' } }),
+			{ status: 429, headers },
+		);
+
+		const { rateLimit } = await handleErrorResponse(response);
+
+		// 2099 is far out — the same 5-min cap as the numeric path applies.
+		expect(rateLimit?.retryAfterMs).toBe(5 * 60 * 1000);
+	});
+
+	it('converts a near-future HTTP-date retry-after to a delta in ms', async () => {
+		const inThirtySeconds = new Date(Date.now() + 30_000).toUTCString();
+		const headers = new Headers({ 'retry-after': inThirtySeconds });
+		const response = new Response(
+			JSON.stringify({ error: { message: 'rate limited' } }),
+			{ status: 429, headers },
+		);
+
+		const { rateLimit } = await handleErrorResponse(response);
+
+		expect(rateLimit?.retryAfterMs).toBeGreaterThan(0);
+		expect(rateLimit?.retryAfterMs).toBeLessThanOrEqual(30_000);
+	});
+
+	it('ignores a past HTTP-date retry-after and falls back to the default', async () => {
+		const headers = new Headers({
+			'retry-after': 'Wed, 21 Oct 2015 07:28:00 GMT',
+		});
+		const response = new Response(
+			JSON.stringify({ error: { message: 'rate limited' } }),
+			{ status: 429, headers },
+		);
+
+		const { rateLimit } = await handleErrorResponse(response);
+
+		expect(rateLimit?.retryAfterMs).toBe(60000);
+	});
+
 		it('handles millisecond unix timestamp in reset header', async () => {
 			const futureTimestampMs = Date.now() + 45000;
 			const headers = new Headers({ 'x-ratelimit-reset': String(futureTimestampMs) });
@@ -1547,6 +1767,92 @@ describe('Fetch Helpers Module', () => {
 				expect(JSON.stringify(result?.body.input?.[0])).toContain('`gpt-5.3-codex`');
 				expect(result?.body.tools).toEqual([{ name: 'apply_patch' }]);
 				expect(getInstructionsSpy).not.toHaveBeenCalled();
+			});
+
+			it('enforces stateless invariants in native mode on canonical and wire bodies', async () => {
+				const { transformRequestForCodex } = await import('../lib/request/fetch-helpers.js');
+				// store:true is a hostile override — the ChatGPT backend requires
+				// store=false on every Codex-bound request, and honoring it would
+				// either 400 or silently store the request server-side.
+				const requestBody = {
+					model: 'gpt-5.5',
+					store: true,
+					include: ['file_search_call.results'],
+					input: [{ type: 'message', role: 'user', content: 'Hello' }],
+				};
+
+				const result = await transformRequestForCodex(
+					{ body: JSON.stringify(requestBody) },
+					'https://example.com',
+					{ global: {}, models: {} },
+					true,
+					undefined,
+					{ requestTransformMode: 'native' } as any,
+				);
+
+				expect(result?.body.store).toBe(false);
+				expect(result?.body.include).toEqual(
+					expect.arrayContaining([
+						'reasoning.encrypted_content',
+						'file_search_call.results',
+					]),
+				);
+
+				const serialized = JSON.parse(result!.updatedInit.body as string);
+				expect(serialized.store).toBe(false);
+				expect(serialized.include).toEqual(
+					expect.arrayContaining(['reasoning.encrypted_content']),
+				);
+			});
+
+			it('keeps stateless invariants on the lite wire shape in native mode', async () => {
+				const { transformRequestForCodex } = await import('../lib/request/fetch-helpers.js');
+				const requestBody = {
+					model: 'gpt-5.6-sol',
+					input: [{ type: 'message', role: 'user', content: 'Hello' }],
+				};
+
+				const result = await transformRequestForCodex(
+					{ body: JSON.stringify(requestBody) },
+					'https://example.com',
+					{ global: {}, models: {} },
+					true,
+					undefined,
+					{ requestTransformMode: 'native' } as any,
+				);
+
+				const serialized = JSON.parse(result!.updatedInit.body as string);
+				expect(serialized.store).toBe(false);
+				expect(serialized.include).toContain('reasoning.encrypted_content');
+			});
+
+			it('produces a complete Codex request when instructions come from the bundled fallback', async () => {
+				const { transformRequestForCodex } = await import('../lib/request/fetch-helpers.js');
+				const { BUNDLED_CODEX_INSTRUCTIONS } = await import(
+					'../lib/prompts/codex-instructions.js'
+				);
+				vi.spyOn(codexPrompts, 'getCodexInstructions').mockResolvedValue(
+					BUNDLED_CODEX_INSTRUCTIONS,
+				);
+				const requestBody = {
+					model: 'gpt-5-codex',
+					input: [{ type: 'message', role: 'user', content: 'Hello' }],
+				};
+
+				const result = await transformRequestForCodex(
+					{ body: JSON.stringify(requestBody) },
+					'https://example.com',
+					{ global: {}, models: {} },
+				);
+
+				expect(result).toBeDefined();
+				const serialized = JSON.parse(result!.updatedInit.body as string);
+				expect(serialized.store).toBe(false);
+				expect(serialized.include).toContain('reasoning.encrypted_content');
+				// The vendored prompt is the only instructions source here — an
+				// empty fallback used to ship a request with no instructions at all.
+				expect(serialized.instructions.length).toBeGreaterThan(0);
+				expect(serialized.instructions).toContain('backend as gpt-5-codex');
 			});
 
 			it('emits the responses-lite shape end-to-end for GPT-5.6 in native mode', async () => {

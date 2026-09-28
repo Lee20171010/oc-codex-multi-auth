@@ -8,18 +8,34 @@ import type { Info as ToolInfo } from "@opencode/plugin/promise/tool";
 
 const mocks = vi.hoisted(() => ({
 	runtime: vi.fn(), loadAccounts: vi.fn(), refresh: vi.fn(), openBrowser: vi.fn(), interactive: vi.fn(),
+	logWarn: vi.fn(),
 }));
+vi.mock("@ai-sdk/openai", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@ai-sdk/openai")>();
+	return { ...actual, createOpenAI: vi.fn(actual.createOpenAI) };
+});
 vi.mock("../lib/auth/browser.js", () => ({ openBrowserUrl: mocks.openBrowser }));
 vi.mock("../lib/storage.js", () => ({ loadAccounts: mocks.loadAccounts }));
 vi.mock("../lib/storage/coordinated-refresh.js", () => ({ coordinatePersistedRefresh: mocks.refresh }));
 vi.mock("../lib/opencode-v2-status.js", () => ({ readV2Status: vi.fn() }));
-import { createV2Fetch, setupV2 } from "../lib/opencode-v2.js";
+vi.mock("../lib/logger.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../lib/logger.js")>()),
+	logWarn: mocks.logWarn,
+}));
+import { createV2Fetch, missingV2SdkSurface, setupV2 } from "../lib/opencode-v2.js";
 import { createStorageScope, getStoragePath, setStoragePathDirect, subscribeToStoragePathChanges } from "../lib/storage/state.js";
 
 function host() {
 	const methods: IntegrationOAuthMethodRegistration[] = [];
 	const tools: ToolInfo[] = [];
 	const hooks = new Map<string, (event: AISDKHooks["sdk"] | AISDKHooks["language"]) => Promise<void>>();
+	// Every SDK registration returns a Registration; cleanup must dispose them all.
+	const registrations: Array<{ dispose: ReturnType<typeof vi.fn> }> = [];
+	const registered = () => {
+		const registration = { dispose: vi.fn(async () => {}) };
+		registrations.push(registration);
+		return registration;
+	};
 	const model = Model.Info.default(Provider.ID.make("openai"), Model.ID.make("gpt-5.5"));
 	const provider = Provider.Info.empty(Provider.ID.make("openai"));
 	const editor = {
@@ -30,20 +46,26 @@ function host() {
 	const context = {
 		app: { version: "2.0.16" },
 		location: { directory: "/tmp/opencode/v2-test", project: { directory: "/tmp/opencode/v2-test" } },
-		rpc: { register: vi.fn() },
+		rpc: { register: vi.fn(async () => registered()) },
 		integration: {
 			connection: { active: vi.fn(), resolve: vi.fn() },
-			transform: async (callback: (input: unknown) => void) => callback({ method: { update: (value: IntegrationOAuthMethodRegistration) => methods.push(value) } }),
+			transform: async (callback: (input: unknown) => void) => {
+				callback({ method: { update: (value: IntegrationOAuthMethodRegistration) => methods.push(value) } });
+				return registered();
+			},
 		},
-		provider: { reload: vi.fn(), transform: async (callback: (input: unknown) => void) => callback(editor) },
-		model: { transform: async (callback: (input: unknown) => void) => callback({
-			list: () => [model], update: (_provider: string, _id: string, update: (value: typeof model) => void) => update(model),
-		}) },
-		aisdk: { hook: vi.fn(async (name, callback) => { hooks.set(name, callback); }) },
-		tool: { transform: async (callback: (input: unknown) => void) => callback({ add: (value: ToolInfo) => tools.push(value) }) },
+		provider: { reload: vi.fn(), transform: async (callback: (input: unknown) => void) => { callback(editor); return registered(); } },
+		model: { transform: async (callback: (input: unknown) => void) => {
+			callback({
+				list: () => [model], update: (_provider: string, _id: string, update: (value: typeof model) => void) => update(model),
+			});
+			return registered();
+		} },
+		aisdk: { hook: vi.fn(async (name, callback) => { hooks.set(name, callback); return registered(); }) },
+		tool: { transform: async (callback: (input: unknown) => void) => { callback({ add: (value: ToolInfo) => tools.push(value) }); return registered(); } },
 		event: { subscribe: vi.fn(async function* () { /* empty public event stream */ }) },
 	};
-	return { context: context as unknown as Plugin.Context, methods, tools, hooks, model, provider };
+	return { context: context as unknown as Plugin.Context, methods, tools, hooks, model, provider, registrations };
 }
 
 describe("V2 compatibility adapter", () => {
@@ -64,9 +86,44 @@ describe("V2 compatibility adapter", () => {
 			{ type: "oauth", label: "Manual", authorize: async () => ({ url: "https://example.com", instructions: "Paste code", method: "code", callback }) },
 		] }, tool: {
 			"codex-test": { description: "Example", args: { value: z.number().default(2) }, execute: async (input: { value: number }) => String(input.value) },
+			"codex-meta": { description: "Meta", args: {}, execute: async () => ({ output: "done", metadata: { source: "test" } }) },
 		} });
 	});
 	afterEach(() => vi.restoreAllMocks());
+
+	// The surface probe warn-logs once per process, so this case has to be the
+	// first setupV2 call in the file — the module-level flag is consumed by it.
+	it("warn-logs once when the connected SDK surface misses expected members", async () => {
+		const h = host();
+		const context = { ...h.context, rpc: undefined } as unknown as Plugin.Context;
+		// The probe warns first; setup still fails later when the missing member is called.
+		await expect(setupV2(context, mocks.runtime)).rejects.toThrow();
+		expect(mocks.logWarn).toHaveBeenCalledTimes(1);
+		expect(mocks.logWarn.mock.calls[0]?.[0]).toContain("@opencode/plugin");
+		expect(mocks.logWarn.mock.calls[0]?.[1]).toMatchObject({ missing: "rpc.register" });
+		const second = host();
+		const broken = { ...second.context, tool: undefined } as unknown as Plugin.Context;
+		await expect(setupV2(broken, mocks.runtime)).rejects.toThrow();
+		expect(mocks.logWarn).toHaveBeenCalledTimes(1);
+	});
+
+	it("names the SDK members the adapter expects but the host lacks", () => {
+		const h = host();
+		expect(missingV2SdkSurface(h.context)).toEqual([]);
+		const withoutTool = { ...h.context, tool: { transform: "nope" } } as unknown as Plugin.Context;
+		expect(missingV2SdkSurface(withoutTool)).toEqual(["tool.transform"]);
+		const withoutNested = { ...h.context, integration: { ...h.context.integration, connection: {} } } as unknown as Plugin.Context;
+		expect(missingV2SdkSurface(withoutNested)).toEqual([
+			"integration.connection.active",
+			"integration.connection.resolve",
+		]);
+		const withoutConnection = { ...h.context, integration: { ...h.context.integration, connection: undefined } } as unknown as Plugin.Context;
+		expect(missingV2SdkSurface(withoutConnection)).toEqual([
+			"integration.connection.active",
+			"integration.connection.resolve",
+			"integration.connection",
+		]);
+	});
 
 	it("uses a distinct provider package so V2 cannot rewrite the transport to native OpenAI", async () => {
 		const h = host();
@@ -206,15 +263,142 @@ describe("V2 compatibility adapter", () => {
 		await cleanup();
 	});
 
-	it("retains tool validation and defaults across JSON Schema registration", async () => {
+	it("registers every runtime tool and retains validation, defaults, and metadata", async () => {
 		const h = host();
 		const cleanup = await setupV2(h.context, mocks.runtime);
+		// The registry registration is the bridge's whole contract: every
+		// runtime tool lands, none silently dropped.
+		expect(h.tools.map((tool) => tool.name)).toEqual(["codex-test", "codex-meta"]);
 		const tool = h.tools[0]!;
 		expect(tool.input).toMatchObject({ type: "object" });
 		const call = { signal: new AbortController().signal, progress: vi.fn() } as unknown as Parameters<typeof tool.execute>[1];
 		await expect(tool.execute({}, call)).resolves.toEqual({ content: "2" });
+		// Omitted input parses as {} so optional/defaulted args still apply.
+		await expect(tool.execute(undefined, call)).resolves.toEqual({ content: "2" });
 		await expect(tool.execute({ value: "wrong" }, call)).rejects.toThrow();
+		// Structured results forward output as content and keep metadata.
+		const meta = h.tools[1]!;
+		await expect(meta.execute({}, call)).resolves.toEqual({ content: "done", metadata: { source: "test" } });
 		await cleanup();
+	});
+
+	it("does not let an in-flight credential-event reload outlive teardown", async () => {
+		const h = host();
+		// The credential event fires once, then the stream idles — the consumer
+		// is then parked inside reload() while cleanup aborts the subscription.
+		(h.context as { event: unknown }).event = {
+			subscribe: vi.fn(async function* () {
+				yield { type: "credential.updated", location: h.context.location };
+				await new Promise(() => {});
+			}),
+		};
+		let releasePool: (value: unknown) => void = () => {};
+		const poolGate = new Promise((resolve) => { releasePool = resolve; });
+		mocks.loadAccounts
+			// setup's own hasOAuth() probe resolves normally…
+			.mockResolvedValueOnce({ activeIndex: 0, accounts: [{ refreshToken: "seed" }] })
+			// …but the credential-event reload parks inside hasOAuth() until the
+			// test releases it — i.e. teardown lands mid-reload.
+			.mockImplementationOnce(() => poolGate);
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		await vi.waitFor(() =>
+			expect(mocks.loadAccounts.mock.calls.length).toBeGreaterThanOrEqual(2),
+		);
+		const teardown = cleanup();
+		releasePool({ activeIndex: 0, accounts: [{ refreshToken: "fresh" }] });
+		await teardown;
+		// Abort landed before provider.reload(): the in-flight handler must be
+		// awaited and must not reload the provider post-teardown.
+		expect(h.context.provider.reload).not.toHaveBeenCalled();
+	});
+
+	it("hands the V1 loader a real model-keyed provider record", async () => {
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		const sdkEvent: AISDKHooks["sdk"] = {
+			model: h.model,
+			package: h.provider.package,
+			options: { reasoningEffort: "high" },
+		};
+		await h.hooks.get("sdk")?.(sdkEvent);
+		const provider = loader.mock.calls.at(-1)?.[1] as {
+			options: Record<string, unknown>;
+			models: Record<string, { id: string; name: string; status: string; options: object; variants: object }>;
+		};
+		// models:{} used to reach the loader — per-model config and prewarm
+		// silently degraded. The record now mirrors the host's model inventory.
+		expect(provider.options).toEqual({ reasoningEffort: "high" });
+		expect(provider.models["gpt-5.5"]).toMatchObject({
+			id: "gpt-5.5",
+			name: "gpt-5.5",
+			status: "active",
+			options: {},
+			variants: {},
+			api: { id: "gpt-5.5", npm: "@ai-sdk/openai" },
+		});
+		await cleanup();
+	});
+
+	it("forwards provider options the host resolved into the OpenAI SDK factory", async () => {
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		await h.hooks.get("sdk")?.({
+			model: { ...h.model, headers: { "x-model": "yes" } },
+			package: h.provider.package,
+			options: {
+				organization: "org-1",
+				project: "proj-1",
+				name: "custom-openai",
+				headers: { "x-provider": "yes", "x-model": "provider-wins-not" },
+				ignored: 42,
+			},
+		});
+		expect(createOpenAI).toHaveBeenCalledWith(expect.objectContaining({
+			apiKey: "placeholder",
+			organization: "org-1",
+			project: "proj-1",
+			name: "custom-openai",
+			// Model headers override provider-level headers on the same key.
+			headers: { "x-provider": "yes", "x-model": "yes" },
+			fetch: expect.any(Function),
+		}));
+		await cleanup();
+	});
+
+	it("disposes every SDK registration on unload", async () => {
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		expect(h.registrations.length).toBeGreaterThanOrEqual(7);
+		await cleanup();
+		for (const registration of h.registrations) {
+			expect(registration.dispose).toHaveBeenCalledTimes(1);
+		}
+	});
+
+	it("sends the generated user-agent on non-POST requests too", async () => {
+		const fetcher = vi.fn(async (_input: Request | string | URL, _init?: RequestInit) => new Response("ok"));
+		await createV2Fetch(fetcher, "2.0.16")("https://example.com/models", {
+			method: "GET", headers: { "x-test": "preserved" },
+		});
+		const input = fetcher.mock.calls[0]![0];
+		expect(input).toBeInstanceOf(Request);
+		const headers = new Headers((input as Request).headers);
+		expect(headers.get("user-agent")).toBe("opencode/2.0.16");
+		expect(headers.get("x-test")).toBe("preserved");
+	});
+
+	it.each([
+		"{broken json",
+		"42",
+		'["an", "array"]',
+		"plain text body",
+	] as const)("passes a non-object POST body through untouched (%s)", async (raw) => {
+		const fetcher = vi.fn(async (_input: Request | string | URL, _init?: RequestInit) => new Response("ok"));
+		await createV2Fetch(fetcher, "2.0.16")("https://example.com/responses", { method: "POST", body: raw });
+		const input = fetcher.mock.calls[0]![0];
+		expect(input).toBeInstanceOf(Request);
+		expect(await (input as Request).text()).toBe(raw);
+		expect(new Headers((input as Request).headers).get("user-agent")).toBe("opencode/2.0.16");
 	});
 
 	it("enforces stateless wire defaults and preserves headers and cancellation", async () => {

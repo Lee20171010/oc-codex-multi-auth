@@ -14,6 +14,7 @@ const originalFetch = global.fetch;
 let mockFetch: ReturnType<typeof vi.fn>;
 
 import { getModelFamily, getCodexInstructions, ensureInstructionIdentity, MODEL_FAMILIES, TOOL_REMAP_MESSAGE, __clearCacheForTesting } from "../lib/prompts/codex.js";
+import { BUNDLED_CODEX_INSTRUCTIONS } from "../lib/prompts/codex-instructions.js";
 
 const mockedReadFile = vi.mocked(fs.readFile);
 const mockedWriteFile = vi.mocked(fs.writeFile);
@@ -404,12 +405,7 @@ describe("Codex Prompts Module", () => {
 			});
 
 		it("should fall back to bundled when HTML fallback page request fails", async () => {
-			mockedReadFile.mockImplementation((filePath) => {
-				if (typeof filePath === "string" && filePath.includes("codex-instructions.md")) {
-					return Promise.resolve("bundled fallback content");
-				}
-				return Promise.reject(new Error("ENOENT"));
-			});
+			mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 			mockFetch.mockResolvedValueOnce({
 				ok: false,
 				status: 403,
@@ -420,16 +416,19 @@ describe("Codex Prompts Module", () => {
 			});
 
 			const result = await getCodexInstructions("gpt-5.2");
-			expect(result).toBe("bundled fallback content");
+			// The identity line is rewritten per model; the rest of the vendored
+			// prompt body must come through verbatim.
+			expect(result).toContain(
+				"You are the model identified to the backend as",
+			);
+			expect(result).toContain("apply_patch");
+			expect(result.length).toBeGreaterThan(
+				BUNDLED_CODEX_INSTRUCTIONS.length - 500,
+			);
 		});
 
 		it("should fall back to bundled when both URL parsing and HTML regex fail", async () => {
-			mockedReadFile.mockImplementation((filePath) => {
-				if (typeof filePath === "string" && filePath.includes("codex-instructions.md")) {
-					return Promise.resolve("bundled fallback for regex fail");
-				}
-				return Promise.reject(new Error("ENOENT"));
-			});
+			mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 			mockFetch.mockResolvedValueOnce({
 				ok: false,
 				status: 403,
@@ -441,7 +440,10 @@ describe("Codex Prompts Module", () => {
 			});
 
 			const result = await getCodexInstructions("gpt-5.1");
-			expect(result).toBe("bundled fallback for regex fail");
+			expect(result).toContain(
+				"You are the model identified to the backend as",
+			);
+			expect(result).toContain("apply_patch");
 		});
 	});
 
@@ -490,16 +492,28 @@ describe("Codex Prompts Module", () => {
 			});
 
 			it("should fall back to bundled instructions when all else fails", async () => {
-				mockedReadFile.mockImplementation((filePath) => {
-					if (typeof filePath === "string" && filePath.includes("codex-instructions.md")) {
-						return Promise.resolve("bundled fallback instructions");
-					}
-					throw new Error("ENOENT");
-				});
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 				mockFetch.mockRejectedValue(new Error("Network error"));
 
 				const result = await getCodexInstructions("gpt-5.1");
-				expect(result).toBe("bundled fallback instructions");
+				expect(result).toContain(
+					"You are the model identified to the backend as",
+				);
+				expect(result).toContain("apply_patch");
+			});
+
+			it("bundled fallback is non-empty and carries the Codex identity line", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockFetch.mockRejectedValue(new Error("offline"));
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				// A dead bundled read used to ENOENT here, so the request shipped
+				// upstream with no instructions at all (transform returned undefined).
+				expect(BUNDLED_CODEX_INSTRUCTIONS.trim().length).toBeGreaterThan(0);
+				expect(result).toContain(
+					"You are the model identified to the backend as gpt-5-codex",
+				);
 			});
 		});
 

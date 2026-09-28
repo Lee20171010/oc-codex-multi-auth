@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { PromptError } from "../errors.js";
 import type { CacheMetadata, GitHubRelease } from "../types.js";
 import { logWarn, logError, logDebug } from "../logger.js";
+import { BUNDLED_CODEX_INSTRUCTIONS } from "./codex-instructions.js";
 
 const GITHUB_API_RELEASES =
 	"https://api.github.com/repos/openai/codex/releases/latest";
@@ -12,9 +12,6 @@ const GITHUB_HTML_RELEASES =
 	"https://github.com/openai/codex/releases/latest";
 const CACHE_DIR = join(homedir(), ".opencode", "cache");
 const CACHE_TTL_MS = 15 * 60 * 1000;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const MAX_CACHE_SIZE = 50;
 const memoryCache = new Map<string, { content: string; timestamp: number }>();
@@ -605,13 +602,19 @@ export async function getCodexInstructions(
 			return rewriteInstructionIdentity(diskContent, normalizedModel);
 		}
 
+		// Last resort is the vendored copy, not a sibling file: the bundled
+		// codex-instructions.md was dropped in v1.0.3, so reading it here threw
+		// ENOENT on every offline first run and the caller shipped the request
+		// upstream untransformed.
 		logWarn(`Falling back to bundled instructions for ${key}`);
-		const bundled = await fs.readFile(
-			join(__dirname, "codex-instructions.md"),
-			"utf8",
+		setCacheEntry(key, {
+			content: BUNDLED_CODEX_INSTRUCTIONS,
+			timestamp: now,
+		});
+		return rewriteInstructionIdentity(
+			BUNDLED_CODEX_INSTRUCTIONS,
+			normalizedModel,
 		);
-		setCacheEntry(key, { content: bundled, timestamp: now });
-		return rewriteInstructionIdentity(bundled, normalizedModel);
 	}
 }
 

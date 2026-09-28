@@ -89,12 +89,24 @@ function parseDataPayload(line: string): string | null {
 }
 
 /**
+ * Quoted `"type"` values the branches in {@link processSsePayload} can act
+ * on. Delta/status events — the vast majority of SSE traffic — never carry
+ * one, so this substring gate lets them skip JSON.parse entirely. A false
+ * positive (e.g. `response.done` inside delta text) only costs the parse it
+ * would have run anyway; a false negative is impossible because every
+ * handled type is listed verbatim.
+ */
+const SSE_RESULT_MARKER_PATTERN =
+	/"(?:response\.(?:done|completed|failed|incomplete|error)|error)"/;
+
+/**
  * Parse SSE stream to extract final response
  * @param sseText - Complete SSE stream text
  * @returns Final response object or null if not found
  */
 function processSsePayload(payload: string): ParsedSseResult | null {
 	if (!payload || payload === "[DONE]") return null;
+	if (!SSE_RESULT_MARKER_PATTERN.test(payload)) return null;
 	try {
 		const data = JSON.parse(payload) as SSEEventData;
 		const responseRecord = toRecord((data as { response?: unknown }).response);
@@ -135,40 +147,6 @@ function processSsePayload(payload: string): ParsedSseResult | null {
 	return null;
 }
 
-function parseSseStream(sseText: string): ParsedSseResult | null {
-	const lines = sseText.split(/\r?\n/);
-
-	// WHATWG SSE: consecutive `data:` lines of a single event concatenate
-	// with "\n" into one payload, dispatched at the blank line. Each line is
-	// also tried on its own before the joined form, so a stream that omits
-	// the blank-line separator between events still parses. The residual
-	// buffer is dispatched at end-of-text so a final event without a
-	// trailing blank line still parses.
-	const dataLines: string[] = [];
-	const dispatch = (): ParsedSseResult | null => {
-		if (dataLines.length === 0) return null;
-		const payloads = dataLines.splice(0);
-		for (const candidate of [...payloads, payloads.join("\n")]) {
-			const result = processSsePayload(candidate);
-			if (result) return result;
-		}
-		return null;
-	};
-
-	for (const line of lines) {
-		const trimmedLine = line.trim();
-		if (trimmedLine === "") {
-			const result = dispatch();
-			if (result) return result;
-			continue;
-		}
-		const payload = parseDataPayload(trimmedLine);
-		if (payload !== null) dataLines.push(payload);
-	}
-
-	return dispatch();
-}
-
 /**
  * Convert SSE stream response to JSON for generateText()
  * @param response - Fetch response with SSE stream
@@ -189,10 +167,14 @@ export async function convertSseToJson(
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	const textEncoder = new TextEncoder();
-	let fullText = '';
-	// The documented cap is bytes; counting UTF-16 code units lets a
-	// multibyte stream overshoot it up to 4x before tripping.
+	// Chunks are collected and joined once — accumulating into a single
+	// string is quadratic on multi-MB streams.
+	const textParts: string[] = [];
+	// Leftover buffer: only text after the last complete line is held over
+	// for the next chunk, instead of re-splitting the whole stream per chunk.
+	let pendingText = '';
 	let totalBytes = 0;
+	let sawSseLine = false;
 	const assertWithinLimit = (): void => {
 		if (totalBytes > MAX_SSE_SIZE) {
 			throw new RequestError(`SSE response exceeds ${MAX_SSE_SIZE} bytes limit`, {
@@ -206,28 +188,120 @@ export async function convertSseToJson(
 		Math.floor(options?.streamStallTimeoutMs ?? DEFAULT_STREAM_STALL_TIMEOUT_MS),
 	);
 
+	// Incremental WHATWG-SSE event folding: consecutive `data:` lines of one
+	// event concatenate with "\n" and dispatch on a blank line. Each line is
+	// also tried on its own before the joined form, so a stream that omits
+	// the blank-line separator between events still parses. The first
+	// terminal/error event wins and stops the read.
+	const dataLines: string[] = [];
+	let parsedResult: ParsedSseResult | null = null;
+	const dispatch = (): ParsedSseResult | null => {
+		if (dataLines.length === 0) return null;
+		const payloads = dataLines.splice(0);
+		for (const candidate of [...payloads, payloads.join("\n")]) {
+			const result = processSsePayload(candidate);
+			if (result) return result;
+		}
+		return null;
+	};
+	const processLine = (line: string): ParsedSseResult | null => {
+		const trimmedLine = line.trim();
+		if (trimmedLine === '') {
+			return dispatch();
+		}
+		if (/^(?:data|event):/.test(trimmedLine)) sawSseLine = true;
+		const payload = parseDataPayload(trimmedLine);
+		if (payload !== null) dataLines.push(payload);
+		return null;
+	};
+	// Extract complete lines out of pendingText; a trailing partial line
+	// (no newline yet) stays buffered for the next chunk.
+	const drainLines = (): ParsedSseResult | null => {
+		let lineStart = 0;
+		let newlineIndex = pendingText.indexOf('\n');
+		while (newlineIndex !== -1) {
+			const result = processLine(pendingText.slice(lineStart, newlineIndex));
+			if (result) {
+				pendingText = '';
+				return result;
+			}
+			lineStart = newlineIndex + 1;
+			newlineIndex = pendingText.indexOf('\n', lineStart);
+		}
+		pendingText = pendingText.slice(lineStart);
+		return null;
+	};
+	// End-of-stream: the residual line has no trailing newline, and the
+	// residual data buffer dispatches without a final blank line.
+	const flushPending = (): ParsedSseResult | null => {
+		if (pendingText.length > 0) {
+			const lastLine = pendingText;
+			pendingText = '';
+			const result = processLine(lastLine);
+			if (result) return result;
+		}
+		return dispatch();
+	};
+
+	// One stall timer re-armed per read, rather than a fresh timeout promise
+	// (and timer object) per chunk.
+	let stallTimer: ReturnType<typeof setTimeout> | undefined;
+	let stallReject: ((error: Error) => void) | undefined;
+	const stallPromise = new Promise<never>((_, reject) => {
+		stallReject = reject;
+	});
+	// If the stream resolves early the promise is never raced again; without
+	// this handler a late reject would surface as an unhandled rejection.
+	stallPromise.catch(() => {});
+	const armStallTimer = (): void => {
+		if (stallTimer !== undefined) clearTimeout(stallTimer);
+		stallTimer = setTimeout(() => {
+			stallReject?.(
+				new Error(
+					`SSE stream stalled for ${streamStallTimeoutMs}ms while waiting for response.done`,
+				),
+			);
+		}, streamStallTimeoutMs);
+	};
+
 	try {
-		// Consume the entire stream
+		// Consume the stream, folding SSE events as complete lines arrive.
+		armStallTimer();
 		while (true) {
-			const { done, value } = await readWithTimeout(reader, streamStallTimeoutMs);
+			const { done, value } = await Promise.race([reader.read(), stallPromise]);
 			if (done || !value) break;
 			totalBytes += value.byteLength;
-			fullText += decoder.decode(value, { stream: true });
+			const decoded = decoder.decode(value, { stream: true });
+			textParts.push(decoded);
+			pendingText += decoded;
 			assertWithinLimit();
+			const lineResult = drainLines();
+			if (lineResult) {
+				parsedResult = lineResult;
+				break;
+			}
+			armStallTimer();
 		}
-		const tail = decoder.decode();
-		if (tail) {
-			fullText += tail;
-			totalBytes += textEncoder.encode(tail).byteLength;
-			assertWithinLimit();
+
+		if (!parsedResult) {
+			const tail = decoder.decode();
+			if (tail) {
+				pendingText += tail;
+				textParts.push(tail);
+				totalBytes += textEncoder.encode(tail).byteLength;
+				assertWithinLimit();
+			}
+			const flushed = flushPending();
+			if (flushed) parsedResult = flushed;
+		} else {
+			// A resolved stream still has an upstream tail in flight; cancel it
+			// so the socket does not keep downloading a response nobody reads.
+			await reader.cancel().catch(() => {});
 		}
 
 		if (LOGGING_ENABLED) {
-			logRequest("stream-full", { fullContent: fullText });
+			logRequest("stream-full", { fullContent: textParts.join('') });
 		}
-
-		// Parse SSE events to extract the final response
-		const parsedResult = parseSseStream(fullText);
 
 		if (parsedResult?.kind === "error") {
 			log.warn("SSE stream returned an error event", parsedResult.error);
@@ -270,9 +344,8 @@ export async function convertSseToJson(
 			// returning it at the original 2xx status would credit the account
 			// with a success and hand the client an unparseable body, so it is
 			// surfaced like the terminal-error branch above instead.
-			const carriedSseData = /^(data|event):/m.test(fullText);
-			if (!carriedSseData) {
-				return new Response(fullText, {
+			if (!sawSseLine) {
+				return new Response(textParts.join(''), {
 					status: response.status,
 					statusText: response.statusText,
 					headers: headers,
@@ -317,6 +390,7 @@ export async function convertSseToJson(
 		}
 		throw error;
 	} finally {
+		if (stallTimer !== undefined) clearTimeout(stallTimer);
 		// Release the reader lock to prevent resource leaks
 		reader.releaseLock();
 	}
@@ -336,31 +410,6 @@ export function ensureContentType(headers: Headers): Headers {
 	}
 
 	return responseHeaders;
-}
-
-async function readWithTimeout(
-	reader: ReadableStreamDefaultReader<Uint8Array>,
-	timeoutMs: number,
-): Promise<{ done: boolean; value?: Uint8Array }> {
-	let timeoutId: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			reader.read(),
-			new Promise<never>((_, reject) => {
-				timeoutId = setTimeout(() => {
-					reject(
-						new Error(
-							`SSE stream stalled for ${timeoutMs}ms while waiting for response.done`,
-						),
-					);
-				}, timeoutMs);
-			}),
-		]);
-	} finally {
-		if (timeoutId !== undefined) {
-			clearTimeout(timeoutId);
-		}
-	}
 }
 
 /**

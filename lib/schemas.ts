@@ -12,6 +12,16 @@ import { MODEL_FAMILIES, type ModelFamily } from "./prompts/codex.js";
 
 export const QuotaStatusScreenSchema = z.enum(["active", "overview", "resets"]);
 
+/**
+ * Ceiling for millisecond-duration settings (timeouts, delays, poll
+ * intervals). Anything past a day is indistinguishable from "never": a
+ * `fetchTimeoutMs` of `1e15` is not a long timeout, it is an infinite hang
+ * spelled with digits. Fields whose contract is "0 = unlimited"
+ * (`retryAllAccountsMaxWaitMs`) deliberately do NOT take this bound — there
+ * unboundedness is the documented semantic, not an accident.
+ */
+export const MAX_CONFIG_DURATION_MS = 86_400_000;
+
 export const PluginConfigSchema = z.object({
 	codexMode: z.boolean().optional(),
 	requestTransformMode: z.enum(["native", "legacy"]).optional(),
@@ -33,7 +43,7 @@ export const PluginConfigSchema = z.object({
 		z.string().min(1),
 		z.enum(["preferred", "strict"]),
 	).optional(),
-	fastSessionMaxInputItems: z.number().min(8).max(200).optional(),
+	fastSessionMaxInputItems: z.number().int().min(8).max(200).optional(),
 	retryProfile: z.enum(["conservative", "balanced", "aggressive"]).optional(),
 	retryBudgetOverrides: z.object({
 		authRefresh: z.number().int().min(0).optional(),
@@ -44,8 +54,10 @@ export const PluginConfigSchema = z.object({
 		emptyResponse: z.number().int().min(0).optional(),
 	}).optional(),
 	retryAllAccountsRateLimited: z.boolean().optional(),
+	// No MAX_CONFIG_DURATION_MS here: `0` means "wait without a bound",
+	// which is a documented semantic for riding out multi-day quota resets.
 	retryAllAccountsMaxWaitMs: z.number().min(0).optional(),
-	retryAllAccountsMaxRetries: z.number().min(0).optional(),
+	retryAllAccountsMaxRetries: z.number().int().min(0).optional(),
 	unsupportedCodexPolicy: z.enum(["strict", "fallback"]).optional(),
 	fallbackOnUnsupportedCodexModel: z.boolean().optional(),
 	fallbackToGpt52OnUnsupportedGpt53: z.boolean().optional(),
@@ -53,9 +65,9 @@ export const PluginConfigSchema = z.object({
 		z.string(),
 		z.array(z.string().min(1)),
 	).optional(),
-	tokenRefreshSkewMs: z.number().min(0).optional(),
-	rateLimitToastDebounceMs: z.number().min(0).optional(),
-	toastDurationMs: z.number().min(1000).optional(),
+	tokenRefreshSkewMs: z.number().min(0).max(MAX_CONFIG_DURATION_MS).optional(),
+	rateLimitToastDebounceMs: z.number().min(0).max(MAX_CONFIG_DURATION_MS).optional(),
+	toastDurationMs: z.number().min(1000).max(MAX_CONFIG_DURATION_MS).optional(),
 	accountToasts: z.boolean().optional(),
 	perProjectAccounts: z.boolean().optional(),
 	credentialSnapshots: z.boolean().optional(),
@@ -64,16 +76,16 @@ export const PluginConfigSchema = z.object({
 	autoResume: z.boolean().optional(),
 	autoUpdate: z.boolean().optional(),
 	parallelProbing: z.boolean().optional(),
-	parallelProbingMaxConcurrency: z.number().min(1).max(5).optional(),
-	emptyResponseMaxRetries: z.number().min(0).optional(),
-	emptyResponseRetryDelayMs: z.number().min(0).optional(),
+	parallelProbingMaxConcurrency: z.number().int().min(1).max(5).optional(),
+	emptyResponseMaxRetries: z.number().int().min(0).optional(),
+	emptyResponseRetryDelayMs: z.number().min(0).max(MAX_CONFIG_DURATION_MS).optional(),
 	pidOffsetEnabled: z.boolean().optional(),
-	fetchTimeoutMs: z.number().min(1_000).optional(),
-	streamStallTimeoutMs: z.number().min(1_000).optional(),
+	fetchTimeoutMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
+	streamStallTimeoutMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
 	quotaNotifications: z.object({
 		enabled: z.boolean().optional(),
 		autoProtectCredits: z.boolean().optional(),
-		intervalMs: z.number().min(30_000).optional(),
+		intervalMs: z.number().min(30_000).max(MAX_CONFIG_DURATION_MS).optional(),
 		notifyEveryCheck: z.boolean().optional(),
 		thresholds: z.array(z.number().min(0).max(100)).optional(),
 	}).optional(),
@@ -82,7 +94,7 @@ export const PluginConfigSchema = z.object({
 			QuotaStatusScreenSchema,
 			z.array(QuotaStatusScreenSchema),
 		]).optional(),
-		rotateMs: z.number().min(1_000).optional(),
+		rotateMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
 		layout: z.enum(["accounts", "aggregate", "count", "total"]).optional(),
 		accountNames: z.enum(["number", "label", "none"]).optional(),
 		order: z.enum([
