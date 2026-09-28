@@ -11,9 +11,13 @@ vi.mock("../lib/auth/auth.js", () => ({
 	})),
 }));
 
-vi.mock("../lib/logger.js", () => ({
-	logError: vi.fn(),
-}));
+vi.mock("../lib/logger.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../lib/logger.js")>();
+	return {
+		...actual,
+		logError: vi.fn(),
+	};
+});
 
 import {
 	buildDeviceCodeInstructions,
@@ -132,7 +136,8 @@ describe("device-code auth", () => {
 		expect(result).toEqual({
 			type: "failed",
 			reason: "unknown",
-			message: "Device code authorization timed out after 15 minutes",
+			message:
+				"Device code authorization timed out after 15 minutes; restart login for a fresh code",
 		});
 	});
 
@@ -153,5 +158,42 @@ describe("device-code auth", () => {
 		expect(message).toContain("device-code token poll failed: 500");
 		expect(message).not.toContain(sensitiveBody);
 		expect(message).toContain(sensitiveBody.slice(0, 120));
+	});
+
+	it("masks emails in network error messages returned to the caller", async () => {
+		globalThis.fetch = vi.fn(async () => {
+			throw new Error("connect failed for victim@example.com");
+		}) as typeof fetch;
+
+		const result = await completeDeviceCodeSession({
+			verificationUrl: "https://auth.openai.com/codex/device",
+			userCode: "ABCD-EFGH",
+			deviceAuthId: "device-auth-1",
+			intervalSeconds: 1,
+		});
+
+		expect(result.type).toBe("failed");
+		if (result.type === "failed") {
+			expect(result.message).not.toContain("victim@example.com");
+			expect(result.message).toContain("connect failed");
+		}
+	});
+
+	it("bounds the upstream body in user-facing failure messages", async () => {
+		const hugeBody = `error-${"z".repeat(2000)}`;
+		globalThis.fetch = vi.fn(async () => new Response(hugeBody, { status: 500 })) as typeof fetch;
+
+		const result = await completeDeviceCodeSession({
+			verificationUrl: "https://auth.openai.com/codex/device",
+			userCode: "ABCD-EFGH",
+			deviceAuthId: "device-auth-1",
+			intervalSeconds: 1,
+		});
+
+		expect(result.type).toBe("failed");
+		if (result.type === "failed") {
+			expect(result.message ?? "").not.toContain(hugeBody);
+			expect((result.message ?? "").length).toBeLessThan(400);
+		}
 	});
 });

@@ -218,7 +218,13 @@ export class TokenBucketTracker {
 
   private refillTokens(entry: TokenBucketEntry): number {
     const now = Date.now();
-    const minutesSinceRefill = (now - entry.lastRefill) / (1000 * 60);
+    // Elapsed time is clamped at zero, matching the identical guard in
+    // HealthScoreTracker.applyPassiveRecovery: `lastRefill` is stamped with
+    // Date.now() at write time, so a negative interval means the host clock
+    // moved backwards (NTP correction, a resumed VM) — and an unclamped
+    // negative interval turns refill into a drain, pushing the bucket below
+    // zero and leaving the account unselectable until wall time catches up.
+    const minutesSinceRefill = Math.max(0, now - entry.lastRefill) / (1000 * 60);
     const tokensToAdd = minutesSinceRefill * this.config.tokensPerMinute;
     return Math.min(entry.tokens + tokensToAdd, this.config.maxTokens);
   }

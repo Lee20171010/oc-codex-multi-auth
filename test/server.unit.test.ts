@@ -81,6 +81,8 @@ vi.mock('node:http', () => {
 
 vi.mock('../lib/oauth-success.js', () => ({
 	renderOAuthSuccessHtml: () => '<html>Success</html>',
+	renderOAuthErrorHtml: (_nonce: string, heading: string, detail: string) =>
+		`<html>Error:${heading}:${detail}</html>`,
 }));
 
 vi.mock('../lib/logger.js', () => ({
@@ -188,24 +190,29 @@ describe('OAuth Server Unit Tests', () => {
 			expect(res.end).toHaveBeenCalledWith('Not found');
 		});
 
-		it('should return 400 for state mismatch', () => {
+		it('should return a 400 HTML error page for state mismatch', () => {
 			const req = createMockRequest('/auth/callback?code=abc&state=wrong-state');
 			const res = createMockResponse();
 
 			requestHandler(req, res);
 
 			expect(res.statusCode).toBe(400);
-			expect(res.end).toHaveBeenCalledWith('State mismatch');
+			expect(res.setHeader).toHaveBeenCalledWith('Content-Type', 'text/html; charset=utf-8');
+			expect(res.setHeader).toHaveBeenCalledWith(
+				'Content-Security-Policy',
+				expect.stringMatching(/^default-src 'none'; style-src 'nonce-[^']+'; script-src 'none'/),
+			);
+			expect(res.end).toHaveBeenCalledWith(expect.stringContaining('Sign-in link mismatch'));
 		});
 
-		it('should return 400 for missing code', () => {
+		it('should return a 400 HTML error page for missing code', () => {
 			const req = createMockRequest('/auth/callback?state=test-state');
 			const res = createMockResponse();
 
 			requestHandler(req, res);
 
 			expect(res.statusCode).toBe(400);
-			expect(res.end).toHaveBeenCalledWith('Missing authorization code');
+			expect(res.end).toHaveBeenCalledWith(expect.stringContaining('Missing authorization code'));
 		});
 
 		it('should return 200 with HTML for valid callback', () => {
@@ -250,7 +257,8 @@ describe('OAuth Server Unit Tests', () => {
 
 			expect(() => requestHandler(req, res)).not.toThrow();
 			expect(res.statusCode).toBe(500);
-			expect(res.end).toHaveBeenCalledWith('Internal error');
+			// The error page could not be written because setHeader itself throws,
+			// but the handler must still not propagate.
 			expect(logError).toHaveBeenCalledWith(expect.stringContaining('Request handler error'));
 		});
 	});

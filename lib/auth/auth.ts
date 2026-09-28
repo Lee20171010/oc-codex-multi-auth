@@ -1,6 +1,6 @@
 import { randomBytes, webcrypto } from "node:crypto";
 import type { PKCEPair, AuthorizationFlow, TokenResult, JWTPayload } from "../types.js";
-import { logError } from "../logger.js";
+import { logError, maskString } from "../logger.js";
 import {
 	OAUTH_CALLBACK_PATH,
 	OAUTH_CALLBACK_PORT,
@@ -65,6 +65,24 @@ function tryParseUrl(value: string): URL | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Cap for upstream error bodies. The token endpoint's error body is untrusted
+ * text that flows into the user-facing `TokenResult.message` (and the log
+ * line), so it is both truncated and run through the credential masker before
+ * it leaves this module.
+ */
+const UPSTREAM_BODY_LIMIT = 120;
+
+function sanitizeUpstreamBody(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed) return "";
+	const truncated =
+		trimmed.length > UPSTREAM_BODY_LIMIT
+			? `${trimmed.slice(0, UPSTREAM_BODY_LIMIT)}...`
+			: trimmed;
+	return maskString(truncated);
 }
 
 /**
@@ -203,7 +221,7 @@ export async function exchangeAuthorizationCode(
 		}),
 	});
 	if (!res.ok) {
-		const text = await res.text().catch(() => "");
+		const text = sanitizeUpstreamBody(await res.text().catch(() => ""));
 		logError(`code->token failed: ${res.status} ${text}`);
 		return { type: "failed", reason: "http_error", statusCode: res.status, message: text || undefined };
 	}
@@ -268,7 +286,7 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
 		});
 
 		if (!response.ok) {
-			const text = await response.text().catch(() => "");
+			const text = sanitizeUpstreamBody(await response.text().catch(() => ""));
 			logError(`Token refresh failed: ${response.status} ${text}`);
 			return { type: "failed", reason: "http_error", statusCode: response.status, message: text || undefined };
 		}
@@ -298,7 +316,14 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
 	} catch (error) {
 		const err = error as Error;
 		logError("Token refresh error", err);
-		return { type: "failed", reason: "network_error", message: err?.message };
+		return {
+			type: "failed",
+			reason: "network_error",
+			// Keep the Node error text for diagnosability, masked — a network
+			// error string can carry credential-shaped fragments (e.g. a request
+			// body echoed by a proxy error).
+			message: typeof err?.message === "string" ? maskString(err.message) : undefined,
+		};
 	}
 }
 

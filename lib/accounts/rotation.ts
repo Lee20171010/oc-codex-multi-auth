@@ -426,7 +426,21 @@ export class AccountRotation {
 		reason: RateLimitReason,
 		model?: string | null,
 	): void {
-		const retryMs = Math.max(0, Math.floor(retryAfterMs));
+		// A non-finite retryAfter (NaN from a corrupt upstream parse, Infinity)
+		// carries no timing information. Writing it would store a NaN stamp that
+		// `isRateLimitedForQuotaKey` never matches and `clearExpiredRateLimits`
+		// never drops — a permanent ghost entry — while folding it to 0 would
+		// DELETE a legitimate longer block (the #218 regression in reverse). So
+		// it touches no stamp at all and only records the reason below.
+		// Finite values are additionally capped at the quota-reset horizon that
+		// `markQuotaExhausted` already enforces, so an absurd multi-year
+		// retry-after cannot strand the account any longer than a quota block.
+		const retryMs = Number.isFinite(retryAfterMs)
+			? Math.min(
+					MAX_QUOTA_RESET_HORIZON_MS,
+					Math.max(0, Math.floor(retryAfterMs)),
+				)
+			: null;
 		const keys = this.getBlockedQuotaKeys(family, model);
 
 		if (retryMs === 0) {
@@ -438,7 +452,7 @@ export class AccountRotation {
 			// declared expired. Nothing in the request path passes 0 — every
 			// server-derived delay is at least 1ms.
 			for (const key of keys) delete account.rateLimitResetTimes[key];
-		} else {
+		} else if (retryMs !== null) {
 			const resetAt = nowMs() + retryMs;
 			for (const key of keys) {
 				this.extendRateLimitReset(account, key, resetAt);
@@ -495,7 +509,14 @@ export class AccountRotation {
 		cooldownMs: number,
 		reason: CooldownReason,
 	): void {
-		const ms = Math.max(0, Math.floor(cooldownMs));
+		// A non-finite input must not produce a NaN stamp: `isAccountCoolingDown`
+		// compares `now >= coolingDownUntil`, which is never true for NaN, so the
+		// account would sit in a cooldown nothing can ever clear. Folding it to
+		// 0 fails open — the stamp expires immediately — rather than strand the
+		// account on a garbage duration.
+		const ms = Number.isFinite(cooldownMs)
+			? Math.max(0, Math.floor(cooldownMs))
+			: 0;
 		account.coolingDownUntil = nowMs() + ms;
 		account.cooldownReason = reason;
 	}

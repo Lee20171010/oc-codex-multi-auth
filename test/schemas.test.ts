@@ -9,6 +9,8 @@ import {
 	TokenFailureSchema,
 	TokenResultSchema,
 	OAuthTokenResponseSchema,
+	OAUTH_EXPIRES_IN_MAX_SECONDS,
+	OAUTH_EXPIRES_IN_DEFAULT_SECONDS,
 	safeParsePluginConfig,
 	safeParseAccountStorage,
 	safeParseAccountStorageV3,
@@ -411,9 +413,40 @@ describe("OAuthTokenResponseSchema", () => {
 		expect(result.success).toBe(false);
 	});
 
-	it("rejects missing expires_in", () => {
+	it("defaults a missing expires_in to one hour", () => {
 		const result = OAuthTokenResponseSchema.safeParse({ access_token: "at" });
-		expect(result.success).toBe(false);
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.expires_in).toBe(OAUTH_EXPIRES_IN_DEFAULT_SECONDS);
+		}
+	});
+
+	it.each([
+		["zero", 0],
+		["negative", -5],
+		["non-finite", Number.POSITIVE_INFINITY],
+		["absurdly large", OAUTH_EXPIRES_IN_MAX_SECONDS + 1],
+		["non-numeric", "3600"],
+	])("defaults expires_in when %s", (_label, value) => {
+		const result = OAuthTokenResponseSchema.safeParse({
+			access_token: "at",
+			expires_in: value,
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.expires_in).toBe(OAUTH_EXPIRES_IN_DEFAULT_SECONDS);
+		}
+	});
+
+	it("accepts the maximum expires_in", () => {
+		const result = OAuthTokenResponseSchema.safeParse({
+			access_token: "at",
+			expires_in: OAUTH_EXPIRES_IN_MAX_SECONDS,
+		});
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.expires_in).toBe(OAUTH_EXPIRES_IN_MAX_SECONDS);
+		}
 	});
 });
 

@@ -865,3 +865,138 @@ describe("quota monitor lifecycle", () => {
 		expect(getCleanupCount()).toBe(before);
 	});
 });
+
+describe("quota monitor delivery dedup vs clock skew", () => {
+	const tempDirectories: string[] = [];
+
+	afterEach(async () => {
+		setStoragePathDirect(null);
+		await Promise.all(tempDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+	});
+
+	function everyCheckMonitor(storagePath: string, notify: ReturnType<typeof vi.fn>, now: () => number) {
+		return createQuotaMonitor({
+			loadConfig: () => ({ enabled: true, intervalMs: 60_000, notifyEveryCheck: true, thresholds: [25, 10, 0] }),
+			loadStorage: async () => ({
+				version: 3,
+				accounts: [{ refreshToken: "token", addedAt: 0, lastUsed: 0 }],
+				activeIndex: 0,
+			}),
+			fetchSummary: async () => accountUsage({ fiveHourUsed: 50, weeklyUsed: 50 }),
+			notify,
+			notificationsSupported: () => true,
+			now,
+			initialDelayMs: 0,
+		});
+	}
+
+	it("delivers when the persisted lastDeliveredAt is in the future, and self-heals the stamp", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "quota-monitor-"));
+		tempDirectories.push(directory);
+		const storagePath = join(directory, "accounts.json");
+		setStoragePathDirect(storagePath);
+		const statePath = getQuotaNotificationStatePath(storagePath);
+		// A clock rollback, or a file written by a host whose clock ran ahead:
+		// `now - prev` is negative, which must not suppress delivery until wall
+		// time reaches stamp+interval.
+		await updateQuotaNotificationState(statePath, () => ({
+			state: { fiveHour: {}, weekly: {}, lastDeliveredAt: 5_000, updatedAt: 4_900 },
+			result: undefined,
+		}));
+
+		const notify = vi.fn().mockResolvedValue(true);
+		const monitor = everyCheckMonitor(storagePath, notify, () => 1_000);
+
+		monitor.start();
+		try {
+			await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+		} finally {
+			monitor.dispose();
+		}
+		// Delivering once re-dates the stamp to now — the corrupted file heals
+		// itself instead of suppressing alerts forever.
+		const persisted = await readQuotaNotificationState(statePath);
+		expect(persisted?.lastDeliveredAt).toBe(1_000);
+	});
+
+	it("still delivers when a rollback makes the interval diff negative", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "quota-monitor-"));
+		tempDirectories.push(directory);
+		const storagePath = join(directory, "accounts.json");
+		setStoragePathDirect(storagePath);
+		const statePath = getQuotaNotificationStatePath(storagePath);
+		// Delivered at 60_000 under a clock that has since rolled back to 1_000.
+		await updateQuotaNotificationState(statePath, () => ({
+			state: { fiveHour: {}, weekly: {}, lastDeliveredAt: 60_000, updatedAt: 59_900 },
+			result: undefined,
+		}));
+
+		const notify = vi.fn().mockResolvedValue(true);
+		const monitor = everyCheckMonitor(storagePath, notify, () => 1_000);
+
+		monitor.start();
+		try {
+			await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+		} finally {
+			monitor.dispose();
+		}
+	});
+
+	it.each([
+		// now - prev === intervalMs: exactly due (>= boundary).
+		{ lastDeliveredAt: 1_000, now: 61_000, expectDelivery: true },
+		// now - prev === intervalMs - 1: one tick short, still suppressed.
+		{ lastDeliveredAt: 1_001, now: 61_000, expectDelivery: false },
+	])("interval boundary: prev=$lastDeliveredAt now=$now -> delivered=$expectDelivery", async ({ lastDeliveredAt, now, expectDelivery }) => {
+		const directory = await mkdtemp(join(tmpdir(), "quota-monitor-"));
+		tempDirectories.push(directory);
+		const storagePath = join(directory, "accounts.json");
+		setStoragePathDirect(storagePath);
+		const statePath = getQuotaNotificationStatePath(storagePath);
+		await updateQuotaNotificationState(statePath, () => ({
+			state: {
+				fiveHour: { lastPercent: 50 },
+				weekly: { lastPercent: 50 },
+				lastDeliveredAt,
+				updatedAt: lastDeliveredAt,
+			},
+			result: undefined,
+		}));
+
+		const notify = vi.fn().mockResolvedValue(true);
+		const loadStorage = vi.fn().mockResolvedValue({
+			version: 3 as const,
+			accounts: [{ refreshToken: "token", addedAt: 0, lastUsed: 0 }],
+			activeIndex: 0,
+		});
+		const monitor = createQuotaMonitor({
+			loadConfig: () => ({ enabled: true, intervalMs: 60_000, notifyEveryCheck: true, thresholds: [25, 10, 0] }),
+			loadStorage,
+			fetchSummary: async () => accountUsage({ fiveHourUsed: 50, weeklyUsed: 50 }),
+			notify,
+			notificationsSupported: () => true,
+			now: () => now,
+			initialDelayMs: 0,
+		});
+
+		monitor.start();
+		try {
+			// The claim write lands before the delivery decision: `updatedAt`
+			// flipping to `now` proves the check ran to completion, so the
+			// non-delivery assertion needs no arbitrary sleep.
+			await vi.waitFor(async () => {
+				const persisted = await readQuotaNotificationState(statePath);
+				expect(persisted?.updatedAt).toBe(now);
+			});
+			if (expectDelivery) {
+				await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
+			} else {
+				expect(notify).not.toHaveBeenCalled();
+				const persisted = await readQuotaNotificationState(statePath);
+				expect(persisted?.lastDeliveredAt).toBe(lastDeliveredAt);
+			}
+		} finally {
+			monitor.dispose();
+		}
+	});
+});

@@ -8,6 +8,40 @@ import {
 	isTTY,
 	type AccountStatus,
 } from "./ui/auth-menu.js";
+import { sanitizeDisplayText } from "./ui/display-text.js";
+import { terminalSupportsAnsi } from "./ui/theme.js";
+
+/**
+ * `readline` question that settles on EOF as well as on an answer.
+ *
+ * When stdin closes mid-prompt (piped input ending, the TUI reclaiming the
+ * stream) the pending `rl.question` is left in a state where whether it
+ * resolves is version-dependent; racing it against `close` makes EOF answer
+ * with `""` — the same as pressing Enter on an empty line.
+ */
+function askLine(
+	rl: ReturnType<typeof createInterface>,
+	query: string,
+): Promise<string> {
+	return new Promise<string>((resolve, reject) => {
+		let settled = false;
+		const finish = (answer: string) => {
+			if (settled) return;
+			settled = true;
+			rl.off("close", onClose);
+			resolve(answer);
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			rl.off("close", onClose);
+			reject(error instanceof Error ? error : new Error(String(error)));
+		};
+		const onClose = () => finish("");
+		rl.once("close", onClose);
+		rl.question(query).then(finish, fail);
+	});
+}
 
 /**
  * Detect if running in OpenCode Desktop/TUI mode where readline prompts don't work.
@@ -32,7 +66,7 @@ export async function promptAddAnotherAccount(currentCount: number): Promise<boo
 	const rl = createInterface({ input, output });
 	try {
 		console.log("\nTIP: use private browsing or sign out before adding another account.\n");
-		const answer = await rl.question(`Add another account? (${currentCount} added) (y/n): `);
+		const answer = await askLine(rl, `Add another account? (${currentCount} added) (y/n): `);
 		const normalized = answer.trim().toLowerCase();
 		return normalized === "y" || normalized === "yes";
 	} finally {
@@ -84,9 +118,13 @@ function formatAccountLabel(
 	} = {},
 ): string {
 	const num = index + 1;
-	const label = account.accountLabel?.trim();
-	const email = resolveDisplayEmail(account.email, options.maskEmail ?? false);
-	const accountId = account.accountId?.trim();
+	// Label/email/id all originate from stored credentials — sanitize before
+	// they are printed so escapes and bidi marks cannot reach the terminal.
+	const label = sanitizeDisplayText(account.accountLabel, { maxLength: 64 });
+	const email = sanitizeDisplayText(
+		resolveDisplayEmail(account.email, options.maskEmail ?? false),
+	);
+	const accountId = sanitizeDisplayText(account.accountId, { maxLength: 64 });
 	const accountIdDisplay =
 		accountId && accountId.length > 14
 			? `${accountId.slice(0, 8)}...${accountId.slice(-6)}`
@@ -109,7 +147,7 @@ function formatAccountLabel(
 async function promptDeleteAllTypedConfirm(): Promise<boolean> {
 	const rl = createInterface({ input, output });
 	try {
-		const answer = await rl.question("Type DELETE to confirm removing all accounts: ");
+		const answer = await askLine(rl, "Type DELETE to confirm removing all accounts: ");
 		return answer.trim() === "DELETE";
 	} finally {
 		rl.close();
@@ -133,7 +171,7 @@ async function promptLoginModeFallback(
 		}
 
 		while (true) {
-			const answer = await rl.question("(a)dd, (f)resh, (c)heck, (d)eep, (v)erify flagged, or (q)uit? [a/f/c/d/v/q]: ");
+			const answer = await askLine(rl, "(a)dd, (f)resh, (c)heck, (d)eep, (v)erify flagged, or (q)uit? [a/f/c/d/v/q]: ");
 			const normalized = answer.trim().toLowerCase();
 			if (normalized === "a" || normalized === "add") return { mode: "add" };
 			if (normalized === "f" || normalized === "fresh") return { mode: "fresh", deleteAll: true };
@@ -158,7 +196,11 @@ export async function promptLoginMode(
 
 	const maskEmail = options.maskEmail ?? false;
 
-	if (!isTTY()) {
+	// A TTY that cannot move the cursor (`TERM=dumb`, `cons25`, emacs shell
+	// buffers) gets the line-oriented fallback rather than a menu that would
+	// paint escape sequences literally. `FORCE_COLOR` must NOT bypass this —
+	// it covers styling, not cursor control.
+	if (!isTTY() || !terminalSupportsAnsi()) {
 		return promptLoginModeFallback(existingAccounts, maskEmail);
 	}
 
@@ -239,15 +281,17 @@ export async function promptAccountSelection(
 
 	const rl = createInterface({ input, output });
 	try {
-		console.log(`\n${options.title ?? "Multiple workspaces detected for this account:"}`);
+		console.log(
+			`\n${sanitizeDisplayText(options.title, { maxLength: 120 }) ?? "Multiple workspaces detected for this account:"}`,
+		);
 		candidates.forEach((candidate, index) => {
 			const isDefault = candidate.isDefault ? " (default)" : "";
-			console.log(`  ${index + 1}. ${candidate.label}${isDefault}`);
+			console.log(`  ${index + 1}. ${sanitizeDisplayText(candidate.label) ?? "unnamed"}${isDefault}`);
 		});
 		console.log("");
 
 		while (true) {
-			const answer = await rl.question(`Select workspace [${defaultIndex + 1}]: `);
+			const answer = await askLine(rl, `Select workspace [${defaultIndex + 1}]: `);
 			const normalized = answer.trim().toLowerCase();
 			if (!normalized) {
 				return candidates[defaultIndex] ?? candidates[0] ?? null;

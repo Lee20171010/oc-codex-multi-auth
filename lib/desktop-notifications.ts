@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 
 import { logDebug, logWarn } from "./logger.js";
+import { sanitizeDisplayText } from "./ui/display-text.js";
 
 const DELIVERY_TIMEOUT_MS = 10_000;
 const MACOS_NOTIFICATION_SCRIPT = `
@@ -57,11 +58,17 @@ export function createDesktopNotifier(options?: {
 			return false;
 		}
 
+		// Notification text is built from quota/account strings — strip
+		// controls, escapes and bidi marks before it reaches Notification
+		// Center (which honours a subset of them).
+		const safeTitle = sanitizeDisplayText(title) ?? "Codex";
+		const safeMessage = sanitizeDisplayText(message) ?? "";
+
 		return await new Promise<boolean>((resolve) => {
 			try {
 				run(
 					"/usr/bin/osascript",
-					["-l", "JavaScript", "-e", MACOS_NOTIFICATION_SCRIPT, title, message],
+					["-l", "JavaScript", "-e", MACOS_NOTIFICATION_SCRIPT, safeTitle, safeMessage],
 					{ timeout: DELIVERY_TIMEOUT_MS, windowsHide: true },
 					(error) => {
 						if (!error) {

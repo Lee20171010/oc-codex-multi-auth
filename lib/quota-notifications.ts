@@ -427,9 +427,17 @@ export function createQuotaMonitor(overrides: Partial<MonitorDependencies> = {})
 				if (previousLastDeliveredAt > 0) {
 					transition.state.lastDeliveredAt = previousLastDeliveredAt;
 				}
+				// A stamp in the FUTURE is treated as due, not as "wait until
+				// stamp + interval": the state loader accepts any finite stamp >= 0,
+				// so a clock rollback or a file written by a host whose clock ran
+				// ahead would otherwise suppress every delivery until wall time
+				// catches up. Delivering once re-dates the stamp to `now` below,
+				// which is also what self-heals the file.
 				const everyCheckDue =
 					config.notifyEveryCheck &&
-					(previousLastDeliveredAt === 0 || now - previousLastDeliveredAt >= config.intervalMs);
+					(previousLastDeliveredAt === 0 ||
+						previousLastDeliveredAt > now ||
+						now - previousLastDeliveredAt >= config.intervalMs);
 				const delivering = transition.crossings.length > 0 || everyCheckDue;
 				if (delivering) transition.state.lastDeliveredAt = now;
 				return {

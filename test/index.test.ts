@@ -205,11 +205,14 @@ vi.mock("../lib/request/request-transformer.js", () => ({
 
 vi.mock("../lib/logger.js", () => ({
 	initLogger: vi.fn(),
+	LOG_DIR: "/mock/logs/codex-plugin",
 	logRequest: vi.fn(),
 	logDebug: vi.fn(),
 	logInfo: vi.fn(),
 	logWarn: vi.fn(),
 	logError: vi.fn(),
+	// auth/device-code import maskString; keep it a passthrough in tests.
+	maskString: vi.fn((value: string) => value),
 	setCorrelationId: vi.fn(() => "test-correlation-id"),
 	clearCorrelationId: vi.fn(),
 	createLogger: vi.fn(() => ({
@@ -7120,7 +7123,8 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			expect(saveToDiskDebounced).toHaveBeenCalledTimes(2);
 			expect(body).toEqual({
 				error: {
-					message: "All 1 account(s) failed (server errors or auth issues). Check account health with `codex-health`.",
+					code: "all_accounts_failed",
+					message: "All 1 account(s) failed (server errors or auth issues). Check account health with `codex-health`. Request logs live in /mock/logs/codex-plugin (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).",
 				},
 			});
 		});

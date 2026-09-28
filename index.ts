@@ -23,8 +23,9 @@
 
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
+import { writeFileAtomic } from "./lib/storage/atomic-write.js";
 import { consumeLastWrittenAccountsDigest } from "./lib/storage/load-save.js";
 import { subscribeToStoragePathChanges } from "./lib/storage/state.js";
 import { isKeychainOptInEnabled } from "./lib/storage/keychain.js";
@@ -32,7 +33,7 @@ import { AnyAccountStorageSchema } from "./lib/schemas.js";
 import { registerCleanup, unregisterCleanup } from "./lib/shutdown.js";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { Plugin, PluginInput, Hooks } from "@opencode-ai/plugin";
 import type { Auth } from "@opencode-ai/sdk";
 import {
@@ -117,6 +118,7 @@ import {
 } from "./lib/constants.js";
 import {
 	initLogger,
+	LOG_DIR,
 	logRequest,
 	logDebug,
 	logInfo,
@@ -155,7 +157,7 @@ import {
 	seatIsDisclosable,
 } from "./lib/account-display.js";
 import { extractAccountUserId } from "./lib/auth/token-utils.js";
-import { CodexAuthError } from "./lib/errors.js";
+import { CodexAuthError, StorageTransactionContentionError } from "./lib/errors.js";
 import {
 	getStoragePath,
 	loadAccounts,
@@ -378,6 +380,95 @@ function resolveOpenAIBaseURL(): string | undefined {
 }
 
 /**
+ * Refcounted `fs.watchFile` registry for the accounts-store watcher.
+ *
+ * Every `watchFile` call installs its own `StatWatcher` (a `change` listener
+ * plus a periodic stat poll) on the path. Before this registry, each armed
+ * plugin runtime subscribed independently, so runtimes that were never
+ * disposed accumulated watchers on the same file — measured at one extra
+ * listener and one fan-out stat loop per live runtime. One watcher per path
+ * now serves every subscriber; the underlying `unwatchFile` runs when the
+ * last subscriber releases.
+ */
+const fileWatchSubscribers = new Map<string, Set<() => void>>();
+const fileWatchDispatchers = new Map<string, () => void>();
+
+function acquireFileWatch(path: string, listener: () => void): () => void {
+	let subscribers = fileWatchSubscribers.get(path);
+	if (!subscribers) {
+		subscribers = new Set();
+		fileWatchSubscribers.set(path, subscribers);
+		const dispatcher = (): void => {
+			// Snapshot the set: a subscriber released mid-dispatch must not
+			// starve the subscribers after it.
+			for (const subscriber of [...(fileWatchSubscribers.get(path) ?? [])]) {
+				try {
+					subscriber();
+				} catch {
+					// One throwing subscriber must not starve the rest.
+				}
+			}
+		};
+		fileWatchDispatchers.set(path, dispatcher);
+		watchFile(path, { interval: 1500, persistent: false }, dispatcher);
+	}
+	subscribers.add(listener);
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const current = fileWatchSubscribers.get(path);
+		if (!current) return;
+		current.delete(listener);
+		if (current.size === 0) {
+			fileWatchSubscribers.delete(path);
+			const dispatcher = fileWatchDispatchers.get(path);
+			fileWatchDispatchers.delete(path);
+			if (dispatcher) unwatchFile(path, dispatcher);
+		}
+	};
+}
+
+/**
+ * True for failures where the credential store itself could not be read —
+ * never an upstream auth rejection, so it must not count toward
+ * `MAX_AUTH_FAILURES` removal.
+ *
+ * The refresh pipeline reaches the store through `coordinatePersistedRefresh`
+ * and surfaces three shapes: a typed {@link StorageError} from the load path,
+ * a {@link StorageTransactionContentionError} when the lockfile stays held,
+ * and the bare `Error("Account storage is unavailable")` that
+ * `runAccountTransaction` raises when `loadAccounts()` resolves to null.
+ */
+function isStorageUnavailableError(error: unknown): boolean {
+	if (error instanceof StorageError) return true;
+	if (error instanceof StorageTransactionContentionError) return true;
+	return (
+		error instanceof Error &&
+		/account storage is unavailable/i.test(error.message)
+	);
+}
+
+/**
+ * Suffix appended to terminal request-failure responses so a bare
+ * "All N account(s) failed" is diagnosable instead of a dead end.
+ */
+const REQUEST_LOG_HINT = `Request logs live in ${LOG_DIR} (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).`;
+
+/**
+ * The plugin's hook surface, plus an explicit teardown for hosts and tests
+ * that cannot wait for the `server.instance.disposed` event.
+ */
+type PluginRuntimeHooks = Hooks & {
+	/**
+	 * Dispose this runtime: stops the quota monitor and the accounts-file
+	 * watcher, then flushes and retires the cached account manager.
+	 * Idempotent; equivalent to the `server.instance.disposed` event path.
+	 */
+	dispose: () => Promise<void>;
+};
+
+/**
  * OpenAI Codex OAuth authentication plugin for opencode
  *
  * This plugin enables opencode to use OpenAI's Codex backend via ChatGPT Plus/Pro
@@ -412,7 +503,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client, directory, worktree }:
 async function createPluginRuntime({ client, directory = process.cwd() }: {
 	client?: PluginInput["client"];
 	directory?: string;
-}): Promise<Hooks> {
+}): Promise<PluginRuntimeHooks> {
 	initLogger(client ?? {});
 	let customBaseURLWarningShown = false;
 	let customBaseURLErrorShown = false;
@@ -977,7 +1068,16 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 		};
 
 	const backfillHostOpenAIAuthFromPool = async (): Promise<void> => {
-		const authPath = join(homedir(), ".local", "share", "opencode", "auth.json");
+		// The host reads its auth store from XDG_DATA_HOME when set; hardcoding
+		// ~/.local/share writes the backfill where the host never looks.
+		const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+		const opencodeDataDir = join(
+			xdgDataHome && isAbsolute(xdgDataHome)
+				? xdgDataHome
+				: join(homedir(), ".local", "share"),
+			"opencode",
+		);
+		const authPath = join(opencodeDataDir, "auth.json");
 		type HostAuthEntry = {
 			type?: unknown;
 			access?: unknown;
@@ -1055,8 +1155,11 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 		};
 
 		try {
-			await mkdir(join(homedir(), ".local", "share", "opencode"), { recursive: true });
-			await writeFile(authPath, `${JSON.stringify(authStore, null, 2)}\n`, "utf8");
+			await mkdir(opencodeDataDir, { recursive: true });
+			// Atomic write (0600 temp + fsync + rename) — auth.json holds live
+			// credentials, so it gets the same crash-durability and permission
+			// contract as the plugin's own account store.
+			await writeFileAtomic(authPath, `${JSON.stringify(authStore, null, 2)}\n`);
 			logInfo(
 				`[${PLUGIN_NAME}] Restored missing host OpenAI auth entry from stored account pool`,
 			);
@@ -1313,9 +1416,9 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			status: "ok" | "warning" | "error",
 		): string => {
 			if (!ui.v2Enabled) {
-				if (status === "ok") return "âœ“";
+				if (status === "ok") return "✓";
 				if (status === "warning") return "!";
-				return "âœ—";
+				return "✗";
 			}
 			if (status === "ok") return ui.theme.glyphs.check;
 			if (status === "warning") return "!";
@@ -1884,12 +1987,23 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 		let accountsWatcherDisposed = false;
 		let accountsWatchGeneration = 0;
 		let unsubscribeAccountsPath: (() => void) | undefined;
+		let releaseAccountsFileWatch: (() => void) | undefined;
+		let accountsReadFailureCount = 0;
+		let lastAccountsReadWarningAt = 0;
+		// Accounts whose records never resolve an accountId get one warn each —
+		// a permanently broken record is diagnosable without re-warning on every
+		// request. Keyed by the record's refresh-token digest (index keys would
+		// misidentify the account after the pool reorders).
+		const missingAccountIdWarnedKeys = new Set<string>();
 
 		const stopAccountsWatcher = (): void => {
 			accountsWatchGeneration += 1;
-			if (watchedAccountsPath) unwatchFile(watchedAccountsPath, onAccountsStatChanged);
+			releaseAccountsFileWatch?.();
+			releaseAccountsFileWatch = undefined;
 			watchedAccountsPath = undefined;
 			observedAccountsDigest = undefined;
+			accountsReadFailureCount = 0;
+			lastAccountsReadWarningAt = 0;
 			clearTimeout(accountsReloadTimer);
 			accountsReloadTimer = undefined;
 		};
@@ -1900,13 +2014,36 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			cancelEmptyReloadRetry();
 			unregisterCleanup(disposeAccountsWatcher);
 		};
+		/**
+		 * Warn once a corrupt accounts file stops looking transient. A single
+		 * failed read is expected — the storage writer swaps files via
+		 * temp+rename, so a stat tick can land mid-rename; but when failures
+		 * keep landing back-to-back the store is broken and silence leaves a
+		 * corrupt file invisible until the next request fails.
+		 */
+		const ACCOUNTS_READ_WARN_AFTER_FAILURES = 2;
+		const ACCOUNTS_READ_WARN_COOLDOWN_MS = 60_000;
+		const noteAccountsReadFailure = (path: string, detail: string): void => {
+			accountsReadFailureCount += 1;
+			if (accountsReadFailureCount < ACCOUNTS_READ_WARN_AFTER_FAILURES) return;
+			const now = Date.now();
+			if (now - lastAccountsReadWarningAt < ACCOUNTS_READ_WARN_COOLDOWN_MS) return;
+			lastAccountsReadWarningAt = now;
+			logWarn(
+				`[${PLUGIN_NAME}] Accounts file at ${path} is unreadable (${accountsReadFailureCount} consecutive reads failed): ${detail}. The on-disk store may be corrupt — inspect it or run \`codex-doctor\` to repair.`,
+			);
+		};
 		const readAccountsFileState = async (
 			path: string,
 		): Promise<{ digest: string; accountCount: number } | undefined> => {
 			try {
 				const content = await readFile(path, "utf8");
 				const data = JSON.parse(content) as unknown;
-				if (!AnyAccountStorageSchema.safeParse(data).success) return;
+				if (!AnyAccountStorageSchema.safeParse(data).success) {
+					noteAccountsReadFailure(path, "schema validation failed");
+					return;
+				}
+				accountsReadFailureCount = 0;
 				// Counted off the raw document rather than the parsed union so the
 				// count is the same for every storage version.
 				const accounts = (data as { accounts?: unknown }).accounts;
@@ -1914,7 +2051,15 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					digest: createHash("sha256").update(content).digest("hex"),
 					accountCount: Array.isArray(accounts) ? accounts.length : 0,
 				};
-			} catch {
+			} catch (error) {
+				// ENOENT means the account pool is simply not configured — not a
+				// corruption, and the common case on a fresh install.
+				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+					noteAccountsReadFailure(
+						path,
+						error instanceof Error ? error.message : String(error),
+					);
+				}
 				return;
 			}
 		};
@@ -2024,10 +2169,17 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			watchedAccountsPath = path;
 			const generation = accountsWatchGeneration;
 			const initial = await readAccountsFileState(path);
-			if (generation !== accountsWatchGeneration) return;
+			if (generation !== accountsWatchGeneration) {
+				// A stop/dispose interleaved with the async initial read bumped
+				// the generation: this arm is dead, so bail before subscribing —
+				// acquiring now would leak a refcount on the shared watcher.
+				return;
+			}
 			observedAccountsDigest = initial?.digest;
-			// Stat polling follows the path across the storage writer's temp-file rename.
-			watchFile(path, { interval: 1500, persistent: false }, onAccountsStatChanged);
+			// Stat polling follows the path across the storage writer's
+			// temp-file rename. The registry shares one StatWatcher per path
+			// between every live runtime instead of stacking one per runtime.
+			releaseAccountsFileWatch = acquireFileWatch(path, onAccountsStatChanged);
 			unregisterCleanup(disposeAccountsWatcher);
 			registerCleanup(disposeAccountsWatcher);
 		};
@@ -2065,15 +2217,29 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			onCredentialsPersisted: invalidateAccountManagerCache,
 		});
 
+		let runtimeDisposed = false;
+		/**
+		 * Shared teardown for the `server.instance.disposed` event and the
+		 * public `dispose` hook returned below. Idempotent so a host that
+		 * fires the event AND calls `dispose` (and tests that tear down
+		 * without an event) cannot double-flush or leak the watcher's
+		 * refcount.
+		 */
+		const disposeRuntime = async (): Promise<void> => {
+			if (runtimeDisposed) return;
+			runtimeDisposed = true;
+			quotaMonitor.dispose();
+			disposeAccountsWatcher();
+			await cachedAccountManager?.flushPendingSave();
+			cachedAccountManager?.disposeShutdownHandler();
+		};
+
         // Event handler for session recovery and account selection
         const eventHandler = async (input: { event: { type: string; properties?: unknown } }) => {
           try {
                 const { event } = input;
                 if (event.type === "server.instance.disposed") {
-                        quotaMonitor.dispose();
-						disposeAccountsWatcher();
-						await cachedAccountManager?.flushPendingSave();
-						cachedAccountManager?.disposeShutdownHandler();
+                        await disposeRuntime();
                         return;
                 }
                 // Handle TUI account selection events
@@ -2194,6 +2360,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 
         return {
                 event: eventHandler,
+                dispose: disposeRuntime,
                 auth: {
 			provider: PROVIDER_ID,
 			/**
@@ -2693,7 +2860,12 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 						intervalMs: number = 5000,
 						probeUpstream?: () => Promise<boolean>,
 					): Promise<void> => {
-						const startTime = Date.now();
+						// Monotonic deadline: `Date.now()` follows the wall clock, so an
+						// NTP rollback mid-wait extends a 10s countdown by the rollback
+						// amount (repeated rollbacks make it unbounded) and a forward
+						// jump abandons the backoff entirely. `performance.now()` is
+						// monotonic and immune to clock adjustments.
+						const startTime = performance.now();
 						const endTime = startTime + totalMs;
 						let probeDelayMs = UPSTREAM_REPROBE_FIRST_DELAY_MS;
 						let nextProbeAt =
@@ -2701,13 +2873,13 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								? startTime + probeDelayMs
 								: Number.POSITIVE_INFINITY;
 
-						while (Date.now() < endTime) {
+						while (performance.now() < endTime) {
 							if (cachedAccountManager !== accountManager) return;
 							if (abortSignal?.aborted) {
 								throw abortError();
 							}
 
-							if (probeUpstream && Date.now() >= nextProbeAt) {
+							if (probeUpstream && performance.now() >= nextProbeAt) {
 								if (await probeUpstream()) return;
 								if (cachedAccountManager !== accountManager) return;
 								if (abortSignal?.aborted) {
@@ -2717,10 +2889,10 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								// Measured from the end of the probe, so a slow usage
 								// request cannot schedule the next one in the past and
 								// collapse the countdown sleep below to zero.
-								nextProbeAt = Date.now() + probeDelayMs;
+								nextProbeAt = performance.now() + probeDelayMs;
 							}
 
-							const remaining = Math.max(0, endTime - Date.now());
+							const remaining = Math.max(0, endTime - performance.now());
 							const waitLabel = formatWaitTime(remaining);
 							await showToast(
 								`${message} (${waitLabel} remaining)`,
@@ -2728,7 +2900,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								{ duration: Math.min(intervalMs + 1000, toastDurationMs) },
 							);
 
-							const sleepTime = Math.min(intervalMs, remaining, nextProbeAt - Date.now());
+							const sleepTime = Math.min(intervalMs, remaining, nextProbeAt - performance.now());
 							if (sleepTime > 0) {
 								await sleep(sleepTime);
 							} else {
@@ -3037,8 +3209,9 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					return new Response(
 						JSON.stringify({
 							error: {
+								code: "auth_refresh_budget_exhausted",
 								message:
-									"Auth refresh retry budget exhausted for this request. Try again or switch accounts.",
+									`Auth refresh retry budget exhausted for this request. Try again or switch accounts. ${REQUEST_LOG_HINT}`,
 							},
 						}),
 						{
@@ -3054,6 +3227,35 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 				runtimeMetrics.accountRotations++;
 				runtimeMetrics.lastError = (err as Error)?.message ?? String(err);
 				runtimeMetrics.lastErrorCategory = "auth-refresh";
+
+				// Storage unavailability is a LOCAL condition, not an upstream
+				// auth rejection — the credential never left this process. Letting
+				// it reach `incrementAuthFailures` disables a healthy account after
+				// MAX_AUTH_FAILURES for a missing/unreadable store that heals on
+				// its own; cool down and rotate like the transient path instead.
+				if (isStorageUnavailableError(err)) {
+					const cooledCount = accountManager.markAccountsWithRefreshTokenCoolingDown(
+						account.refreshToken,
+						ACCOUNT_LIMITS.AUTH_FAILURE_COOLDOWN_MS,
+						"auth-failure",
+					);
+					if (cooledCount <= 0) {
+						accountManager.markAccountCoolingDown(
+							account,
+							ACCOUNT_LIMITS.AUTH_FAILURE_COOLDOWN_MS,
+							"auth-failure",
+						);
+					}
+					accountManager.saveToDiskDebounced();
+					const storageHint =
+						err instanceof StorageError
+							? err.hint
+							: formatStorageErrorHint(err, getStoragePath());
+					logWarn(
+						`[${PLUGIN_NAME}] Account storage unavailable while refreshing account ${account.index + 1}; cooling down without counting an auth failure. ${storageHint}`,
+					);
+					continue;
+				}
 
 				// Transient refresh failures (network blip / upstream 5xx) must NOT
 				// count toward disabling an account. Cool it down and rotate instead.
@@ -3124,6 +3326,19 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 						tokenAccountId,
 					);
 						if (!accountId) {
+							// Warn once per record: an account that yields no
+							// accountId is permanently unroutable, and cooling it
+							// down silently each request leaves a broken record
+							// invisible.
+							const missingKey = account.refreshToken
+								? createHash("sha256").update(account.refreshToken).digest("hex").slice(0, 16)
+								: `index:${account.index}`;
+							if (!missingAccountIdWarnedKeys.has(missingKey)) {
+								missingAccountIdWarnedKeys.add(missingKey);
+								logWarn(
+									`[${PLUGIN_NAME}] Account ${account.index + 1} has no resolvable accountId and cannot be routed; cooling it down. Re-add it with \`opencode auth login\` or inspect \`codex-health\`.`,
+								);
+							}
 							accountManager.markAccountCoolingDown(
 								account,
 								ACCOUNT_LIMITS.AUTH_FAILURE_COOLDOWN_MS,
@@ -3293,8 +3508,9 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 									return new Response(
 										JSON.stringify({
 											error: {
+												code: "network_retry_budget_exhausted",
 												message:
-													"Network retry budget exhausted for this request. Try again in a moment.",
+													`Network retry budget exhausted for this request. Try again in a moment. ${REQUEST_LOG_HINT}`,
 											},
 										}),
 										{
@@ -3954,7 +4170,8 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								attemptDetail +
 								unresolvedDetail +
 								unavailableDetail +
-								waitDetail;
+								waitDetail +
+								` ${REQUEST_LOG_HINT}`;
 							if (runtimeMetrics.lastSelectionSnapshot) {
 								runtimeMetrics.lastSelectionSnapshot = {
 									...runtimeMetrics.lastSelectionSnapshot,
@@ -4129,6 +4346,19 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 											: wasEntitlementExhaustion
 												? `No selectable account succeeded for the requested model across ${count} configured account(s).${entitlementDetail} Codex model access is account/workspace gated; default gpt-5.6-sol/terra/luna selectors auto-fallback down the 5.6 tiers to gpt-5.5, and gpt-5.5/gpt-5-codex through the GPT-5.4 family when possible. Set \`unsupportedCodexPolicy: "fallback"\` for the full manual fallback chain, or see \`codex-health\` for per-account details.`
 												: `All ${count} account(s) failed (server errors or auth issues). Check account health with \`codex-health\`.`;
+								// `code` mirrors the strict-pool envelope's
+								// `strict_pool_unavailable` so a client can branch
+								// on a stable machine string instead of parsing the
+								// message; the hint points at the on-disk request
+								// log so a bare "all failed" is diagnosable.
+								const code =
+									count === 0
+										? "no_accounts_configured"
+										: waitMs > 0
+											? "all_accounts_rate_limited"
+											: wasEntitlementExhaustion
+												? "model_not_entitled"
+												: "all_accounts_failed";
 								runtimeMetrics.failedRequests++;
 								runtimeMetrics.lastError = message;
 								runtimeMetrics.lastErrorCategory =
@@ -4137,8 +4367,12 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 										: wasEntitlementExhaustion
 											? "unsupported-model"
 											: "account-failure";
-								return new Response(JSON.stringify({ error: { message } }), {
-									status: waitMs > 0 ? 429 : 503,
+								return new Response(
+									JSON.stringify({
+										error: { code, message: `${message} ${REQUEST_LOG_HINT}` },
+									}),
+									{
+										status: waitMs > 0 ? 429 : 503,
 											headers: {
 												"content-type": "application/json; charset=utf-8",
 											},

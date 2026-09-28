@@ -78,12 +78,31 @@ Sandbox policies, approvals, final formatting, git protocols, and file reference
 - When uncertain, prefer non-destructive verification first.`;
 
 const MAX_MANIFEST_TOOLS = 32;
+const MAX_TOOL_NAME_LENGTH = 64;
+
+/**
+ * Tool names are interpolated verbatim into the bridge developer message.
+ * They come from the request body's `tools` array — which originates with the
+ * host, but crosses the prompt trust boundary and is the one place arbitrary
+ * request text could otherwise be smuggled into a developer-role message: a
+ * "tool name" containing a newline or backtick breaks out of its manifest
+ * bullet and can carry injected instructions.
+ *
+ * Legitimate names are identifiers (`bash`, `todowrite`, `apply_patch`,
+ * `functions.task`, MCP `server_tool` spellings). Anything outside the
+ * identifier charset is dropped from the manifest text — the actual tool
+ * schema still lists it, so dropping it here never removes a tool, it only
+ * keeps the advisory text trustworthy.
+ */
+const SAFE_TOOL_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 const normalizeRuntimeToolNames = (toolNames: readonly string[]): string[] => {
 	const unique = new Set<string>();
 	for (const rawName of toolNames) {
 		const name = rawName.trim();
 		if (!name) continue;
+		if (name.length > MAX_TOOL_NAME_LENGTH) continue;
+		if (!SAFE_TOOL_NAME_PATTERN.test(name)) continue;
 		if (unique.size >= MAX_MANIFEST_TOOLS) break;
 		unique.add(name);
 	}

@@ -1108,4 +1108,83 @@ describe("Token Utils Module", () => {
 			}
 		});
 	});
+
+	describe("claim sanitization", () => {
+		it("strips control characters and collapses whitespace in label claims", () => {
+			mockedDecodeJWT.mockReturnValue({
+				organizations: [
+					{
+						account_id: "acc_123456",
+						name: "Evil\u001b[31m\nOrg\r\nName",
+					},
+				],
+			});
+
+			const candidates = getAccountIdCandidates("access_token");
+			const label = candidates.find((c) => c.accountId === "acc_123456")?.label;
+
+			expect(label).toBeDefined();
+			expect(label).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+			expect(label).toContain("Evil [31m Org Name");
+		});
+
+		it("bounds display claims to 64 characters with an ellipsis", () => {
+			mockedDecodeJWT.mockReturnValue({
+				organizations: [
+					{
+						account_id: "acc_123456",
+						name: "x".repeat(200),
+					},
+				],
+			});
+
+			const candidates = getAccountIdCandidates("access_token");
+			const label = candidates.find((c) => c.accountId === "acc_123456")?.label;
+
+			expect(label).toBeDefined();
+			expect(label).toContain("…");
+			// 63 chars of name + ellipsis, then " [id:…]" — no 200-char run.
+			expect(label).not.toContain("x".repeat(64));
+		});
+
+		it("removes control and whitespace characters from email claims", () => {
+			mockedDecodeJWT.mockImplementation((token) => {
+				if (token === "id_token") {
+					return { email: "vic\u000atim@exa\u001bmple.com" };
+				}
+				return null;
+			});
+
+			expect(extractAccountEmail(undefined, "id_token")).toBe("victim@example.com");
+		});
+
+		it("rejects email claims without an @ or over the length bound", () => {
+			mockedDecodeJWT.mockImplementation((token) => {
+				if (token === "id_token") {
+					return { email: `${"a".repeat(100)}@example.com` };
+				}
+				return null;
+			});
+
+			expect(extractAccountEmail(undefined, "id_token")).toBeUndefined();
+		});
+
+		it("strips control characters from the account id suffix in labels", () => {
+			mockedDecodeJWT.mockReturnValue({
+				organizations: [
+					{
+						account_id: "abc\u001b123456",
+						name: "Org",
+					},
+				],
+			});
+
+			const candidates = getAccountIdCandidates("access_token");
+			const label = candidates.find((c) => c.accountId === "abc\u001b123456")?.label;
+
+			expect(label).toBeDefined();
+			expect(label).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+			expect(label).toContain("[id:123456]");
+		});
+	});
 });

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createLogger } from "./logger.js";
@@ -12,7 +12,36 @@ const CACHE_DIR = join(homedir(), ".opencode", "cache");
 const CACHE_FILE = join(CACHE_DIR, "update-check-cache.json");
 const OPENCODE_CACHE_DIR = join(homedir(), ".cache", "opencode");
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-let cacheEvictionScheduled = false;
+
+/**
+ * Process-level guard for the exit-time cache eviction listener. A module
+ * scope flag is not enough: a package can be loaded twice (e.g. once from the
+ * plugin path and once from a bundled copy), and each instance would register
+ * its own `process.once("exit")` listener — leaking one listener per module
+ * instance and eventually tripping the listener-count warning.
+ */
+const CACHE_EVICTION_SCHEDULED = Symbol.for(
+  "oc-codex-multi-auth.cacheEvictionScheduled",
+);
+
+/**
+ * Registry `version` strings are interpolated into toast text and written to
+ * the cache, so they must look like a version — not carry arbitrary text
+ * (ANSI escapes included). Accepts dotted-numeric forms beyond strict
+ * three-part semver (e.g. a four-segment "4.12.0.1") since `compareVersions`
+ * handles arbitrary segment counts, plus prerelease/build metadata — while
+ * still rejecting anything outside the version charset.
+ */
+const VERSION_PATTERN = /^\d+(?:\.\d+)+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function isValidVersionString(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 64 &&
+    VERSION_PATTERN.test(value)
+  );
+}
 
 interface UpdateCheckCache {
   lastCheck: number;
@@ -29,7 +58,9 @@ function getCurrentVersion(): string {
   try {
     const packageJsonPath = join(import.meta.dirname ?? __dirname, "..", "package.json");
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
-    return packageJson.version;
+    // Interpolated into the update toast — a hand-edited package.json must not
+    // turn arbitrary text into notification content.
+    return isValidVersionString(packageJson.version) ? packageJson.version : "0.0.0";
   } catch {
     return "0.0.0";
   }
@@ -38,20 +69,56 @@ function getCurrentVersion(): string {
 function loadCache(): UpdateCheckCache | null {
   try {
     if (!existsSync(CACHE_FILE)) return null;
-    const content = readFileSync(CACHE_FILE, "utf8");
-    return JSON.parse(content) as UpdateCheckCache;
+    const parsed = JSON.parse(readFileSync(CACHE_FILE, "utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const cache = parsed as Partial<UpdateCheckCache>;
+    // The cache file is same-UID writable: a `lastCheck` in the future would
+    // hold the freshness check forever, and a non-version `latestVersion`
+    // would be interpolated into the update toast verbatim.
+    if (
+      typeof cache.lastCheck !== "number" ||
+      !Number.isFinite(cache.lastCheck) ||
+      cache.lastCheck < 0 ||
+      cache.lastCheck > Date.now()
+    ) {
+      return null;
+    }
+    if (cache.latestVersion !== null && !isValidVersionString(cache.latestVersion)) {
+      return null;
+    }
+    if (typeof cache.currentVersion !== "string") return null;
+    return {
+      lastCheck: cache.lastCheck,
+      latestVersion: cache.latestVersion ?? null,
+      currentVersion: cache.currentVersion,
+    };
   } catch {
     return null;
   }
 }
 
 function saveCache(cache: UpdateCheckCache): void {
+  let tempPath: string | null = null;
   try {
     if (!existsSync(CACHE_DIR)) {
-      mkdirSync(CACHE_DIR, { recursive: true });
+      mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 });
     }
-    writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2), "utf8");
+    // Atomic 0600 write: a plain writeFileSync leaves the file world-readable
+    // on permissive umasks and torn if the process dies mid-write.
+    tempPath = `${CACHE_FILE}.${process.pid}.tmp`;
+    writeFileSync(tempPath, JSON.stringify(cache, null, 2), { encoding: "utf8", mode: 0o600 });
+    renameSync(tempPath, CACHE_FILE);
+    tempPath = null;
   } catch (error) {
+    // A failed rename leaves the temp file behind — remove it so repeated
+    // failures do not litter the cache dir.
+    if (tempPath) {
+      try {
+        rmSync(tempPath, { force: true });
+      } catch {
+        // best effort
+      }
+    }
     log.warn("Failed to save update cache", { error: (error as Error).message });
   }
 }
@@ -70,27 +137,35 @@ function compareVersions(current: string, latest: string): number {
 }
 
 async function fetchLatestVersion(): Promise<string | null> {
+  const controller = new AbortController();
+  // unref so a pending timer can never hold the process open, and clear in a
+  // finally so a rejected fetch does not leave a dangling timer behind.
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  timeout.unref();
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-
     const response = await fetch(NPM_REGISTRY_URL, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
-
-    clearTimeout(timeout);
 
     if (!response.ok) {
       log.debug("Failed to fetch npm registry", { status: response.status });
       return null;
     }
 
-    const data = (await response.json()) as NpmPackageInfo;
-    return data.version ?? null;
+    const data = (await response.json()) as Partial<NpmPackageInfo>;
+    if (!isValidVersionString(data?.version)) {
+      if (data?.version !== undefined) {
+        log.warn("Ignoring malformed version string from npm registry");
+      }
+      return null;
+    }
+    return data.version;
   } catch (error) {
     log.debug("Failed to check for updates", { error: (error as Error).message });
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -189,8 +264,9 @@ export function clearManagedOpenCodePluginCache(
 }
 
 export function scheduleOpenCodePluginCacheClearOnExit(): boolean {
-  if (cacheEvictionScheduled) return true;
-  cacheEvictionScheduled = true;
+  const proc = process as unknown as Record<symbol, boolean | undefined>;
+  if (proc[CACHE_EVICTION_SCHEDULED]) return true;
+  proc[CACHE_EVICTION_SCHEDULED] = true;
   process.once("exit", () => {
     clearManagedOpenCodePluginCache();
   });
@@ -266,11 +342,17 @@ export async function checkAndNotify(
 }
 
 export function clearUpdateCache(): void {
+  const tempPath = `${CACHE_FILE}.${process.pid}.tmp`;
   try {
     if (existsSync(CACHE_FILE)) {
-      writeFileSync(CACHE_FILE, "{}", "utf8");
+      writeFileSync(tempPath, "{}", { encoding: "utf8", mode: 0o600 });
+      renameSync(tempPath, CACHE_FILE);
     }
   } catch {
-    // Ignore errors
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Ignore errors
+    }
   }
 }

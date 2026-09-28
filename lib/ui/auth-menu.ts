@@ -1,5 +1,9 @@
 import { ANSI, isTTY } from "./ansi.js";
 import { confirm } from "./confirm.js";
+import {
+	formatIsoDate,
+	sanitizeDisplayText,
+} from "./display-text.js";
 import { getUiRuntimeOptions } from "./runtime.js";
 import { select, type MenuItem } from "./select.js";
 import { paintUiText, formatUiBadge } from "./format.js";
@@ -52,12 +56,24 @@ function formatRelativeTime(timestamp: number | undefined): string {
 	if (days === 1) return "yesterday";
 	if (days < 7) return `${days}d ago`;
 	if (days < 30) return `${Math.floor(days / 7)}w ago`;
-	return new Date(timestamp).toLocaleDateString();
+	// Fixed ISO date — identical under every locale.
+	return formatIsoDate(new Date(timestamp));
 }
 
 function formatDate(timestamp: number | undefined): string {
 	if (!timestamp) return "unknown";
-	return new Date(timestamp).toLocaleDateString();
+	return formatIsoDate(new Date(timestamp));
+}
+
+/**
+ * Legacy (`!v2Enabled`) badges are interpolated raw — gate the SGR styling on
+ * the resolved color decision so `NO_COLOR`, `FORCE_COLOR=0`, and non-TTY
+ * output stay plain.
+ */
+function ansiBadge(text: string, color: string): string {
+	const ui = getUiRuntimeOptions();
+	if (ui.colorEnabled === false) return text;
+	return `${color}${text}${ANSI.reset}`;
 }
 
 function statusBadge(status: AccountStatus | undefined): string {
@@ -85,30 +101,30 @@ function statusBadge(status: AccountStatus | undefined): string {
 
 	switch (status) {
 		case "active":
-			return `${ANSI.green}[active]${ANSI.reset}`;
+			return ansiBadge("[active]", ANSI.green);
 		case "ok":
-			return `${ANSI.green}[ok]${ANSI.reset}`;
+			return ansiBadge("[ok]", ANSI.green);
 		case "rate-limited":
-			return `${ANSI.yellow}[rate-limited]${ANSI.reset}`;
+			return ansiBadge("[rate-limited]", ANSI.yellow);
 		case "cooldown":
-			return `${ANSI.yellow}[cooldown]${ANSI.reset}`;
+			return ansiBadge("[cooldown]", ANSI.yellow);
 		case "flagged":
-			return `${ANSI.red}[flagged]${ANSI.reset}`;
+			return ansiBadge("[flagged]", ANSI.red);
 		case "disabled":
-			return `${ANSI.red}[disabled]${ANSI.reset}`;
+			return ansiBadge("[disabled]", ANSI.red);
 		case "error":
-			return `${ANSI.red}[error]${ANSI.reset}`;
+			return ansiBadge("[error]", ANSI.red);
 		default:
 			return "";
 	}
 }
 
 function formatAccountIdSuffix(accountId: string | undefined): string | undefined {
-	const trimmed = accountId?.trim();
-	if (!trimmed) return undefined;
-	return trimmed.length > 14
-		? `${trimmed.slice(0, 8)}...${trimmed.slice(-6)}`
-		: trimmed;
+	const sanitized = sanitizeDisplayText(accountId, { maxLength: 64 });
+	if (!sanitized) return undefined;
+	return sanitized.length > 14
+		? `${sanitized.slice(0, 8)}...${sanitized.slice(-6)}`
+		: sanitized;
 }
 
 function accountTitle(
@@ -117,7 +133,7 @@ function accountTitle(
 	peerAccounts?: readonly AccountInfo[],
 ): string {
 	const email = resolveDisplayEmail(account.email, maskEmail);
-	const label = account.accountLabel?.trim();
+	const label = sanitizeDisplayText(account.accountLabel, { maxLength: 64 });
 	const accountIdSuffix = formatAccountIdSuffix(account.accountId);
 
 	const details: string[] = [];
@@ -161,12 +177,12 @@ export async function showAuthMenu(
 		{ label: "Accounts", value: { type: "cancel" }, kind: "heading" },
 		...accounts.map((account) => {
 			const currentBadge = account.isCurrentAccount
-				? (ui.v2Enabled ? ` ${formatUiBadge(ui, "current", "accent")}` : ` ${ANSI.cyan}[current]${ANSI.reset}`)
+				? (ui.v2Enabled ? ` ${formatUiBadge(ui, "current", "accent")}` : ` ${ansiBadge("[current]", ANSI.cyan)}`)
 				: "";
 			const badge = statusBadge(account.status);
 			const disabledBadge =
 				account.enabled === false
-					? (ui.v2Enabled ? ` ${formatUiBadge(ui, "disabled", "danger")}` : ` ${ANSI.red}[disabled]${ANSI.reset}`)
+					? (ui.v2Enabled ? ` ${formatUiBadge(ui, "disabled", "danger")}` : ` ${ansiBadge("[disabled]", ANSI.red)}`)
 					: "";
 			const statusSuffix = badge ? ` ${badge}` : "";
 			const label = `${accountTitle(account, maskEmail, accounts)}${currentBadge}${statusSuffix}${disabledBadge}`;
@@ -211,7 +227,7 @@ export async function showAccountDetails(
 		(account.enabled === false
 			? (ui.v2Enabled
 				? ` ${formatUiBadge(ui, "disabled", "danger")}`
-				: ` ${ANSI.red}[disabled]${ANSI.reset}`)
+				: ` ${ansiBadge("[disabled]", ANSI.red)}`)
 			: "");
 	const subtitle = `Added: ${formatDate(account.addedAt)} | Last used: ${formatRelativeTime(account.lastUsed)}`;
 

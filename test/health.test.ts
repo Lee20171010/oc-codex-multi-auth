@@ -153,4 +153,61 @@ describe("Health check", () => {
 		const report = formatHealthReport(health);
 		expect(report).not.toContain("Account Details:");
 	});
+
+	describe("boundary conditions", () => {
+		it("counts health exactly 50 as healthy (>= boundary)", () => {
+			const health = getAccountHealth([
+				{ index: 0, email: "a@test.com", health: 50 },
+			]);
+			expect(health.healthyAccountCount).toBe(1);
+			expect(health.status).toBe("healthy");
+		});
+
+		it("counts health 49 as not healthy", () => {
+			const health = getAccountHealth([
+				{ index: 0, email: "a@test.com", health: 49 },
+			]);
+			expect(health.healthyAccountCount).toBe(0);
+			expect(health.status).toBe("unhealthy");
+		});
+
+		it("a rate limit ending exactly now is not active (> boundary)", () => {
+			const now = Date.now();
+			const health = getAccountHealth([
+				{ index: 0, email: "a@test.com", health: 100, rateLimitedUntil: now },
+			]);
+			expect(health.accounts[0].isRateLimited).toBe(false);
+			expect(health.rateLimitedCount).toBe(0);
+		});
+
+		it("a cooldown ending exactly now is not active (> boundary)", () => {
+			const now = Date.now();
+			const health = getAccountHealth([
+				{ index: 0, email: "a@test.com", health: 100, cooldownUntil: now },
+			]);
+			expect(health.accounts[0].isCoolingDown).toBe(false);
+			expect(health.coolingDownCount).toBe(0);
+		});
+
+		it("omits the Rate Limited / Cooling Down lines entirely when the counts are zero", () => {
+			const health = getAccountHealth([
+				{ index: 0, email: "a@test.com", health: 100 },
+			]);
+			const report = formatHealthReport(health);
+			// A `>= 0` mutant prints "Rate Limited: 0" — the line must not exist.
+			expect(report).not.toContain("Rate Limited:");
+			expect(report).not.toContain("Cooling Down:");
+		});
+
+		it("numbers accounts 1-based in the report (index + 1)", () => {
+			const health = getAccountHealth([
+				{ index: 0, email: "first@test.com", health: 100 },
+				{ index: 1, email: "second@test.com", health: 90 },
+			]);
+			const report = formatHealthReport(health);
+			expect(report).toContain("[1] first@test.com: 100%");
+			expect(report).toContain("[2] second@test.com: 90%");
+			expect(report).not.toContain("[0]");
+		});
+	});
 });

@@ -7,6 +7,7 @@ vi.mock("node:fs", () => ({
 	existsSync: vi.fn(),
 	mkdirSync: vi.fn(),
 	rmSync: vi.fn(),
+	renameSync: vi.fn(),
 	realpathSync: vi.fn(),
 }));
 
@@ -221,9 +222,10 @@ describe("auto-update-checker", () => {
 
 			await checkForUpdates(true);
 
-			expect(fs.mkdirSync).toHaveBeenCalledWith(expect.any(String), {
-				recursive: true,
-			});
+			expect(fs.mkdirSync).toHaveBeenCalledWith(
+				expect.any(String),
+				expect.objectContaining({ recursive: true, mode: 0o700 }),
+			);
 		});
 
 		it("includes updateCommand in result", async () => {
@@ -235,6 +237,92 @@ describe("auto-update-checker", () => {
 			const result = await checkForUpdates(true);
 
 			expect(result.updateCommand).toBe("npx -y oc-codex-multi-auth@latest update");
+		});
+
+		it("ignores a malformed version string from the registry", async () => {
+			vi.mocked(globalThis.fetch).mockResolvedValue({
+				ok: true,
+				// ANSI escapes / arbitrary text must never reach the toast or cache.
+				json: async () => ({ version: "5.0.0\u001b[31m<script>" }),
+			} as Response);
+
+			const result = await checkForUpdates(true);
+
+			expect(result.latestVersion).toBe(null);
+			expect(result.hasUpdate).toBe(false);
+		});
+
+		it("ignores a cached latestVersion that is not a version string", async () => {
+			const poisonedCache = {
+				lastCheck: Date.now() - 1000 * 60 * 60,
+				latestVersion: "\u001b[7m run rm -rf \u001b[0m",
+				currentVersion: "4.12.0",
+			};
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+			vi.mocked(fs.readFileSync).mockImplementation((path: unknown) => {
+				if (String(path).includes("package.json")) {
+					return JSON.stringify(mockPackageJson);
+				}
+				if (String(path).includes("update-check-cache.json")) {
+					return JSON.stringify(poisonedCache);
+				}
+				throw new Error("File not found");
+			});
+			vi.mocked(globalThis.fetch).mockResolvedValue({
+				ok: true,
+				json: async () => ({ version: "5.0.0" }),
+			} as Response);
+
+			const result = await checkForUpdates();
+
+			// The planted cache is treated as absent, so a real fetch happens
+			// rather than trusting the injected string.
+			expect(globalThis.fetch).toHaveBeenCalled();
+			expect(result.latestVersion).toBe("5.0.0");
+		});
+
+		it("ignores a cache entry stamped in the future", async () => {
+			const futureCache = {
+				lastCheck: Date.now() + 1000 * 60 * 60 * 24 * 30,
+				latestVersion: "99.0.0",
+				currentVersion: "4.12.0",
+			};
+			vi.mocked(fs.existsSync).mockReturnValue(true);
+			vi.mocked(fs.readFileSync).mockImplementation((path: unknown) => {
+				if (String(path).includes("package.json")) {
+					return JSON.stringify(mockPackageJson);
+				}
+				if (String(path).includes("update-check-cache.json")) {
+					return JSON.stringify(futureCache);
+				}
+				throw new Error("File not found");
+			});
+			vi.mocked(globalThis.fetch).mockResolvedValue({
+				ok: true,
+				json: async () => ({ version: "5.0.0" }),
+			} as Response);
+
+			const result = await checkForUpdates();
+
+			expect(globalThis.fetch).toHaveBeenCalled();
+			expect(result.latestVersion).toBe("5.0.0");
+		});
+
+		it("cleans up the temp file when the atomic rename fails", async () => {
+			vi.mocked(globalThis.fetch).mockResolvedValue({
+				ok: true,
+				json: async () => ({ version: "5.0.0" }),
+			} as Response);
+			vi.mocked(fs.renameSync).mockImplementation(() => {
+				throw new Error("EXDEV: cross-device rename");
+			});
+
+			await checkForUpdates(true);
+
+			expect(fs.rmSync).toHaveBeenCalledWith(
+				expect.stringContaining("update-check-cache.json"),
+				expect.objectContaining({ force: true }),
+			);
 		});
 	});
 
@@ -331,7 +419,7 @@ describe("auto-update-checker", () => {
 			expect(fs.writeFileSync).toHaveBeenCalledWith(
 				expect.stringContaining("update-check-cache.json"),
 				"{}",
-				"utf8"
+				expect.objectContaining({ encoding: "utf8", mode: 0o600 }),
 			);
 		});
 
