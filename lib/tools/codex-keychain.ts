@@ -421,9 +421,14 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 							const parsed = JSON.parse(
 								await fs.readFile(flaggedBackup, "utf-8"),
 							) as unknown;
+							// Same contract the loader enforces
+							// (normalizeFlaggedStorage): anything else normalizes to
+							// an empty store, so promoting it would erase the
+							// quarantined pool rather than restore it.
 							flaggedParses =
 								typeof parsed === "object" &&
 								parsed !== null &&
+								(parsed as { version?: unknown }).version === 1 &&
 								Array.isArray((parsed as { accounts?: unknown }).accounts);
 						} catch {
 							/* unreadable or unparseable: flaggedParses stays false */
@@ -434,13 +439,25 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 							);
 						} else {
 							let flaggedCurrentExists = false;
+							let flaggedAccessFailed = false;
 							try {
 								await fs.access(flaggedPath);
 								flaggedCurrentExists = true;
-							} catch {
-								/* ENOENT: flagged path is clear */
+							} catch (err) {
+								if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+									// Only ENOENT means "nothing there". An EACCES or
+									// transient FS error leaves the live flagged file
+									// in an unknown state — a rename could still clobber
+									// it, so skip the restore rather than guess.
+									flaggedAccessFailed = true;
+									warnings.push(
+										`codex-keychain rollback: could not check the existing flagged file at ${flaggedPath}: ${(err as Error).message}. Flagged restore skipped.`,
+									);
+								}
 							}
-							if (flaggedCurrentExists && !confirm) {
+							if (flaggedAccessFailed) {
+								/* warning already recorded */
+							} else if (flaggedCurrentExists && !confirm) {
 								warnings.push(
 									`codex-keychain rollback: flagged backup ${flaggedBackup} found but a flagged file already exists at ${flaggedPath} and confirm was not set -- left in place.`,
 								);

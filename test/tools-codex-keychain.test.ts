@@ -32,6 +32,7 @@ import {
 	type KeychainBackend,
 } from "../lib/storage/keychain.js";
 import { setStoragePathDirect } from "../lib/storage/state.js";
+import { FLAGGED_ACCOUNTS_FILE_NAME } from "../lib/constants.js";
 import type { AccountStorageV3 } from "../lib/storage.js";
 
 // -----------------------------------------------------------------------------
@@ -446,5 +447,82 @@ describe("codex-keychain rollback (F1 MEDIUM: confirm-flag clobber gate)", () =>
 
 		expect(out).toMatch(/Restored/);
 		expect(out).toMatch(/could not confirm the OS-keychain entry was deleted/i);
+	});
+
+	it("skips a flagged backup that fails the flagged-storage shape check", async () => {
+		await seedBackup("from-backup");
+		// A flagged marker whose contents are NOT a valid
+		// FlaggedAccountStorageV1 — the loader would normalize it to an
+		// empty store, so promoting it would silently erase the quarantined
+		// pool while deleting the keychain copy.
+		const flaggedPath = join(storageDir, FLAGGED_ACCOUNTS_FILE_NAME);
+		const flaggedBackup = `${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`;
+		await fs.writeFile(
+			flaggedBackup,
+			JSON.stringify({ version: 99, accounts: [{ refreshToken: "x" }] }),
+			"utf-8",
+		);
+
+		const t = createCodexKeychainTool(buildCtx());
+		const out = (await t.execute(
+			{ command: "rollback" },
+			{} as never,
+		)) as string;
+
+		expect(out).toMatch(/Restored/);
+		expect(out).toMatch(/did not parse as flagged-account storage/i);
+		expect(existsSync(flaggedPath)).toBe(false);
+		expect(existsSync(flaggedBackup)).toBe(true);
+	});
+
+	it("skips the flagged restore when probing the live flagged file fails non-ENOENT", async () => {
+		await seedBackup("from-backup");
+		const flaggedPath = join(storageDir, FLAGGED_ACCOUNTS_FILE_NAME);
+		const flaggedBackup = `${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`;
+		await fs.writeFile(
+			flaggedBackup,
+			JSON.stringify({ version: 1, accounts: [] }),
+			"utf-8",
+		);
+		// A live flagged file the rollback must not clobber: the access
+		// probe fails with EACCES, which is not "absent" — a rename could
+		// still overwrite it, so the restore must skip instead of guessing.
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify({ version: 1, accounts: [{ refreshToken: "live" }] }),
+			"utf-8",
+		);
+		const { promises: fsp } = await import("node:fs");
+		const { vi } = await import("vitest");
+		const realAccess = fsp.access.bind(fsp);
+		const accessSpy = vi
+			.spyOn(fsp, "access")
+			.mockImplementation(async (path, mode) => {
+				if (String(path) === flaggedPath) {
+					throw Object.assign(new Error("simulated EACCES"), {
+						code: "EACCES",
+					});
+				}
+				return realAccess(path, mode);
+			});
+
+		try {
+			const t = createCodexKeychainTool(buildCtx());
+			const out = (await t.execute(
+				{ command: "rollback", confirm: true },
+				{} as never,
+			)) as string;
+			expect(out).toMatch(/could not check the existing flagged file/i);
+			expect(out).toMatch(/Flagged restore skipped/i);
+		} finally {
+			accessSpy.mockRestore();
+		}
+
+		// The live flagged file is untouched and the backup was not promoted.
+		const stillLive = JSON.parse(
+			await fs.readFile(flaggedPath, "utf-8"),
+		) as { version: number; accounts: { refreshToken: string }[] };
+		expect(stillLive.accounts[0]!.refreshToken).toBe("live");
+		expect(existsSync(flaggedBackup)).toBe(true);
 	});
 });
