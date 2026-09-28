@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { writeFileAtomic } from "../lib/storage/atomic-write.js";
 
@@ -20,6 +21,36 @@ vi.stubGlobal("fetch", mockFetch);
 // over-broad strip-needle for isOpenCodeSystemPrompt.
 const padPrompt = (label: string): string => `${label}\n\n${"p".repeat(160)}`;
 
+const FIRST_SOURCE =
+  "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/opencode/src/session/prompt/codex.txt";
+const SECOND_SOURCE =
+  "https://raw.githubusercontent.com/sst/opencode/dev/packages/opencode/src/session/prompt/codex.txt";
+
+// `raw.githubusercontent.com` etags are the content's git blob SHA; a 304 only
+// proves upstream still serves that blob, so the disk body must hash to it.
+const gitBlobEtag = (content: string): string => {
+  const payload = Buffer.from(content, "utf8");
+  const sha = createHash("sha1")
+    .update(`blob ${payload.length}\0`)
+    .update(payload)
+    .digest("hex");
+  return `"${sha}"`;
+};
+
+const okResponse = (body: string, etag = '"etag"') => ({
+  ok: true,
+  status: 200,
+  text: () => Promise.resolve(body),
+  headers: new Map([["etag", etag]]),
+});
+
+const statusResponse = (status: number) => ({
+  ok: false,
+  status,
+  text: () => Promise.resolve(""),
+  headers: new Map(),
+});
+
 describe("opencode-codex", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -29,6 +60,7 @@ describe("opencode-codex", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    vi.useRealTimers();
   });
 
   describe("getOpenCodeCodexPrompt", () => {
@@ -36,12 +68,7 @@ describe("opencode-codex", () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
       vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
-      mockFetch.mockResolvedValue({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve(padPrompt("Fresh prompt content")),
-        headers: new Map([["etag", '"abc123"']]),
-      });
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Fresh prompt content"), '"abc123"'));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -50,48 +77,86 @@ describe("opencode-codex", () => {
       expect(writeFileAtomic).toHaveBeenCalledTimes(2);
     });
 
-    it("uses cache when TTL not expired", async () => {
+    it("serves process-verified content within the TTL without refetching", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
+      // A disk cache — even one with a fresh-looking lastChecked — cannot
+      // serve until this process has verified it against a trusted source.
       vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached content"))
+        .mockResolvedValueOnce(padPrompt("Planted disk content"))
         .mockResolvedValueOnce(JSON.stringify({
           etag: '"old-etag"',
           lastChecked: Date.now() - 1000,
         }));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Verified upstream content")));
+
+      const first = await getOpenCodeCodexPrompt();
+      expect(first).toContain("Verified upstream content");
+      expect(first).not.toContain("Planted disk content");
+
+      // The second call serves the verified in-memory snapshot — no fetch.
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      const second = await getOpenCodeCodexPrompt();
+      expect(second).toContain("Verified upstream content");
+      expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
+    });
+
+    it("uses ETag for a conditional request and serves the hash-bound disk body on 304", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+
+      const diskContent = padPrompt("Cached content");
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(diskContent)
+        .mockResolvedValueOnce(JSON.stringify({
+          // The real blob etag: a 304 acknowledgment now genuinely binds
+          // these disk bytes to upstream's content.
+          etag: gitBlobEtag(diskContent),
+          sourceUrl: FIRST_SOURCE,
+          lastChecked: Date.now() - 20 * 60 * 1000,
+        }));
+
+      mockFetch.mockResolvedValue(statusResponse(304));
 
       const result = await getOpenCodeCodexPrompt();
 
       expect(result).toContain("Cached content");
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        FIRST_SOURCE,
+        expect.objectContaining({
+          headers: { "If-None-Match": gitBlobEtag(diskContent) },
+        })
+      );
     });
 
-    it("uses ETag for conditional request when cache expired", async () => {
+    it("refetches unconditionally when the disk body fails the 304 hash check", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
       vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached content"))
+        .mockResolvedValueOnce(padPrompt("Planted body"))
         .mockResolvedValueOnce(JSON.stringify({
-          etag: '"old-etag"',
+          // A well-formed etag that cannot match the planted bytes — a
+          // forger can pick a hex shape but not a colliding blob.
+          etag: `"${"0".repeat(40)}"`,
+          sourceUrl: FIRST_SOURCE,
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 304,
-        headers: new Map(),
+      mockFetch.mockImplementation((url, init) => {
+        const conditional = Boolean(
+          (init as { headers?: Record<string, string> } | undefined)?.headers?.["If-None-Match"],
+        );
+        if (conditional) return Promise.resolve(statusResponse(304));
+        return Promise.resolve(okResponse(padPrompt("Real upstream body"), '"real"'));
       });
 
       const result = await getOpenCodeCodexPrompt();
 
-      expect(result).toContain("Cached content");
-      // With no stored sourceUrl, the ETag replays to the first default source.
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("raw.githubusercontent.com"),
-        expect.objectContaining({
-          headers: { "If-None-Match": '"old-etag"' },
-        })
-      );
+      expect(result).toContain("Real upstream body");
+      expect(result).not.toContain("Planted body");
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const secondInit = mockFetch.mock.calls[1]?.[1] as { headers?: Record<string, string> };
+      expect(secondInit?.headers?.["If-None-Match"]).toBeUndefined();
     });
 
     it("does not let a stored sourceUrl redirect the next fetch", async () => {
@@ -106,11 +171,7 @@ describe("opencode-codex", () => {
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 304,
-        headers: new Map(),
-      });
+      mockFetch.mockResolvedValue(statusResponse(304));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -128,30 +189,34 @@ describe("opencode-codex", () => {
     it("replays the stored ETag only to the source that issued it", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
+      const diskContent = padPrompt("Cached content");
       vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached content"))
+        .mockResolvedValueOnce(diskContent)
         .mockResolvedValueOnce(JSON.stringify({
-          etag: '"old-etag"',
-          // Exactly the first default source — the conditional request must
-          // attach the ETag here and nowhere else.
-          sourceUrl:
-            "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/opencode/src/session/prompt/codex.txt",
+          etag: gitBlobEtag(diskContent),
+          // Exactly the SECOND default source — the conditional request must
+          // attach the ETag there and nowhere else.
+          sourceUrl: SECOND_SOURCE,
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 304,
-        headers: new Map(),
+      mockFetch.mockImplementation((url) => {
+        if (String(url) === FIRST_SOURCE) {
+          return Promise.resolve(statusResponse(404));
+        }
+        return Promise.resolve(statusResponse(304));
       });
 
       const result = await getOpenCodeCodexPrompt();
 
       expect(result).toContain("Cached content");
+      const calls = mockFetch.mock.calls;
+      const firstInit = calls[0]?.[1] as { headers?: Record<string, string> };
+      expect(firstInit?.headers?.["If-None-Match"]).toBeUndefined();
       expect(mockFetch).toHaveBeenCalledWith(
-        "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/opencode/src/session/prompt/codex.txt",
+        SECOND_SOURCE,
         expect.objectContaining({
-          headers: { "If-None-Match": '"old-etag"' },
+          headers: { "If-None-Match": gitBlobEtag(diskContent) },
         }),
       );
     });
@@ -161,17 +226,8 @@ describe("opencode-codex", () => {
 
       vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
       mockFetch
-        .mockResolvedValueOnce({
-          ok: false,
-          status: 404,
-          headers: new Map(),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          text: () => Promise.resolve(padPrompt("Prompt from fallback source")),
-          headers: new Map([["etag", '"fallback-etag"']]),
-        });
+        .mockResolvedValueOnce(statusResponse(404))
+        .mockResolvedValueOnce(okResponse(padPrompt("Prompt from fallback source"), '"fallback-etag"'));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -181,17 +237,50 @@ describe("opencode-codex", () => {
       expect(writeFileAtomic).toHaveBeenCalledTimes(2);
     });
 
+    it("aborts a stalled body read and moves to the next source", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockImplementation((url, init) => {
+        if (String(url) === FIRST_SOURCE) {
+          const signal = (init as RequestInit).signal as AbortSignal;
+          expect(signal).toBeInstanceOf(AbortSignal);
+          // Headers arrive instantly; the body read stalls until the
+          // fetch's own deadline aborts the connection.
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Map(),
+            text: () =>
+              new Promise<string>((_resolve, reject) => {
+                signal.addEventListener("abort", () =>
+                  reject(new Error("socket aborted")),
+                );
+              }),
+          });
+        }
+        return Promise.resolve(
+          okResponse(padPrompt("Prompt from the next source"), '"next-etag"'),
+        );
+      });
+
+      vi.useFakeTimers();
+      const pending = getOpenCodeCodexPrompt();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+
+      // The stalled socket was cancelled, then source two answered — the
+      // fallback only runs after the first connection is released.
+      expect(result).toContain("Prompt from the next source");
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
     it("uses OPENCODE_CODEX_PROMPT_URL override before default sources", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
       vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
       vi.stubEnv("OPENCODE_CODEX_PROMPT_URL", "https://example.com/custom-codex.txt");
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve(padPrompt("Prompt from env override")),
-        headers: new Map([["etag", '"env-etag"']]),
-      });
+      mockFetch.mockResolvedValueOnce(okResponse(padPrompt("Prompt from env override"), '"env-etag"'));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -200,7 +289,7 @@ describe("opencode-codex", () => {
       expect(mockFetch.mock.calls[0]?.[0]).toBe("https://example.com/custom-codex.txt");
     });
 
-    it("serves stale content immediately and refreshes cache in background", async () => {
+    it("refreshes an unverified stale disk cache synchronously, not stale-while-revalidate", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
       vi.mocked(readFile)
@@ -210,17 +299,14 @@ describe("opencode-codex", () => {
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve(padPrompt("New content")),
-        headers: new Map([["etag", '"new-etag"']]),
-      });
+      mockFetch.mockResolvedValue(okResponse(padPrompt("New content"), '"new-etag"'));
 
       const first = await getOpenCodeCodexPrompt();
 
-      expect(first).toContain("Old cached content");
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Disk bytes a same-UID writer could plant never serve ahead of the
+      // upstream exchange — the first caller already gets fetched content.
+      expect(first).toContain("New content");
+      expect(first).not.toContain("Old cached content");
       const second = await getOpenCodeCodexPrompt();
       expect(second).toContain("New content");
       expect(writeFileAtomic).toHaveBeenCalledWith(
@@ -229,7 +315,7 @@ describe("opencode-codex", () => {
       );
     });
 
-    it("falls back to cache on network error", async () => {
+    it("falls back to cache on network error, then suppresses retries for the TTL", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
       vi.mocked(readFile)
@@ -242,8 +328,20 @@ describe("opencode-codex", () => {
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       const result = await getOpenCodeCodexPrompt();
-
       expect(result).toContain("Cached fallback content");
+
+      // An offline window must not pay a full source-list sweep per call:
+      // the recorded failure suppresses the next fetch for the TTL.
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(padPrompt("Cached fallback content"))
+        .mockResolvedValueOnce(JSON.stringify({
+          etag: '"etag"',
+          lastChecked: Date.now() - 20 * 60 * 1000,
+        }));
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      const second = await getOpenCodeCodexPrompt();
+      expect(second).toContain("Cached fallback content");
+      expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
     });
 
     it("throws when no cache and fetch fails", async () => {
@@ -268,11 +366,7 @@ describe("opencode-codex", () => {
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: false,
-        status: 500,
-        headers: new Map(),
-      });
+      mockFetch.mockResolvedValue(statusResponse(500));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -290,12 +384,7 @@ describe("opencode-codex", () => {
           lastChecked: Date.now() + 60 * 60 * 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve(padPrompt("Fresh content")),
-        headers: new Map([["etag", '"new-etag"']]),
-      });
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Fresh content"), '"new-etag"'));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -315,12 +404,7 @@ describe("opencode-codex", () => {
           lastChecked: Date.now() - 1000,
         }));
 
-      mockFetch.mockResolvedValue({
-        ok: true,
-        status: 200,
-        text: () => Promise.resolve(padPrompt("Replacement content")),
-        headers: new Map([["etag", '"new-etag"']]),
-      });
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Replacement content"), '"new-etag"'));
 
       const result = await getOpenCodeCodexPrompt();
 
@@ -330,14 +414,37 @@ describe("opencode-codex", () => {
   });
 
   describe("getCachedPromptPrefix", () => {
-    it("returns first N characters of cached content", async () => {
-      const { getCachedPromptPrefix } = await import("../lib/prompts/opencode-codex.js");
+    it("returns first N characters of content this process verified", async () => {
+      const { getOpenCodeCodexPrompt, getCachedPromptPrefix } = await import(
+        "../lib/prompts/opencode-codex.js"
+      );
 
-      vi.mocked(readFile).mockResolvedValue(padPrompt("This is a long cached prompt content"));
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(
+        okResponse(padPrompt("This is a long cached prompt content")),
+      );
 
+      await getOpenCodeCodexPrompt();
       const result = await getCachedPromptPrefix(10);
 
       expect(result).toBe("This is a ");
+    });
+
+    it("returns null for planted disk content that was never verified upstream", async () => {
+      const { getCachedPromptPrefix } = await import("../lib/prompts/opencode-codex.js");
+
+      // The strip-needle must come from verified bytes only — a same-UID
+      // writer cannot seed it by dropping a file plus a plausible meta.
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(padPrompt("Planted prompt body"))
+        .mockResolvedValueOnce(JSON.stringify({
+          etag: '"planted"',
+          lastChecked: Date.now() - 1000,
+        }));
+
+      const result = await getCachedPromptPrefix(10);
+
+      expect(result).toBeNull();
     });
 
     it("returns null when cache does not exist", async () => {
@@ -361,11 +468,15 @@ describe("opencode-codex", () => {
     });
 
     it("uses default of 50 characters", async () => {
-      const { getCachedPromptPrefix } = await import("../lib/prompts/opencode-codex.js");
+      const { getOpenCodeCodexPrompt, getCachedPromptPrefix } = await import(
+        "../lib/prompts/opencode-codex.js"
+      );
 
       const longContent = "A".repeat(200);
-      vi.mocked(readFile).mockResolvedValue(longContent);
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(longContent));
 
+      await getOpenCodeCodexPrompt();
       const result = await getCachedPromptPrefix();
 
       expect(result).toBe("A".repeat(50));

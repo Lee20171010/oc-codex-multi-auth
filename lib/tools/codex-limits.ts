@@ -302,7 +302,7 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 					});
 
 					if (ui.v2Enabled) {
-						lines.push(formatUiItem(ui, `${displayLabel}${activeSuffix}`));
+						lines.push(formatUiItem(ui, displayLabel, "normal", activeSuffix));
 						for (const window of [usage.primary, usage.secondary]) {
 							if (!hasUsageWindow(window)) continue;
 							lines.push(
@@ -381,7 +381,7 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 						error: message.slice(0, 160),
 					});
 					if (ui.v2Enabled) {
-						lines.push(formatUiItem(ui, `${displayLabel}${activeSuffix}`));
+						lines.push(formatUiItem(ui, displayLabel, "normal", activeSuffix));
 						lines.push(
 							`  ${formatUiKeyValue(ui, "Error", message.slice(0, 160), "danger")}`,
 						);

@@ -34,12 +34,17 @@ export function paintUiText(ui: UiRuntimeOptions, text: string, tone: UiTextTone
 /**
  * Untrusted text (titles, account labels, server-provided strings) is
  * sanitized before interpolation: control characters, bidi overrides, and
- * escape sequences are stripped so they cannot smuggle cursor movement or
- * reordering into rendered output. SGR styling a caller embedded on purpose
- * survives.
+ * every escape sequence — SGR included — are stripped so a persisted value
+ * cannot smuggle cursor movement, reordering, or concealment (`ESC[8m`) into
+ * rendered output. Intentional styling enters through `paintUiText` tones or
+ * the `suffix` channel below, never through the sanitized text itself.
+ *
+ * `maxLength` bounds the untrusted-label default (160): trusted but
+ * legitimately long strings — warnings that interpolate storage paths — pass
+ * an explicit, larger bound so a hard cut cannot eat the message's reason.
  */
-function sanitizeUiText(value: string): string {
-	return sanitizeDisplayText(value, { preserveSgr: true }) ?? "";
+function sanitizeUiText(value: string, maxLength?: number): string {
+	return sanitizeDisplayText(value, { preserveSgr: false, maxLength }) ?? "";
 }
 
 export function formatUiHeader(ui: UiRuntimeOptions, title: string): string[] {
@@ -62,11 +67,13 @@ export function formatUiItem(
 	ui: UiRuntimeOptions,
 	text: string,
 	tone: UiTextTone = "normal",
+	suffix = "",
+	maxLength?: number,
 ): string {
-	const item = sanitizeUiText(text);
-	if (!ui.v2Enabled) return `- ${item}`;
+	const item = sanitizeUiText(text, maxLength);
+	if (!ui.v2Enabled) return `- ${item}${suffix}`;
 	const bullet = paintUiText(ui, ui.theme.glyphs.bullet, "muted");
-	return `${bullet} ${paintUiText(ui, item, tone)}`;
+	return `${bullet} ${paintUiText(ui, item, tone)}${suffix}`;
 }
 
 export function formatUiKeyValue(
@@ -74,9 +81,10 @@ export function formatUiKeyValue(
 	key: string,
 	value: string,
 	valueTone: UiTextTone = "normal",
+	maxLength?: number,
 ): string {
 	const safeKey = sanitizeUiText(key);
-	const safeValue = sanitizeUiText(value);
+	const safeValue = sanitizeUiText(value, maxLength);
 	if (!ui.v2Enabled) return `${safeKey}: ${safeValue}`;
 	const keyText = paintUiText(ui, `${safeKey}:`, "muted");
 	const valueText = paintUiText(ui, safeValue, valueTone);

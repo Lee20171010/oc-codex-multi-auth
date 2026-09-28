@@ -754,14 +754,20 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 			await pruneSiblingArtifacts(storagePath, ".pre-rollback-keychain.");
 			const preRollbackArchive = rollbackResult.preRollbackArchive;
 
+			// Warnings and paths are app-generated but interpolate long storage
+			// paths — give them a bound well above the untrusted-label cap so a
+			// hard truncate cannot cut the message before its reason.
 			const lines: string[] = [
 				...formatUiHeader(ui, "Codex keychain rollback"),
 				"",
 				formatUiItem(
 					ui,
 					`Restored ${accountCount} account(s) from backup ${mostRecent}.`,
+					"normal",
+					"",
+					400,
 				),
-				formatUiKeyValue(ui, "Active file", storagePath),
+				formatUiKeyValue(ui, "Active file", storagePath, "normal", 400),
 			];
 			if (preRollbackArchive) {
 				lines.push(
@@ -769,6 +775,8 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 						ui,
 						"Previous file archived at",
 						preRollbackArchive,
+						"normal",
+						400,
 					),
 				);
 			}
@@ -781,7 +789,7 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 				);
 			}
 			for (const warning of warnings) {
-				lines.push(formatUiItem(ui, warning, "warning"));
+				lines.push(formatUiItem(ui, warning, "warning", "", 400));
 			}
 			lines.push(
 				formatUiItem(

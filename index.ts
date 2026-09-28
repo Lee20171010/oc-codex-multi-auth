@@ -215,6 +215,7 @@ import {
 } from "./lib/request/retry-budget.js";
 import { addJitter } from "./lib/rotation.js";
 import { setUiRuntimeOptions, type UiRuntimeOptions } from "./lib/ui/runtime.js";
+import { sanitizeDisplayText } from "./lib/ui/display-text.js";
 import { formatUiBadge, formatUiHeader, formatUiItem, formatUiKeyValue, formatUiSection } from "./lib/ui/format.js";
 import {
 	buildBeginnerChecklist,
@@ -1449,7 +1450,14 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			} = {},
 		): string => {
 			const email = resolveDisplayEmail(account?.email, options.maskEmail ?? false);
+			// Labels and tags are persisted user input: sanitize at the boundary
+			// too — not every renderer this string reaches goes through the UI
+			// formatters, so an escape sequence stored in the label must be dead
+			// by the time it is composed here.
 			const workspace = account?.accountLabel?.trim();
+			const safeWorkspace = workspace
+				? sanitizeDisplayText(workspace, { maxLength: 64 })
+				: undefined;
 			const accountId = formatAccountIdForDisplay(account?.accountId);
 			// `omitSeat` is for a caller that renders the seat itself in a place
 			// a long email cannot push it out of - a table column of its own.
@@ -1464,12 +1472,12 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 				Array.isArray(account?.accountTags)
 					? account.accountTags
 							.filter((tag): tag is string => typeof tag === "string")
-							.map((tag) => tag.trim().toLowerCase())
-							.filter((tag) => tag.length > 0)
+							.map((tag) => sanitizeDisplayText(tag.trim().toLowerCase()))
+							.filter((tag): tag is string => typeof tag === "string" && tag.length > 0)
 					: [];
 			const details: string[] = [];
 			if (email) details.push(email);
-			if (workspace) details.push(`workspace:${workspace}`);
+			if (safeWorkspace) details.push(`workspace:${safeWorkspace}`);
 			if (accountId) details.push(`id:${accountId}`);
 			if (seat) details.push(`seat:${seat}`);
 			if (tags.length > 0) details.push(`tags:${tags.join(",")}`);
@@ -1486,8 +1494,10 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 				new Set(
 					raw
 						.split(",")
-						.map((entry) => entry.trim().toLowerCase())
-						.filter((entry) => entry.length > 0),
+						// Tags persist and render later — strip escapes/controls at
+						// write time, same as labels and notes.
+						.map((entry) => sanitizeDisplayText(entry.trim().toLowerCase()))
+						.filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
 				),
 			);
 		};

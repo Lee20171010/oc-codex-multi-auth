@@ -7,6 +7,7 @@ import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
 import { AccountManager } from "../accounts.js";
 import { logWarn } from "../logger.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import {
 	formatUiHeader,
 	formatUiItem,
@@ -101,7 +102,11 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 				resolvedIndex = selectedIndex + 1;
 			}
 
-			const normalizedLabel = (label ?? "").trim().replace(/\s+/g, " ");
+			// The label is persisted and later rendered into terminals by
+			// several paths — strip escapes/controls at write time so a label
+			// cannot store `ESC[8m` concealment or cursor movement at all.
+			const normalizedLabel =
+				sanitizeDisplayText((label ?? "").trim(), { maxLength: 60 }) ?? "";
 			if (normalizedLabel.length > 60) {
 				if (ui.v2Enabled) {
 					return [
