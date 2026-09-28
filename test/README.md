@@ -1,13 +1,6 @@
 # Test Suite
 
-Vitest suites for `oc-codex-multi-auth`.
-
-The tree evolves frequently. Use `rg --files test` (or `find test -name '*.test.ts'`)
-as the source of truth rather than any list committed here; this file describes
-the **shape** of the suite, not an exhaustive inventory.
-
-Current size: 159 test files, 141 at the top level plus `chaos/` (9),
-`property/` (6), and `contracts/` (3).
+Vitest suites for `oc-codex-multi-auth`. This file describes the shape of the suite — for the live inventory use `find test -name '*.test.ts' | sort`; committed counts go stale.
 
 ## Layout
 
@@ -15,136 +8,77 @@ Current size: 159 test files, 141 at the top level plus `chaos/` (9),
 test/
 ├── AGENTS.md                 # agent-facing conventions
 ├── README.md                 # this file
-├── *.test.ts                 # unit + integration suites, one per module/concern
-├── chaos/                    # fault injection and stress under adverse conditions
+├── *.test.ts                 # unit + integration suites, named after the module under test
+├── helpers/                  # shared helpers (e.g. the port-1455 lock)
+├── chaos/                    # fault injection and adverse-condition stress
 ├── contracts/                # upstream wire-shape contracts (chat, SSE, token)
-└── property/                 # fast-check property-based tests + shared helpers
+├── property/                 # fast-check property tests + shared setup
+└── global-setup.ts           # teardown for the minted test home
 ```
 
-Top-level suites are named after the module or behavior they cover, so
-`storage-keychain.test.ts` covers `lib/storage/keychain.ts`, and
-`tools-codex-pool.test.ts` covers `lib/tools/codex-pool.ts`.
+Naming convention: a suite is named after what it covers — `lib/storage/keychain.ts` → `storage-keychain.test.ts`, `lib/tools/codex-pool.ts` → `tools-codex-pool.test.ts`. Follow this when adding coverage.
 
-## Running Tests
+## Running
 
 ```bash
-npm test                 # run all tests once
-npm run test:watch       # re-run on file changes
-npm run test:ui          # visual test UI
-npm run test:coverage    # coverage report + threshold gate
+npm test                          # whole suite once (vitest run)
+npm run test:watch                # watch mode
+npm run test:coverage             # coverage + threshold gate
+npm test -- <substring>           # targeted subset, e.g. `npm test -- storage`
+npx vitest run test/doc-parity.test.ts   # one file
 ```
 
-Target a subset by substring:
+Vitest globals are on (`describe`, `it`, `expect`); `testTimeout`/`hookTimeout` are 15 s. Suites import from source (`lib/`, `index.ts`, `tui.ts`) — never `dist/`.
 
-```bash
-npm test -- storage
-npm test -- test/doc-parity.test.ts
-```
+## Property seeds
 
-## What The Suite Covers
+`property/setup.ts` (a vitest `setupFiles` entry) reads `FC_SEED`:
 
-### Auth and OAuth
-`auth.test.ts`, `auth-menu.test.ts`, `login-runner.test.ts`, `device-code.test.ts`,
-`token-utils.test.ts`, `oauth-constants.test.ts`, `server.unit.test.ts`, and
-`oauth-server.integration.test.ts` (binds the real callback port `1455`).
-Covers PKCE state generation, authorization-input parsing, JWT decoding,
-device-code and manual-paste login paths, and workspace/account selection.
+- `FC_SEED=<integer>` pins the fast-check seed for the whole run — replay a failing case exactly (`FC_SEED=12345 npx vitest run test/property`).
+- Unset/empty → random per run; a non-integer fails at setup. `numRuns` is 100.
 
-### Request pipeline
-`request-transformer.test.ts`, `fetch-helpers.test.ts`, `response-handler.test.ts`,
-`responses-lite.test.ts`, `input-utils.test.ts`, `retry-budget.test.ts`, and
-`rate-limit-backoff.test.ts`. Covers URL/body/header shaping, the stateless
-Codex invariants (`store: false`, `reasoning.encrypted_content`), the GPT-5.6
-responses-lite reshape, SSE parsing, empty-response detection, bounded retry
-classes, and exponential backoff.
+## Coverage floors (`vitest.config.ts`)
 
-### Model catalog and routing
-`model-map.test.ts`, `gpt54-models.test.ts`, `gpt55-release.test.ts`,
-`gpt56-models.test.ts`, `gpt56-sol-wire-parity.test.ts`, and
-`model-pool-config.test.ts`. Covers model normalization, per-family defaults,
-fallback chains, and `modelAccountPools` resolution.
+V8 coverage over `lib/**/*.ts`, `index.ts`, `tui.ts`. `perFile: true` makes every threshold — including the global one — apply file by file, so the global floor is 0 (no instrumented file may be entirely unmeasured) and the real gates are per-directory:
 
-### Accounts, rotation, and health
-`accounts*.test.ts`, `rotation*.test.ts`, `refresh-queue.test.ts`,
-`proactive-refresh.test.ts`, `health.test.ts`, `parallel-probe.test.ts`,
-`circuit-breaker*.test.ts`, and `stale-state.test.ts`. Covers health scoring,
-token-bucket consumption, cooldowns, the `hybrid`/`sticky`/`round-robin`
-strategies, refresh serialization, and failure isolation.
+| Glob | stmts | branches | funcs | lines |
+|------|------:|---------:|------:|------:|
+| `lib/*.ts` | 64 | 58 | 60 | 68 |
+| `lib/accounts/**` | 41 | 18 | 76 | 43 |
+| `lib/auth/**` | 70 | 68 | 80 | 75 |
+| `lib/prompts/**` | 84 | 60 | 80 | 86 |
+| `lib/recovery/**` | 91 | 84 | 91 | 95 |
+| `lib/request/**` | 84 | 78 | 88 | 90 |
+| `lib/storage/**` | 45 | 48 | 52 | 45 |
+| `lib/tools/**` | 36 | 33 | 54 | 36 |
+| `index.ts` | 69 | 50 | 70 | 70 |
+| `tui.ts` | 25 | 30 | 22 | 26 |
+| `lib/ui/**` | 0 | 0 | 0 | 0 |
+| `lib/recovery.ts`, `lib/storage.ts` (barrels) | 25 | 15 | 25 | 25 |
 
-### Storage
-`storage.test.ts`, `storage-async.test.ts`, `storage-keychain.test.ts`,
-`storage-v2-migration.test.ts`, `storage-worktree-lock.test.ts`,
-`credential-clobber.test.ts`, and `paths.test.ts`. Covers the V3 format,
-V1/V2 migration, per-project vs global path resolution, atomic writes,
-the opt-in keychain backend, and import/export safety defaults.
+The `lib/ui/**` floor is intentionally 0 (interactive widgets can't run headless) and the barrel files sit at 25 — both stay instrumented so the gap is visible and coverage can only trend up.
 
-### Tools and CLI
-`index.test.ts` (registry wiring), `tools-codex-*.test.ts` (per-tool
-regressions), `standalone-cli.test.ts`, `cli.test.ts`,
-`install-oc-codex-multi-auth.test.ts`, and `codex-reset.test.ts`.
+## Real port 1455
 
-### TUI and UI
-`tui-status.test.ts`, `tui-quota-cache.test.ts`, `tui-refresh-events.test.ts`,
-`account-display.test.ts`, `table-formatter.test.ts`, `beginner-ui.test.ts`,
-and `ui-*.test.ts`.
+Two suites bind the actual OAuth callback port — `oauth-server.integration.test.ts` and `chaos/auth-faults.test.ts`. Vitest runs files in parallel, so both serialize on `helpers/oauth-port-lock.ts` (`acquireOAuthPortLock()`, a lock dir under `tmpdir()`). Any new suite that binds 1455 must take the same lock; never hardcode a different port.
 
-### Recovery
-`recovery.test.ts`, `recovery-storage.test.ts`, and `recovery-constants.test.ts`
-cover session recovery classes and auto-resume behavior.
+## Isolated HOME (minted-home guard)
 
-### Docs parity
-`doc-parity.test.ts` pins documentation claims that must match runtime
-behavior: the stateless request contract, the shipped config templates, the
-live `lib/tools` registry and its documented tool count, installer catalog
-counts, the docs tree layout, internal link resolution, quoted package
-versions, and npm scripts named in docs.
+`vitest.config.ts` `test.env` points `HOME`/`USERPROFILE`/`OC_CODEX_TEST_HOME` at a `mkdtemp` dir **before any module loads** (several modules capture `homedir()` at import time) and forces `CODEX_KEYCHAIN=0` so fixture writes can't reach the real OS keychain. Hand a home in via `OC_CODEX_TEST_HOME` to reuse one.
 
-### `contracts/`
-`codex-chat.test.ts`, `codex-sse.test.ts`, and `openai-token.test.ts` pin the
-upstream wire shapes the plugin depends on.
+Two guards make that safe:
 
-### `property/`
-fast-check property tests for rotation invariants, transformer edge cases,
-refresh/rotation interaction, tracker remapping, and redaction. Shared
-configuration lives in `property/setup.ts` (a vitest `setupFiles` entry).
+- `test/global-setup.ts` removes the throwaway home after the run — but only when the config minted it (`OC_CODEX_TEST_HOME_OWNED=1`), the path sits under `tmpdir()`, and it carries the `oc-codex-multi-auth-test-home-` prefix.
+- `lib/storage/test-home-guard.ts` throws `TEST_HOME_ESCAPE` on any account-storage write that would land inside the developer's real home during a vitest run, regardless of `$HOME`.
 
-`FC_SEED=<integer>` pins the fast-check seed for the whole run so a failing
-property case can be replayed exactly:
+## Adding tests
 
-```bash
-FC_SEED=12345 npx vitest run test/property
-```
+1. Name the file after the module/behavior under the existing convention.
+2. Keep tests isolated; no shared mutable state, no wall-clock timing (use fake timers or injected clocks), no real network.
+3. Don't rely on `dist/`; don't skip tests without justification.
+4. Changed a documented contract (tool count, config key, storage path, catalog size)? Update `doc-parity.test.ts` and the affected docs in the same change.
+5. Run `npm test` and `npm run typecheck`.
 
-Unset or empty means the default random-per-run seeding. A non-integer value
-fails at setup rather than silently running unseeded.
+## Example configs
 
-### `chaos/`
-Fault injection and stress: auth faults, invalidated-401 storms, concurrent
-storage access, request faults, storage faults, rotation-strategy stress, and
-warm-path stress.
-
-## Test Philosophy
-
-1. **Comprehensive coverage** — normal cases, edge cases, and error conditions.
-2. **Fast and deterministic** — no real network calls; no reliance on wall-clock timing.
-3. **Source, not `dist/`** — tests import from `lib/`, `index.ts`, and `tui.ts`.
-4. **Type safety** — all tests are TypeScript under strict checking.
-5. **Property-based testing** — critical paths get randomized inputs.
-
-## Adding New Tests
-
-1. Create or update the suite matching the module you changed.
-2. Follow the existing `describe` / `it` structure.
-3. Keep tests isolated and free of shared mutable state.
-4. Run `npm test` and `npm run typecheck`.
-5. If you changed a documented contract (tool count, config key, storage path,
-   catalog size), update `doc-parity.test.ts` and the affected docs in the same
-   change.
-
-## Example Configurations
-
-See `config/` for working examples:
-
-- `opencode-modern.json` — variant-based template for OpenCode v1.0.210+
-- `opencode-legacy.json` — explicit-entry template for older OpenCode
-- `minimal-opencode.json` — minimal debug template
+`config/` holds working examples: `opencode-modern.json` (variant-based), `opencode-legacy.json` (explicit entries), `minimal-opencode.json` (minimal).
