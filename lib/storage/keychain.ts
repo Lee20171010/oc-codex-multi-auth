@@ -319,6 +319,23 @@ export async function writeFlaggedToKeychain(
 }
 
 /**
+ * Remove the plugin's FLAGGED-account keychain entry for the given project
+ * key. Returns true when the entry existed and was deleted, false otherwise
+ * (including "not present"). Never throws.
+ *
+ * This completes the flagged-store parity with {@link deleteFromKeychain}:
+ * `clearFlaggedAccounts` must retire the keychain copy alongside the JSON
+ * file or the next keychain-first load resurrects the cleared records.
+ */
+export async function deleteFlaggedFromKeychain(
+	projectStorageKey: string | null,
+): Promise<boolean> {
+	const backend = await getBackend();
+	if (!backend) return false;
+	return backend.delete(KEYCHAIN_SERVICE_NAME, buildKeychainFlaggedKey(projectStorageKey));
+}
+
+/**
  * Probe the backend end-to-end (write + read + delete a throwaway entry)
  * to confirm the OS keychain is reachable and unlocked. Used by the
  * `codex-keychain status` tool to give the operator a clear yes/no signal

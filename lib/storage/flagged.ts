@@ -17,16 +17,18 @@ import {
 } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { extractAccountUserId } from "../auth/token-utils.js";
-import { renameWithWindowsRetry } from "./atomic-write.js";
+import { fsyncParentDirectory, writeFileAtomic } from "./atomic-write.js";
 import { trySnapshotCredentialStoreBeforeWrite } from "./credential-snapshots.js";
 import { StorageError } from "./errors.js";
 import { getWorkspaceIdentityKey, isRecord } from "./identity.js";
+import { migrateOnDiskJsonToKeychainBackup } from "./load-save.js";
 import { getStoragePath, getCurrentProjectStorageKey, withStorageLock } from "./state.js";
 import {
   assertTestRunNeverTouchesRealHome,
   TEST_HOME_ESCAPE_CODE,
 } from "./test-home-guard.js";
 import {
+  deleteFlaggedFromKeychain,
   isKeychainOptInEnabled,
   readFlaggedFromKeychain,
   writeFlaggedToKeychain,
@@ -194,7 +196,7 @@ async function loadFlaggedAccountsUnlocked(
       const blob = await readFlaggedFromKeychain(getCurrentProjectStorageKey());
       if (blob !== null) {
         try {
-          return normalizeFlaggedStorage(JSON.parse(blob) as unknown);
+          return normalizeFlaggedStorage(JSON.parse(blob.replace(/^\uFEFF/, "")) as unknown);
         } catch (parseErr) {
           log.warn("keychain: flagged payload failed to parse; falling back to JSON", {
             error: String(parseErr),
@@ -210,7 +212,8 @@ async function loadFlaggedAccountsUnlocked(
 
   try {
     const content = await fs.readFile(path, "utf-8");
-    const data = JSON.parse(content) as unknown;
+    // A UTF-8 BOM is legal on disk but not to JSON.parse — strip before parse.
+    const data = JSON.parse(content.replace(/^\uFEFF/, "")) as unknown;
     return normalizeFlaggedStorage(data);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -227,7 +230,7 @@ async function loadFlaggedAccountsUnlocked(
 
     try {
       const legacyContent = await fs.readFile(legacyPath, "utf-8");
-      const legacyData = JSON.parse(legacyContent) as unknown;
+      const legacyData = JSON.parse(legacyContent.replace(/^\uFEFF/, "")) as unknown;
       const migrated = normalizeFlaggedStorage(legacyData);
       if (migrated.accounts.length > 0) {
         await saveUnlocked(migrated);
@@ -256,6 +259,33 @@ async function loadFlaggedAccountsUnlocked(
   return empty;
 }
 
+/**
+ * JSON-backend write for the flagged store. Split from
+ * {@link saveFlaggedAccountsUnlocked} so the keychain migration path can use
+ * it as the "refresh the on-disk copy" half of the marker contract — the
+ * same shape the main store's `writeAccountsToPathUnlocked` plays there.
+ */
+async function writeFlaggedJsonToDisk(
+  path: string,
+  normalized: FlaggedAccountStorageV1,
+  content: string,
+): Promise<void> {
+  try {
+    await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    // This file retains live refresh tokens for quarantined accounts, so it
+    // gets the same pre-write snapshot as the main account store — under the
+    // same significance, retention, and test-home rules — before the rename
+    // replaces what is on disk. Compared against the normalized payload for
+    // the same reason `writeAccountsToPathUnlocked` does: a difference
+    // normalization erases never costs a snapshot.
+    await trySnapshotCredentialStoreBeforeWrite(path, normalized);
+    await writeFileAtomic(path, content);
+  } catch (error) {
+    log.error("Failed to save flagged account storage", { path, error: String(error) });
+    throw error;
+  }
+}
+
 async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Promise<void> {
   const path = getFlaggedAccountsPath();
   assertTestRunNeverTouchesRealHome(path);
@@ -270,12 +300,14 @@ async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Pr
     const projectKey = getCurrentProjectStorageKey();
     const result = await writeFlaggedToKeychain(projectKey, content);
     if (result.ok) {
-      // Remove any stale plaintext file so the secret does not linger on disk.
-      try {
-        await fs.unlink(path);
-      } catch {
-        // Best effort: file may not exist.
-      }
+      // Same contract as the main store's post-keychain-write migration: the
+      // on-disk JSON is preserved as a `.migrated-to-keychain.<ts>` rollback
+      // artefact rather than deleted (or overwritten with the fresh blob when
+      // the rename itself fails), so an opt-in toggle-off never resurrects a
+      // stale flagged pool.
+      await migrateOnDiskJsonToKeychainBackup(path, () =>
+        writeFlaggedJsonToDisk(path, normalized, content),
+      );
       return;
     }
     log.warn("keychain: flagged write failed; falling back to JSON for this save", {
@@ -283,29 +315,7 @@ async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Pr
     });
   }
 
-  const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
-  const tempPath = `${path}.${uniqueSuffix}.tmp`;
-
-  try {
-    await fs.mkdir(dirname(path), { recursive: true });
-    // This file retains live refresh tokens for quarantined accounts, so it
-    // gets the same pre-write snapshot as the main account store — under the
-    // same significance, retention, and test-home rules — before the rename
-    // replaces what is on disk. Compared against the normalized payload for
-    // the same reason `writeAccountsToPathUnlocked` does: a difference
-    // normalization erases never costs a snapshot.
-    await trySnapshotCredentialStoreBeforeWrite(path, normalized);
-    await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
-    await renameWithWindowsRetry(tempPath, path);
-  } catch (error) {
-    try {
-      await fs.unlink(tempPath);
-    } catch {
-      // Ignore cleanup failures.
-    }
-    log.error("Failed to save flagged account storage", { path, error: String(error) });
-    throw error;
-  }
+  await writeFlaggedJsonToDisk(path, normalized, content);
 }
 
 export async function loadFlaggedAccounts(): Promise<FlaggedAccountStorageV1> {
@@ -336,15 +346,36 @@ export async function saveFlaggedAccounts(storage: FlaggedAccountStorageV1): Pro
   });
 }
 
+/**
+ * Deletes the flagged account storage file from disk, and — when the keychain
+ * opt-in is enabled — the flagged keychain entry as well.
+ *
+ * Ordering mirrors `clearAccounts` (F1 post-merge MEDIUM finding, applied to
+ * the sibling store): unlink the on-disk JSON FIRST, then delete the keychain
+ * entry. Clearing the keychain first while the unlink failed would let a
+ * subsequent load take the "no keychain entry, fall back to JSON" branch of
+ * `loadFlaggedAccountsUnlocked` and resurrect the flagged records from the
+ * still-present file — and vice versa, which is the resurrection this
+ * ordering exists to prevent. A partial failure therefore leaves both sides
+ * present so the caller can retry, and the operation stays best-effort
+ * (never throws) apart from the test-home guard.
+ *
+ * @throws StorageError (code `TEST_HOME_ESCAPE`) - see `clearAccounts`; the
+ *   guard refuses the deletion, so absorbing it would report a clear that
+ *   deliberately did not happen.
+ */
 export async function clearFlaggedAccounts(): Promise<void> {
   return withStorageLock(async () => {
     const path = getFlaggedAccountsPath();
+    let jsonCleared = true;
     try {
       assertTestRunNeverTouchesRealHome(path);
       // Deleting the store outright is unconditionally significant - `null`
       // says there is no successor document to compare against.
       await trySnapshotCredentialStoreBeforeWrite(path, null);
       await fs.unlink(path);
+      // Flush the directory so the deletion itself is crash-durable.
+      await fsyncParentDirectory(path);
     } catch (error) {
       // Same fail-loud rule as `clearAccounts`: the test-home guard exists to
       // fail a run that escaped its sandbox, so absorbing it here would
@@ -354,7 +385,25 @@ export async function clearFlaggedAccounts(): Promise<void> {
       }
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
-        log.error("Failed to clear flagged account storage", { error: String(error) });
+        jsonCleared = false;
+        log.error(
+          "Failed to clear flagged account storage; skipping keychain delete to keep storage sides in sync. Caller should retry.",
+          { error: String(error) },
+        );
+      }
+    }
+
+    // Only delete the flagged keychain entry after the on-disk copy is gone
+    // (or was already absent). Leaving the keychain blob behind would
+    // resurrect every cleared flagged account on the next keychain-first
+    // load — the exact failure mode this function exists to prevent.
+    if (jsonCleared && isKeychainOptInEnabled()) {
+      try {
+        await deleteFlaggedFromKeychain(getCurrentProjectStorageKey());
+      } catch (err) {
+        log.warn("keychain: flagged delete during clearFlaggedAccounts failed", {
+          error: String(err),
+        });
       }
     }
   });

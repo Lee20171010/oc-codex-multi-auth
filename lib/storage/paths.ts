@@ -3,7 +3,7 @@
  * Extracted from storage.ts to reduce module size.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -96,18 +96,37 @@ export function resolvePath(filePath: string): string {
 		resolved = resolve(filePath);
 	}
 
+	// Collapse symlinks for the containment check so a symlink inside an
+	// allowed root cannot smuggle a read or write outside it (e.g. a link
+	// under ~/ pointing at /etc, or a symlinked storage directory). Best
+	// effort: realpath fails when the target does not exist yet — which is
+	// every export-to-new-file case — so fall back to the parent's real path,
+	// then to the lexical resolution. The caller keeps the lexical path:
+	// `canonical` is only the authority on WHERE the bytes would land, which
+	// is what the root check must govern.
+	let canonical = resolved;
+	try {
+		canonical = realpathSync(resolved);
+	} catch {
+		try {
+			canonical = join(realpathSync(dirname(resolved)), basename(resolved));
+		} catch {
+			// Keep the lexical resolution.
+		}
+	}
+
 	const home = homedir();
 	const cwd = process.cwd();
 	const tmp = tmpdir();
 	if (
-		!isWithinDirectory(home, resolved) &&
-		!isWithinDirectory(cwd, resolved) &&
-		!isWithinDirectory(tmp, resolved)
+		!isWithinDirectory(home, canonical) &&
+		!isWithinDirectory(cwd, canonical) &&
+		!isWithinDirectory(tmp, canonical)
 	) {
 		throw new StorageError(
 			`Access denied: path must be within home directory, project directory, or temp directory`,
 			"PATH_ACCESS_DENIED",
-			resolved,
+			canonical,
 			"The requested path is outside the allowed roots (home, project, temp). Pick a path inside one of those directories.",
 		);
 	}

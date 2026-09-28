@@ -10,6 +10,8 @@
  */
 
 import { promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export const WINDOWS_RENAME_RETRY_ATTEMPTS = 5;
 export const WINDOWS_RENAME_RETRY_BASE_DELAY_MS = 10;
@@ -53,11 +55,98 @@ export async function renameWithWindowsRetry(sourcePath: string, destinationPath
 }
 
 /**
- * `fs.writeFile` with a hard wall-clock timeout.
+ * fsync the directory holding `filePath`, best effort.
+ *
+ * A rename only makes the directory *entry* durable once the directory itself
+ * is flushed: without this a crash between rename and the next automatic
+ * writeback can resurrect the old file or drop the new one, which for the
+ * credential stores means restoring a consumed refresh token (or losing the
+ * rotated one). Windows cannot fsync a directory handle, so it is skipped
+ * there outright; every other failure is absorbed because the write already
+ * landed — a skipped directory flush narrows crash durability but is not an
+ * I/O failure worth failing the save over.
+ */
+export async function fsyncParentDirectory(filePath: string): Promise<void> {
+  if (process.platform === "win32") return;
+  let dirHandle: FileHandle | undefined;
+  try {
+    dirHandle = await fs.open(dirname(filePath), "r");
+    await dirHandle.sync();
+  } catch {
+    // Best effort — see the docstring.
+  } finally {
+    if (dirHandle) {
+      try {
+        await dirHandle.close();
+      } catch {
+        // Close failure on a directory handle is immaterial.
+      }
+    }
+  }
+}
+
+/**
+ * Write `content` to `filePath` atomically and crash-durably:
+ *
+ *   temp file (mode 0600) -> fsync(fd) -> rename -> fsync(parent dir)
+ *
+ * Temp+rename alone makes the write atomic for *readers*, but not durable
+ * across a crash: the rename can hit disk while the file's pages are still in
+ * the writeback cache, leaving an empty or torn file under the final name —
+ * for the credential stores that reads back as a wiped account pool. The fd
+ * fsync orders the payload before the rename, and the directory fsync orders
+ * the rename itself. Callers keep their own "directory exists" and snapshot
+ * steps; this helper owns the temp file's lifecycle (including unlinking it
+ * on failure) so every store gets identical crash semantics.
+ */
+export async function writeFileAtomic(filePath: string, content: string): Promise<void> {
+  const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  const tempPath = `${filePath}.${uniqueSuffix}.tmp`;
+
+  const handle = await fs.open(tempPath, "w", 0o600);
+  let closed = false;
+  try {
+    await handle.writeFile(content, { encoding: "utf-8" });
+    await handle.sync();
+    // A zero-byte payload must never be published under the canonical name:
+    // a "successful" write that produced nothing reads back as a wiped store.
+    // The serialized-length guard above this layer is the cheap first check;
+    // this stat catches the filesystem having accepted-but-dropped the data.
+    const { size } = await fs.stat(tempPath);
+    if (size === 0) {
+      throw Object.assign(new Error("File written but size is 0"), {
+        code: "EEMPTY",
+      });
+    }
+    await handle.close();
+    closed = true;
+    await renameWithWindowsRetry(tempPath, filePath);
+  } catch (error) {
+    if (!closed) {
+      try {
+        await handle.close();
+      } catch {
+        // Close failure is secondary to the write error being rethrown.
+      }
+    }
+    try {
+      await fs.unlink(tempPath);
+    } catch {
+      // Best effort temp-file cleanup.
+    }
+    throw error;
+  }
+
+  await fsyncParentDirectory(filePath);
+}
+
+/**
+ * `fs.writeFile` with a hard wall-clock timeout, flushed to disk before the
+ * handle closes.
  *
  * Used by the pre-import backup writer so a stuck disk or hanging FS driver
  * cannot block the import transaction forever; every other write path uses
- * the normal, untimed `fs.writeFile`.
+ * {@link writeFileAtomic} or the normal, untimed `fs.writeFile`.
  */
 export async function writeFileWithTimeout(filePath: string, content: string, timeoutMs: number): Promise<void> {
   const controller = new AbortController();
@@ -68,6 +157,22 @@ export async function writeFileWithTimeout(filePath: string, content: string, ti
       mode: 0o600,
       signal: controller.signal,
     });
+    // writeFile's internal close does not order the flush: re-open the file
+    // just to fsync it, so the backup is durable the moment the caller moves
+    // on to the rename.
+    let handle: FileHandle | undefined;
+    try {
+      handle = await fs.open(filePath, "r+");
+      await handle.sync();
+    } finally {
+      if (handle) {
+        try {
+          await handle.close();
+        } catch {
+          // Close failure is secondary to the write outcome.
+        }
+      }
+    }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       const timeoutError = Object.assign(
