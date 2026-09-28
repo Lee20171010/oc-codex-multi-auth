@@ -100,18 +100,29 @@ export function resolvePath(filePath: string): string {
 	// allowed root cannot smuggle a read or write outside it (e.g. a link
 	// under ~/ pointing at /etc, or a symlinked storage directory). Best
 	// effort: realpath fails when the target does not exist yet — which is
-	// every export-to-new-file case — so fall back to the parent's real path,
-	// then to the lexical resolution. The caller keeps the lexical path:
-	// `canonical` is only the authority on WHERE the bytes would land, which
-	// is what the root check must govern.
+	// every export-to-new-file case — so walk up to the nearest existing
+	// ancestor and realpath THAT, re-appending the missing tail lexically.
+	// Resolving only the immediate parent is not enough: `~/link -> /etc`
+	// plus a target of `~/link/newdir/out.json` fails both realpath calls
+	// while `~/link` already resolves outside every allowed root. The caller
+	// keeps the lexical path: `canonical` is only the authority on WHERE the
+	// bytes would land, which is what the root check must govern.
 	let canonical = resolved;
 	try {
 		canonical = realpathSync(resolved);
 	} catch {
-		try {
-			canonical = join(realpathSync(dirname(resolved)), basename(resolved));
-		} catch {
-			// Keep the lexical resolution.
+		const missingTail: string[] = [basename(resolved)];
+		let ancestor = dirname(resolved);
+		while (true) {
+			try {
+				canonical = join(realpathSync(ancestor), ...missingTail);
+				break;
+			} catch {
+				const parent = dirname(ancestor);
+				if (parent === ancestor) break; // reached fs root — keep lexical
+				missingTail.unshift(basename(ancestor));
+				ancestor = parent;
+			}
 		}
 	}
 
