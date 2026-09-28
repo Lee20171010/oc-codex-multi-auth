@@ -510,13 +510,16 @@ async function loadAccountsInternal(
           return "";
         }
       })();
-      // Only the NEWEST marker is a recovery source: every older marker is
-      // by definition an earlier pool state, and serving it after a corrupt
-      // freshest would resurrect consumed tokens and deleted accounts. A
-      // post-migration keychain save keeps the newest marker mirror-fresh,
-      // so the freshest is also the only one worth trusting.
+      // Newest-first: a VALID newest marker is the freshest pool state and
+      // always wins — staler siblings must not shadow it. But a CORRUPT
+      // newest must not hide the older ones: an older parseable marker is a
+      // real pool snapshot, and reporting empty here lets the next save
+      // permanently mask recoverable accounts (greptile P1 on PR #280).
+      // Steady-state staleness is handled elsewhere — every successful
+      // keychain save mirrors the newest marker and retires the rest, so an
+      // older file only survives when the sync never ran.
       const markers = markerAnchor
-        ? (await listKeychainMigrationMarkers(markerAnchor)).slice(0, 1)
+        ? await listKeychainMigrationMarkers(markerAnchor)
         : [];
       for (const markerPath of markers) {
         try {

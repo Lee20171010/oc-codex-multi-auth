@@ -371,6 +371,110 @@ describe("persisted refresh coordination", () => {
 		}
 	});
 
+	it("replays chained journals in producer order — successors wait", async () => {
+		// given: a lost-lease refresh left an `a→b` journal while another
+		// holder left `b→c`. A directory-order replay could run `b→c` first,
+		// heal nothing, delete it, then `a→b` heals a record onto `b` — and
+		// with `b→c` already gone the account strands on a dead token
+		// (greptile P1 on PR #280).
+		await saveAccounts({
+			version: 3,
+			activeIndex: 0,
+			accounts: [
+				{
+					...identity,
+					refreshToken: "a",
+					accessToken: "access-a",
+					expiresAt: 0,
+					addedAt: 1,
+					lastUsed: 1,
+				},
+			],
+		});
+		// Name the successor so it sorts FIRST — the hostile ordering.
+		const successor = join(directory, "accounts.json.refresh.pending.0000aaaa");
+		const producer = join(directory, "accounts.json.refresh.pending.zzzz9999");
+		await writeFile(successor, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "b",
+			rotatedRefreshToken: "c",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+		await writeFile(producer, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "a",
+			rotatedRefreshToken: "b",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+
+		// when
+		await refreshAndPersistAccount({ index: 0, identity });
+
+		// then: the record rode the whole chain to `c` — the LIVE token —
+		// and both journals retired only after their own heals landed.
+		const stored = await loadAccounts();
+		expect(stored?.accounts[0]?.refreshToken).toBe("c");
+		expect(existsSync(producer)).toBe(false);
+		expect(existsSync(successor)).toBe(false);
+		// Nothing downstream may ever spend the consumed `a`.
+		expect(queuedRefresh).not.toHaveBeenCalledWith("a");
+	});
+
+	it("keeps a successor journal pending when its producer cannot replay", async () => {
+		// given: `a→b` cannot complete (the flagged store is unreachable) —
+		// `b→c` must stay so a later successful replay of `a→b` can still be
+		// followed by `b→c` rather than stranding the record on `b`.
+		await saveAccounts({
+			version: 3,
+			activeIndex: 0,
+			accounts: [
+				{
+					...identity,
+					refreshToken: "a",
+					accessToken: "access-a",
+					expiresAt: 0,
+					addedAt: 1,
+					lastUsed: 1,
+				},
+			],
+		});
+		await writeFile(
+			join(directory, "oc-codex-multi-auth-flagged-accounts.json"),
+			"{ not valid json",
+			"utf-8",
+		);
+		const producer = join(directory, "accounts.json.refresh.pending.zzzz9999");
+		const successor = join(directory, "accounts.json.refresh.pending.0000aaaa");
+		await writeFile(producer, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "a",
+			rotatedRefreshToken: "b",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+		await writeFile(successor, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "b",
+			rotatedRefreshToken: "c",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+
+		// when
+		const outcome = await refreshAndPersistAccount({ index: 0, identity });
+
+		// then: the refresh refuses; both journals survive for the retry.
+		expect(outcome.status).toBe("failed");
+		expect(queuedRefresh).not.toHaveBeenCalled();
+		expect(existsSync(producer)).toBe(true);
+		expect(existsSync(successor)).toBe(true);
+		// The main-store half of `a→b` still landed — replay is per-store.
+		const stored = await loadAccounts();
+		expect(stored?.accounts[0]?.refreshToken).toBe("b");
+	});
+
 	it("adopts a serial rotation committed while the exchange was in flight instead of clobbering it", async () => {
 		// given: the provider exchange stalls long enough for a serial rotation
 		// (another lease holder's commit) to land on the same record.
