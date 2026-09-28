@@ -26,6 +26,7 @@ import {
 	getRetryAllAccountsMaxRetries,
 	getRetryAllAccountsMaxWaitMs,
 	getStreamStallTimeoutMs,
+	getMaxStreamDurationMs,
 	getTokenRefreshSkewMs,
 	resolveAccountIdOverride,
 } from "../lib/config.js";
@@ -40,6 +41,7 @@ const envKeys = [
 	"CODEX_AUTH_EMPTY_RESPONSE_MAX_RETRIES",
 	"CODEX_AUTH_FETCH_TIMEOUT_MS",
 	"CODEX_AUTH_STREAM_STALL_TIMEOUT_MS",
+	"CODEX_AUTH_MAX_STREAM_DURATION_MS",
 	"CODEX_AUTH_TOKEN_REFRESH_SKEW_MS",
 	"CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS",
 ] as const;
@@ -110,6 +112,15 @@ describe("env duration ceiling (MAX_CONFIG_DURATION_MS)", () => {
 
 		process.env.CODEX_AUTH_STREAM_STALL_TIMEOUT_MS = "1e12";
 		expect(getStreamStallTimeoutMs({})).toBe(MAX_CONFIG_DURATION_MS);
+
+		process.env.CODEX_AUTH_MAX_STREAM_DURATION_MS = "1e12";
+		expect(getMaxStreamDurationMs({})).toBe(MAX_CONFIG_DURATION_MS);
+
+		// The floor applies too: a sub-1s env value clamps up to 1s.
+		process.env.CODEX_AUTH_MAX_STREAM_DURATION_MS = "5";
+		expect(getMaxStreamDurationMs({})).toBe(1_000);
+		delete process.env.CODEX_AUTH_MAX_STREAM_DURATION_MS;
+		expect(getMaxStreamDurationMs({})).toBe(300_000);
 
 		process.env.CODEX_AUTH_TOKEN_REFRESH_SKEW_MS = "99999999999";
 		expect(getTokenRefreshSkewMs({})).toBe(MAX_CONFIG_DURATION_MS);
@@ -189,6 +200,7 @@ describe("file-side schema bounds", () => {
 		for (const candidate of [
 			{ fetchTimeoutMs: MAX_CONFIG_DURATION_MS + 1 },
 			{ streamStallTimeoutMs: MAX_CONFIG_DURATION_MS + 1 },
+			{ maxStreamDurationMs: MAX_CONFIG_DURATION_MS + 1 },
 			{ toastDurationMs: MAX_CONFIG_DURATION_MS + 1 },
 			{ tokenRefreshSkewMs: MAX_CONFIG_DURATION_MS + 1 },
 			{ rateLimitToastDebounceMs: MAX_CONFIG_DURATION_MS + 1 },

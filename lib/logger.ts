@@ -61,7 +61,11 @@ const TOKEN_PATTERNS: Array<RegExp | { pattern: RegExp; group: number }> = [
 	},
 ];
 
-const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// The local part is bounded at the RFC 5321 64-octet limit, not just for
+// correctness: an unbounded `+` before `@` backtracks once per remaining
+// character at every start position, so a `@`-free 256KB body made
+// maskString() take ~24s (quadratic). Bounded, the same scan is linear.
+const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
 const SENSITIVE_KEYS = new Set([
 	"access",

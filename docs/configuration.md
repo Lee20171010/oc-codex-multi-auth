@@ -203,6 +203,7 @@ Format: `field | env override | type | default | bounds | meaning`.
 | `emptyResponseRetryDelayMs` | `CODEX_AUTH_EMPTY_RESPONSE_RETRY_DELAY_MS` | number (ms) | `1000` | 0–86400000 | delay between empty-response retries |
 | `fetchTimeoutMs` | `CODEX_AUTH_FETCH_TIMEOUT_MS` | number (ms) | `60000` | 1000–86400000 | upstream fetch timeout |
 | `streamStallTimeoutMs` | `CODEX_AUTH_STREAM_STALL_TIMEOUT_MS` | number (ms) | `45000` | 1000–86400000 | abort after this long without an SSE chunk |
+| `maxStreamDurationMs` | `CODEX_AUTH_MAX_STREAM_DURATION_MS` | number (ms) | `300000` | 1000–86400000 | total post-headers deadline for SSE conversion; a drip inside the stall gap cannot extend it |
 | `tokenRefreshSkewMs` | `CODEX_AUTH_TOKEN_REFRESH_SKEW_MS` | number (ms) | `60000` | 0–86400000 | refresh OAuth tokens this many ms before expiry |
 
 #### Recovery & unsupported models

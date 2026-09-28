@@ -119,6 +119,7 @@ const DEFAULT_CONFIG: PluginConfig = {
 	pidOffsetEnabled: false,
 	fetchTimeoutMs: 60_000,
 	streamStallTimeoutMs: 45_000,
+	maxStreamDurationMs: 300_000,
 };
 
 /**
@@ -1312,6 +1313,21 @@ export function getStreamStallTimeoutMs(pluginConfig: PluginConfig): number {
 		"CODEX_AUTH_STREAM_STALL_TIMEOUT_MS",
 		pluginConfig.streamStallTimeoutMs,
 		45_000,
+		{ min: 1_000 },
+	);
+}
+
+/**
+ * Overall post-headers deadline for a non-streaming SSE conversion. The stall
+ * timeout above bounds only the gap between chunks and is re-armed per read, so
+ * a drip that always lands inside the gap would otherwise hang the conversion
+ * forever. This one is armed once and never extended.
+ */
+export function getMaxStreamDurationMs(pluginConfig: PluginConfig): number {
+	return resolveDurationMsSetting(
+		"CODEX_AUTH_MAX_STREAM_DURATION_MS",
+		pluginConfig.maxStreamDurationMs,
+		300_000,
 		{ min: 1_000 },
 	);
 }

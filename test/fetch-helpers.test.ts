@@ -162,6 +162,43 @@ describe('Fetch Helpers Module', () => {
 				refreshFailureReason: 'storage_contention',
 			});
 		});
+
+		it('treats an http_error at exactly 500 as transient (the >= boundary)', async () => {
+			const auth: Auth = { type: 'oauth', access: 'old', refresh: 'oldr', expires: 0 };
+			const client = { auth: { set: vi.fn() } } as any;
+			coordinatePersistedRefreshMock.mockResolvedValueOnce({
+				type: 'failed',
+				reason: 'http_error',
+				statusCode: 500,
+			} as any);
+
+			// A `> 500` mutant makes the boundary status itself non-retryable,
+			// so a transient upstream blip would look like dead credentials.
+			await expect(refreshAndUpdateToken(auth, client)).rejects.toMatchObject({
+				name: 'CodexAuthError',
+				retryable: true,
+				refreshFailureReason: 'http_error',
+				statusCode: 500,
+			});
+		});
+
+		it('treats an http_error below 500 as permanent, not transient', async () => {
+			for (const statusCode of [499, 401]) {
+				const auth: Auth = { type: 'oauth', access: 'old', refresh: 'oldr', expires: 0 };
+				const client = { auth: { set: vi.fn() } } as any;
+				coordinatePersistedRefreshMock.mockResolvedValueOnce({
+					type: 'failed',
+					reason: 'http_error',
+					statusCode,
+				} as any);
+
+				await expect(refreshAndUpdateToken(auth, client)).rejects.toMatchObject({
+					name: 'CodexAuthError',
+					retryable: false,
+					statusCode,
+				});
+			}
+		});
 	});
 
 	describe('extractRequestUrl', () => {

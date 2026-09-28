@@ -273,3 +273,115 @@ describe("rate-limit backoff with hostile server inputs", () => {
 		expect(() => remapRateLimitBackoffAfterRemoval(9999)).not.toThrow();
 	});
 });
+
+describe("backward clock jumps", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(100_000));
+		clearRateLimitBackoffState();
+	});
+
+	afterEach(() => {
+		clearRateLimitBackoffState();
+		vi.useRealTimers();
+	});
+
+	it("treats a negative elapsed as a new epoch: fresh attempt, no dedup freeze", () => {
+		// beforeEach pins t=100_000. Stamp, move forward and re-stamp at
+		// t=110_000, then jump back to t=105_000: the entry's stamp is 5s in
+		// the future while the amortized prune is inside its skip window — so
+		// only the `>= 0` dedup guard stands between us and the frozen
+		// "duplicate" verdict the negative diff used to produce.
+		getRateLimitBackoff(0, "clock", 1000, NO_JITTER);
+		vi.setSystemTime(new Date(110_000));
+		const second = getRateLimitBackoff(0, "clock", 1000, NO_JITTER);
+		expect(second.attempt).toBe(2);
+
+		vi.setSystemTime(new Date(105_000));
+		const afterJump = getRateLimitBackoff(0, "clock", 1000, NO_JITTER);
+		expect(afterJump.isDuplicate).toBe(false);
+		expect(afterJump.attempt).toBe(1);
+
+		// And the re-stamped entry dedups normally on the new epoch.
+		const dup = getRateLimitBackoff(0, "clock", 1000, NO_JITTER);
+		expect(dup.isDuplicate).toBe(true);
+	});
+
+	it("a backward jump sweeps future-stamped entries that could never age out", () => {
+		getRateLimitBackoff(0, "a", 1000, NO_JITTER); // stamped at t=100000
+		vi.setSystemTime(new Date(0)); // clock jumps behind every stamp
+		getRateLimitBackoff(9, "b", 1000, NO_JITTER); // unrelated key triggers the sweep
+
+		// Restore the clock inside what would be the old dedup window: if "a"
+		// survived the sweep this call reads as a duplicate of a dead epoch.
+		vi.setSystemTime(new Date(100_500));
+		const again = getRateLimitBackoff(0, "a", 1000, NO_JITTER);
+		expect(again.isDuplicate).toBe(false);
+		expect(again.attempt).toBe(1);
+	});
+
+	it("stale entries still age out across the reset window under amortized pruning", () => {
+		getRateLimitBackoff(0, "stale", 1000, NO_JITTER);
+		vi.setSystemTime(new Date(100_000 + 121_000));
+		const next = getRateLimitBackoff(0, "stale", 1000, NO_JITTER);
+		expect(next.attempt).toBe(1);
+		expect(next.isDuplicate).toBe(false);
+	});
+});
+
+describe("delay floor and exponential pins", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(0));
+		clearRateLimitBackoffState();
+	});
+
+	afterEach(() => {
+		clearRateLimitBackoffState();
+		vi.useRealTimers();
+	});
+
+	it("a zero or sub-ms server delay yields delayMs >= 1, never 0", () => {
+		// delayMs flows into markRateLimitedWithReason, where 0 means "the
+		// window elapsed" and deletes existing blocks — a hostile 429 could
+		// clear every block on the account.
+		for (const input of [0, 0.4, 0.9]) {
+			const result = getRateLimitBackoff(5, `floor-${input}`, input, NO_JITTER);
+			expect(result.delayMs).toBeGreaterThanOrEqual(1);
+		}
+	});
+
+	it("the reason-adjusted path floors at 1ms too, not just the base path", () => {
+		// calculateBackoffMs(1, 1, "concurrent") floors(1 × 0.5 × 0.75) → 0
+		// pre-fix — the multiplicative path bypassed the floor in
+		// getRateLimitBackoff entirely.
+		expect(calculateBackoffMs(1, 1, "concurrent", NO_JITTER)).toBeGreaterThanOrEqual(1);
+		expect(calculateBackoffMs(0, 1, "concurrent", NO_JITTER)).toBeGreaterThanOrEqual(1);
+		const viaReason = getRateLimitBackoffWithReason(
+			5,
+			"reason-floor",
+			0.4,
+			"concurrent",
+			NO_JITTER,
+		);
+		expect(viaReason.delayMs).toBeGreaterThanOrEqual(1);
+	});
+
+	it("pins the exponential schedule to absolute delays (2^(attempt-1), not 2^attempt)", () => {
+		expect(calculateBackoffMs(1000, 1, "unknown", NO_JITTER)).toBe(1000);
+		expect(calculateBackoffMs(1000, 2, "unknown", NO_JITTER)).toBe(2000);
+		expect(calculateBackoffMs(1000, 3, "unknown", NO_JITTER)).toBe(4000);
+		expect(calculateBackoffMs(1000, 5, "unknown", NO_JITTER)).toBe(16_000);
+	});
+
+	it("getRateLimitBackoff emits the same absolute schedule across attempts", () => {
+		const a = getRateLimitBackoff(7, "seq", 1000, NO_JITTER);
+		vi.setSystemTime(new Date(2500));
+		const b = getRateLimitBackoff(7, "seq", 1000, NO_JITTER);
+		vi.setSystemTime(new Date(5000));
+		const c = getRateLimitBackoff(7, "seq", 1000, NO_JITTER);
+		expect(a.delayMs).toBe(1000);
+		expect(b.delayMs).toBe(2000);
+		expect(c.delayMs).toBe(4000);
+	});
+});

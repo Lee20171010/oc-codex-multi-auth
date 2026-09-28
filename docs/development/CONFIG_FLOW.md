@@ -49,7 +49,7 @@ Hot-reloaded on the next request (the request path reloads config each call):
   `pidOffsetEnabled`, `beginnerSafeMode`
 - retries/timeouts: `retryProfile`, `retryBudgetOverrides`,
   `retryAllAccounts*`, `emptyResponse*`, `fetchTimeoutMs`,
-  `streamStallTimeoutMs`, `tokenRefreshSkewMs`
+  `streamStallTimeoutMs`, `maxStreamDurationMs`, `tokenRefreshSkewMs`
 - routing: `rotationStrategy`, `modelAccountPools`, `modelAccountPoolModes`,
   `unsupportedCodexPolicy`, `fallbackOnUnsupportedCodexModel`,
   `fallbackToGpt52OnUnsupportedGpt53`, `unsupportedCodexFallbackChain`,

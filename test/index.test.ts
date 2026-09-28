@@ -186,6 +186,7 @@ vi.mock("../lib/config.js", () => ({
 	getModelAccountPoolMode: vi.fn(() => "preferred"),
 	getFetchTimeoutMs: () => 60000,
 	getStreamStallTimeoutMs: () => 45000,
+	getMaxStreamDurationMs: () => 300000,
 	getCodexTuiV2: () => true,
 	getCodexTuiColorProfile: () => "truecolor",
 	getCodexTuiGlyphMode: () => "ascii",
