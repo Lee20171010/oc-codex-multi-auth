@@ -34,6 +34,16 @@ describe("parallel-probe", () => {
 	});
 
 	describe("probeAccountsInParallel", () => {
+		// Probe latency below is simulated with setTimeout; fake timers keep the
+		// races deterministic and off the wall clock.
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
 		it("returns null for empty candidates", async () => {
 			const result = await probeAccountsInParallel([], async () => "success");
 			expect(result).toBeNull();
@@ -69,7 +79,7 @@ describe("parallel-probe", () => {
 			const accounts = [createMockAccount(0), createMockAccount(1), createMockAccount(2)];
 			const candidates = createProbeCandidates(accounts);
 
-			const result = await probeAccountsInParallel(candidates, async (account) => {
+			const pending = probeAccountsInParallel(candidates, async (account) => {
 				if (account.index === 0) {
 					await new Promise((r) => setTimeout(r, 50));
 					throw new Error("first fails");
@@ -81,6 +91,8 @@ describe("parallel-probe", () => {
 				await new Promise((r) => setTimeout(r, 10));
 				return "third-fastest";
 			});
+			await vi.advanceTimersByTimeAsync(60);
+			const result = await pending;
 
 			expect(result?.type).toBe("success");
 			expect(result?.response).toBe("third-fastest");
@@ -135,11 +147,13 @@ describe("parallel-probe", () => {
 				return "late-success";
 			});
 
-			await new Promise((r) => setTimeout(r, 100));
+			// Flush the losing probe's timer so its late success actually fired
+			// and was ignored, rather than never having run.
+			await vi.advanceTimersByTimeAsync(100);
 
 			expect(result?.type).toBe("success");
 			expect(result?.response).toBe("winner");
-			expect(successOrder).toContain(0);
+			expect(successOrder).toEqual([0, 1]);
 		});
 
 		it("ignores late failure after winner is already declared", async () => {
@@ -154,7 +168,9 @@ describe("parallel-probe", () => {
 				throw new Error("late failure");
 			});
 
-			await new Promise((r) => setTimeout(r, 100));
+			// Flush the losing probe's timer so the late failure fires and is
+			// swallowed instead of staying pending past the assertion.
+			await vi.advanceTimersByTimeAsync(100);
 
 			expect(result?.type).toBe("success");
 			expect(result?.response).toBe("winner");

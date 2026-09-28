@@ -7,6 +7,7 @@ Use your ChatGPT Plus/Pro subscription inside OpenCode with OAuth login, Codex/G
 - [Getting Started](getting-started.md)
 - [Tools and CLI](tools-and-cli.md)
 - [Configuration Reference](configuration.md)
+- [Plan Allotments](plan-allotments.md)
 - [Troubleshooting](troubleshooting.md)
 - [FAQ](faq.md)
 - [Privacy & Data Handling](privacy.md)

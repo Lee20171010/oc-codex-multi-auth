@@ -17,7 +17,7 @@ This guide covers the full installation and first-run flow for `oc-codex-multi-a
 |-------------|-------|
 | OpenCode | Install from [opencode.ai](https://opencode.ai) |
 | ChatGPT Plus or Pro | Required for OAuth access and model entitlements |
-| Node.js `>=18` | Needed for local OpenCode runtime and plugin installation |
+| Node.js `>=22.19` | Needed for local OpenCode runtime and plugin installation |
 
 ## Fastest Install Path
 
@@ -53,6 +53,15 @@ To register the plugin without changing an existing `provider.openai` configurat
 
 ```bash
 npx -y oc-codex-multi-auth@latest install --plugin-only
+```
+
+For OpenCode V2 (2.0.16+), register with `--v2`. It is plugin-only: it writes a
+V2 `plugins` entry with automatic quota UI loading, and it refuses an existing
+`opencode.jsonc` or V1 `plugin` entries rather than migrating them. See the
+[README V2 section](../README.md#opencode-v2) for the login flow.
+
+```bash
+npx -y oc-codex-multi-auth@latest --v2
 ```
 
 To refresh an existing installation without reading or writing either OpenCode config file:
