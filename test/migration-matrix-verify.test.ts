@@ -144,31 +144,34 @@ describe("VERIFY: 6b marker collision", () => {
 		// semantics if collisions can occur in the wild.
 		const RealDate = Date;
 		const fixed = new RealDate("2026-01-01T00:00:00.000Z");
+		const seenNames = new Set<string>();
 		vi.useFakeTimers({ now: fixed });
 		try {
 			for (let i = 0; i < 3; i++) {
 				await fs.writeFile(f, JSON.stringify(mkV3([`rt-collision-${i}`])));
 				await saveAccounts(mkV3([`rt-collision-${i}`]));
+				// [FIXED] markers carry a timestamp+nonce so same-ms migrations
+				// cannot collide — every migration produces a distinct name even
+				// though only the newest survives the stale-marker retirement.
+				for (const name of (await fs.readdir(d)).filter((n) =>
+					n.includes(".migrated-to-keychain."),
+				)) {
+					seenNames.add(name);
+				}
 			}
 		} finally {
 			vi.useRealTimers();
 		}
+		expect(seenNames.size).toBe(3);
+		// Marker sync keeps exactly the newest artefact, mirroring the last
+		// saved blob — older markers are retired so stale pools cannot
+		// resurrect through the load fallback.
 		const markers = (await fs.readdir(d)).filter((n) => n.includes(".migrated-to-keychain."));
-		// [FIXED] markers now carry a timestamp+nonce so same-ms migrations
-		// cannot collide — every rollback artefact survives.
-		expect(markers.length).toBe(3);
-		const seenTokens = new Set(
-			await Promise.all(
-				markers.map(async (m) =>
-					(JSON.parse(await fs.readFile(join(d, m), "utf-8")) as {
-						accounts: Array<{ refreshToken: string }>;
-					}).accounts[0]?.refreshToken,
-				),
-			),
-		);
-		expect(seenTokens).toEqual(
-			new Set(["rt-collision-0", "rt-collision-1", "rt-collision-2"]),
-		);
+		expect(markers.length).toBe(1);
+		const surviving = JSON.parse(
+			await fs.readFile(join(d, markers[0]!), "utf-8"),
+		) as { accounts: Array<{ refreshToken: string }> };
+		expect(surviving.accounts[0]?.refreshToken).toBe("rt-collision-2");
 	});
 });
 
