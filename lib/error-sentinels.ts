@@ -11,6 +11,8 @@
  * centralizing these values does not introduce new Windows lock or
  * token-redaction surfaces.
  */
+import { CodexAuthError, CodexTimeoutError } from "./errors.js";
+
 export const DEACTIVATED_WORKSPACE_ERROR_CODE = "deactivated_workspace";
 export const USAGE_REQUEST_TIMEOUT_MESSAGE = "Usage request timed out";
 
@@ -46,16 +48,25 @@ export function isInvalidatedAuthTokenMessage(message: string | undefined): bool
 	return INVALIDATED_AUTH_TOKEN_MESSAGE_PATTERN.test(message);
 }
 
-export function createDeactivatedWorkspaceError(): Error {
-	return new Error(DEACTIVATED_WORKSPACE_ERROR_CODE);
+/**
+ * The sentinel factories return typed errors (`CodexAuthError` /
+ * `CodexTimeoutError`) so `err.code` and `instanceof` classify correctly for
+ * consumers that never see the message. The message strings stay byte-identical
+ * to the sentinels — the `is*Message` matchers and every `err.message`-based
+ * consumer keep working unchanged.
+ */
+export function createDeactivatedWorkspaceError(): CodexAuthError {
+	return new CodexAuthError(DEACTIVATED_WORKSPACE_ERROR_CODE, {
+		retryable: false,
+	});
 }
 
 export function isDeactivatedWorkspaceErrorMessage(message: string | undefined): boolean {
 	return message === DEACTIVATED_WORKSPACE_ERROR_CODE;
 }
 
-export function createUsageRequestTimeoutError(): Error {
-	return new Error(USAGE_REQUEST_TIMEOUT_MESSAGE);
+export function createUsageRequestTimeoutError(): CodexTimeoutError {
+	return new CodexTimeoutError(USAGE_REQUEST_TIMEOUT_MESSAGE);
 }
 
 export function isUsageRequestTimeoutMessage(message: string | undefined): boolean {

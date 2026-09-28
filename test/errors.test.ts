@@ -5,8 +5,10 @@ import {
 	CodexApiError,
 	CodexAuthError,
 	CodexNetworkError,
+	CodexTimeoutError,
 	CodexValidationError,
 	CodexRateLimitError,
+	StorageError,
 } from '../lib/errors.js';
 
 describe('Errors Module', () => {
@@ -259,6 +261,48 @@ describe('Errors Module', () => {
 
 			expect(networkError).toBeInstanceOf(CodexNetworkError);
 			expect(networkError).not.toBeInstanceOf(CodexApiError);
+		});
+	});
+
+	describe('CodexTimeoutError', () => {
+		it('carries TIMEOUT code and is retryable by default', () => {
+			const error = new CodexTimeoutError('deadline elapsed');
+			expect(error.name).toBe('CodexTimeoutError');
+			expect(error.code).toBe(ErrorCode.TIMEOUT);
+			expect(error.retryable).toBe(true);
+			expect(error).toBeInstanceOf(CodexError);
+		});
+
+		it('records timeoutMs and accepts a retryable override', () => {
+			const error = new CodexTimeoutError('hard deadline', {
+				timeoutMs: 5000,
+				retryable: false,
+			});
+			expect(error.timeoutMs).toBe(5000);
+			expect(error.retryable).toBe(false);
+		});
+	});
+
+	describe('StorageError', () => {
+		it('folds the hint into message while retaining the hint property', () => {
+			const error = new StorageError(
+				'Failed to write file',
+				'EACCES',
+				'/path/to/file.json',
+				'Permission denied. Check folder permissions.',
+			);
+			// Surfaces that render only `err.message` still carry the remediation.
+			expect(error.message).toBe(
+				'Failed to write file (hint: Permission denied. Check folder permissions.)',
+			);
+			expect(error.hint).toBe('Permission denied. Check folder permissions.');
+			expect(error.path).toBe('/path/to/file.json');
+			expect(error.code).toBe('EACCES');
+		});
+
+		it('leaves the message untouched when no hint is supplied', () => {
+			const error = new StorageError('Failed to read file', 'ENOENT', '/x', '');
+			expect(error.message).toBe('Failed to read file');
 		});
 	});
 });

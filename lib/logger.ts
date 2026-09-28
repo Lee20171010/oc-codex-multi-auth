@@ -89,6 +89,12 @@ const SENSITIVE_KEYS = new Set([
 	"cookie",
 	"setcookie",
 	"xauthtoken",
+	// Producers (e.g. the refresh queue) emit a `tokenSuffix` correlation
+	// field holding the trailing characters of a credential. A suffix is
+	// still a credential fragment, so it is masked at the sink too —
+	// producers should not rely on reaching the log unfiltered.
+	"tokensuffix",
+	"token_suffix",
 ]);
 
 function maskToken(token: string): string {
@@ -254,16 +260,17 @@ function logToConsole(level: LogLevel, message: string, data?: unknown): void {
 	if (!CONSOLE_LOG_ENABLED) return;
 	const sanitizedMessage = maskString(message);
 	const sanitizedData = data === undefined ? undefined : sanitizeValue(data);
+	// All levels go to stderr. The plugin's stdout is reserved for
+	// machine-readable JSON output, so a `console.log` here would corrupt it
+	// for any caller piping the result.
 	if (sanitizedData !== undefined) {
 		if (level === "warn") console.warn(sanitizedMessage, sanitizedData);
-		else if (level === "error") console.error(sanitizedMessage, sanitizedData);
-		else console.log(sanitizedMessage, sanitizedData);
+		else console.error(sanitizedMessage, sanitizedData);
 		return;
 	}
 
 	if (level === "warn") console.warn(sanitizedMessage);
-	else if (level === "error") console.error(sanitizedMessage);
-	else console.log(sanitizedMessage);
+	else console.error(sanitizedMessage);
 }
 
 if (LOGGING_ENABLED) {
@@ -429,11 +436,11 @@ export function createLogger(scope: string): ScopedLogger {
 		time(label: string): () => number {
 			const key = `${scope}:${label}`;
 			const startTime = performance.now();
-		if (timers.size >= MAX_TIMERS) {
-			const firstKey = timers.keys().next().value;
-			// istanbul ignore next -- defensive: firstKey always exists when size >= MAX_TIMERS
-			if (firstKey) timers.delete(firstKey);
-		}
+			if (timers.size >= MAX_TIMERS) {
+				const firstKey = timers.keys().next().value;
+				// istanbul ignore next -- defensive: firstKey always exists when size >= MAX_TIMERS
+				if (firstKey) timers.delete(firstKey);
+			}
 			timers.set(key, startTime);
 			return () => {
 				const endTime = performance.now();

@@ -8,6 +8,7 @@ import {
 	isUsageRequestTimeoutMessage,
 	USAGE_REQUEST_TIMEOUT_MESSAGE,
 } from "../lib/error-sentinels.js";
+import { CodexAuthError, CodexTimeoutError, ErrorCode } from "../lib/errors.js";
 
 describe("error sentinels", () => {
 	it("creates stable sentinel errors for workspace deactivation and usage timeouts", () => {
@@ -21,6 +22,18 @@ describe("error sentinels", () => {
 		expect(usageTimeoutError.message).toBe(USAGE_REQUEST_TIMEOUT_MESSAGE);
 		expect(isUsageRequestTimeoutMessage(usageTimeoutError.message)).toBe(true);
 		expect(isUsageRequestTimeoutMessage("request timed out")).toBe(false);
+	});
+
+	it("returns typed errors so code/instanceof classification works without the message", () => {
+		const deactivatedWorkspaceError = createDeactivatedWorkspaceError();
+		const usageTimeoutError = createUsageRequestTimeoutError();
+
+		expect(deactivatedWorkspaceError).toBeInstanceOf(CodexAuthError);
+		expect(deactivatedWorkspaceError.code).toBe(ErrorCode.AUTH_ERROR);
+		expect(deactivatedWorkspaceError.retryable).toBe(false);
+
+		expect(usageTimeoutError).toBeInstanceOf(CodexTimeoutError);
+		expect(usageTimeoutError.code).toBe(ErrorCode.TIMEOUT);
 	});
 
 	it("matches the token-invalidated auth error message (issue #171)", () => {

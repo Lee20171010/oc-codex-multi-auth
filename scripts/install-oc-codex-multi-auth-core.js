@@ -1309,8 +1309,10 @@ async function runWarmCommandInner(parsed, options = {}) {
 	} catch (error) {
 		// Typed storage errors (e.g. UNSUPPORTED_SCHEMA_VERSION) carry the
 		// upgrade hint; surface them rather than crashing the CLI.
-		const hint = error && typeof error.hint === "string" ? ` ${error.hint}` : "";
-		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: `${formatErrorForLog(error)}${hint}` };
+		const rendered = formatErrorForLog(error);
+		// StorageError.message already embeds its hint — do not print it twice.
+		const hint = error && typeof error.hint === "string" && !rendered.includes(error.hint) ? ` ${error.hint}` : "";
+		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: `${rendered}${hint}` };
 		printWarmResult(payload, parsed.json);
 		return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
 	}
@@ -1509,8 +1511,10 @@ async function runLimitsCommandInner(parsed, options = {}) {
 	} catch (error) {
 		// Typed storage errors (e.g. UNSUPPORTED_SCHEMA_VERSION) carry the
 		// upgrade hint; surface them rather than crashing the CLI.
-		const hint = error && typeof error.hint === "string" ? ` ${error.hint}` : "";
-		const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: `${formatErrorForLog(error)}${hint}` };
+		const rendered = formatErrorForLog(error);
+		// StorageError.message already embeds its hint — do not print it twice.
+		const hint = error && typeof error.hint === "string" && !rendered.includes(error.hint) ? ` ${error.hint}` : "";
+		const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: `${rendered}${hint}` };
 		printLimitsResult(payload, parsed.json);
 		return { exitCode: 1, action: "limits", storagePath, storageScope: resolution.scope };
 	}
@@ -2249,8 +2253,10 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 				// which is reserved for unknown throws so upstream failure text
 				// never reaches output unredacted.
 				if (loadError && typeof loadError.code === "string") {
-					const hint = typeof loadError.hint === "string" ? ` ${loadError.hint}` : "";
-					error = `${formatErrorForLog(loadError)}${hint}`;
+					const rendered = formatErrorForLog(loadError);
+					// StorageError.message already embeds its hint — do not print it twice.
+					const hint = typeof loadError.hint === "string" && !rendered.includes(loadError.hint) ? ` ${loadError.hint}` : "";
+					error = `${rendered}${hint}`;
 				} else {
 					throw loadError;
 				}

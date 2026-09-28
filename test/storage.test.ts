@@ -1167,9 +1167,13 @@ describe("storage", () => {
           "/path/to/file.json",
           "Permission denied. Check folder permissions."
         );
-        
+
         expect(err.name).toBe("StorageError");
-        expect(err.message).toBe("Failed to write file");
+        // The hint is folded into `message` so unguarded surfaces that render
+        // only `err.message` still carry the remediation text.
+        expect(err.message).toBe(
+          "Failed to write file (hint: Permission denied. Check folder permissions.)"
+        );
         expect(err.code).toBe("EACCES");
         expect(err.path).toBe("/path/to/file.json");
         expect(err.hint).toBe("Permission denied. Check folder permissions.");
