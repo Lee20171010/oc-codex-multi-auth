@@ -24,7 +24,7 @@ Runtime architecture for the `oc-codex-multi-auth` OpenCode plugin, installer, C
 Install / refresh / standalone CLI
   |
   | npx -y oc-codex-multi-auth@latest
-  |   install: default plugin-only | --modern | --full | --legacy
+  |   install: default plugin-only | --modern | --full | --legacy | --v2
   |           [--dry-run] [--no-cache-clear]
   |   update: managed package cache only
   |           [--dry-run]
@@ -52,6 +52,24 @@ index.ts
 lib/tools/index.ts
   |- registers 24 OpenCode tools
   |- each tool delegates to lib/tools/codex-*.ts
+
+OpenCode V2 runtime (2.0.16+)
+  |
+  | default export `setup` on index.ts / tui.ts
+  v
+lib/opencode-v2.ts            (adapter, server side)
+  |- reuses the same createPluginRuntime factory (shared pool + fetch pipeline)
+  |- integration.transform: OAuth methods on `openai` (primary: Add account)
+  |- provider/model transforms: re-point at the aisdk: package identity
+  |- aisdk "sdk" hook: V1 auth.loader fetch + createV2Fetch
+  |- aisdk "language" hook: stateless wrapper (drops previousResponseId/conversation)
+  |- tool.transform: bridges the codex-* registry
+  |- CodexStatusRpc: lib/opencode-v2-rpc.ts + lib/opencode-v2-status.ts
+  |- createStorageScope per location; inert until a credential exists
+  v
+lib/opencode-v2-tui.ts        (terminal side)
+  |- app poller slot, prompt footer status slot, sidebar accounts slot
+  |- codex.quota.details / codex.accounts palette commands, /codex-accounts
 
 Request path
   |
@@ -94,7 +112,8 @@ tui.ts
 | Subsystem | Key files | Responsibility |
 | --- | --- | --- |
 | Installer CLI | `scripts/install-oc-codex-multi-auth.js`, `scripts/install-oc-codex-multi-auth-core.js` | npm bin; config merge; cache cleanup; modern/full/legacy catalog selection; standalone doctor/status/list/limits/dashboard/health/diag/warm; TUI plugin enablement |
-| OpenCode plugin entry | `index.ts` | auth loader, runtime wiring, custom fetch pipeline, account manager lifecycle, `ToolContext`, OpenCode plugin export |
+| OpenCode plugin entry | `index.ts` | auth loader, runtime wiring, custom fetch pipeline, account manager lifecycle, `ToolContext`, OpenCode plugin export (V1 `server`/`plugin` hooks plus the V2 `setup` hook on the default export) |
+| OpenCode V2 adapter | `lib/opencode-v2.ts`, `lib/opencode-v2-provider.ts`, `lib/opencode-v2-rpc.ts`, `lib/opencode-v2-status.ts`, `lib/opencode-v2-tui.ts` | V2 `setup` implementations (2.0.16+): reuses `createPluginRuntime`, `aisdk:` package identity, `sdk`/`language` hooks enforcing `store: false` + `reasoning.encrypted_content` on the wire, `tool.transform` bridge, `CodexStatusRpc`, per-location `createStorageScope`, V2 TUI slots/commands |
 | TUI plugin entry | `tui.ts`, `lib/tui-status.ts`, `lib/tui-quota-cache.ts`, `lib/codex-usage.ts` | prompt quota status, account-aware quota snapshots, usage refresh, details rendering |
 | Quota percentage wording | `lib/quota-display.ts` | `quotaDisplay` free/used rendering shared by the TUI, `codex-limits`, the standalone CLI, and notifications; a leaf module so the status line and the usage surfaces can both depend on it |
 | Pool-wide status line | `lib/quota-overview.ts`, `lib/tui-quota-overview.ts` | `quotaStatus.mode` `overview` / `resets`; the first is a pure formatter (weighted total, ordering, layouts, degradation ladder, reset-credit line), the second gathers and caches every account's usage and merges the request path's live reading of the serving account |
@@ -212,6 +231,75 @@ Tool groups:
 | Backup/secrets | `codex-export`, `codex-import`, `codex-keychain` |
 
 Standalone CLI mirrors a subset without loading the agent: `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm`.
+
+---
+
+## OpenCode V2 Runtime
+
+OpenCode **2.0.16+** speaks a different plugin contract. `index.ts` ends with a
+default export `{ id, server, setup }`: V1 hosts call the plugin-function
+surface as before, while a V2 host calls `setup`, which dynamically imports
+`lib/opencode-v2.ts` and invokes `setupV2(context, createPluginRuntime)`
+(`index.ts:5155-5163`). `tui.ts` delegates its own `setup` the same way to
+`setupV2Tui` in `lib/opencode-v2-tui.ts`.
+
+`createPluginRuntime` is the V1 runtime factory. It is deliberately **not
+exported**: a V1 host invokes every exported function as a plugin, so an
+exported factory would boot a second runtime beside the real one (`index.ts`
+comment above the factory). V2 receives it through `setup` instead, which is
+the entire point of the dual entry — one shared runtime (account pool,
+rotation, OAuth flows, fetch pipeline, tool registry context) behind two
+loader contracts.
+
+Adapter mechanics (`lib/opencode-v2.ts`):
+
+- **Auth methods.** `context.integration.transform` re-registers the V1 OAuth
+  methods on the `openai` integration; index 0 is relabelled
+  `Codex OAuth (Add account — ChatGPT Plus/Pro)` and drives the append-only
+  loopback flow. V2 runs authorization in the service, so the V1 readline
+  login menu cannot run — `/connect` and `opencode auth login` are the entry
+  points, and every OAuth method adds to the pool.
+- **Package identity.** `lib/opencode-v2-provider.ts` is a two-line module
+  re-exporting `createOpenAI` from `@ai-sdk/openai`. Its *separate module
+  identity* is load-bearing: `provider.package = aisdk:<that module>` keeps V2
+  from replacing the transport with its native OpenAI driver before the
+  multi-account fetch hook is installed. Provider and model transforms
+  re-point every `openai` model at it and force `transport: "http"`.
+- **Wire invariants.** The `aisdk` `sdk` hook runs the V1 `auth.loader` and
+  wraps its fetch in `createV2Fetch`, which forces `store: false`, includes
+  `reasoning.encrypted_content`, and sets an `opencode/<version>` user agent.
+  The `language` hook wraps the model in `createV2Language`, which deletes
+  `previousResponseId`/`conversation` and `store: false`s the provider options
+  before the SDK lowers history into server-side references.
+- **Tool bridge.** `context.tool.transform` re-registers every `codex-*` tool
+  from the shared runtime; V2 surfaces show the names normalized (`codex-list`
+  appears as `codex_list`). A tool that calls the legacy `ask` permission
+  callback gets `Legacy tool permission requests are not supported by the V2
+  adapter`.
+- **Status RPC.** `context.rpc.register(CodexStatusRpc, …)` serves
+  `status` from `lib/opencode-v2-status.ts`, formatting quota and account data
+  on the plugin side so a remote TUI never needs credentials. The pool
+  overview refetches on a five-minute cadence gated on last attempt, not last
+  success.
+- **Scope and gate.** Each registered location runs inside its own
+  `createStorageScope()`, so `perProjectAccounts` resolves per directory. The
+  adapter is inert — every transform and hook body early-returns — until
+  `hasOAuth()` finds an enabled pooled account or an active `openai` OAuth
+  connection; `credential.updated`/`credential.switched` events re-check and
+  call `provider.reload()`.
+
+`lib/opencode-v2-tui.ts` is the terminal half: a polling app slot, the
+`prompt.footer.status` slot, a `sidebar.content` account section, the
+`codex.quota.details` and `codex.accounts` palette commands, and the
+`/codex-accounts` slash command. `codexTuiV2` (default enabled;
+`CODEX_TUI_V2`) gates it.
+
+Installer side: `npx -y oc-codex-multi-auth@latest --v2` writes a `plugins`
+entry in `opencode.json` and nothing else — plugin registration plus
+automatic quota UI loading, no catalog merge. It cannot combine with
+`--modern`/`--full`/`--legacy` and refuses an existing `opencode.jsonc` or V1
+`plugin` entries rather than migrating them. The V1 entrypoint remains
+supported for OpenCode 1.18.29+.
 
 ---
 

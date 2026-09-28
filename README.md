@@ -143,6 +143,7 @@ Installer flags:
 | Flag | Effect |
 | --- | --- |
 | (default) / `--plugin-only` | Register the plugin and TUI integration without changing `provider.openai` |
+| `--v2` | Register the plugin for OpenCode V2 (plugin only, includes automatic quota UI loading) |
 | `--modern` | Install compact modern catalog: 10 bases, 53 variants |
 | `--full` | Compact bases plus 53 explicit selector IDs |
 | `--legacy` | Explicit-only catalog for older OpenCode |
@@ -358,8 +359,8 @@ Most of these also run as a **direct CLI** with no agent or model involvement, s
 | Flagged accounts | `oc-codex-multi-auth-flagged-accounts.json`, written beside the active accounts file (per-project path when `perProjectAccounts` is on) |
 | Backups | `~/.opencode/backups/` or `~/.opencode/projects/<project-key>/backups/` |
 | Logs | `~/.opencode/logs/codex-plugin/` |
-| TUI quota cache | OpenCode state dir plus `oc-codex-multi-auth-tui-quota.json`, else `$OPENCODE_STATE_DIR/oc-codex-multi-auth-tui-quota.json` or `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json` |
-| TUI pool quota cache | `oc-codex-multi-auth-tui-quota-overview.json`, in the same directory, written only when `quotaStatus.mode` is `overview` |
+| TUI quota cache | OpenCode state dir plus `oc-codex-multi-auth-tui-quota.json`, else `$OPENCODE_STATE_DIR/oc-codex-multi-auth-tui-quota.json` or `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json`. The request path rewrites it after every response carrying quota headers — each write lands a fresh `fetchedAt` even when the values are unchanged (a 500ms debounce absorbs bursts), which is what keeps the snapshot "fresh" for readers |
+| TUI pool quota cache | `oc-codex-multi-auth-tui-quota-overview.json`, in the same directory, written when `quotaStatus.mode` includes `overview` or `resets`. Each 5-minute poll upserts per-account readings with their own `fetchedAt` timestamps |
 
 Per-project storage is enabled by default. The plugin walks up from the current directory to find a project root, then stores account pools under the project-specific key. If no project root is found, it falls back to global storage.
 
@@ -589,9 +590,10 @@ usage identities even when they belong to the same login.
 }
 ```
 
-Save this configuration in `~/.opencode/openai-codex-auth-config.json`, then
-restart OpenCode. Model matching is case-insensitive and uses the effective
-model after request model normalization.
+Save this configuration in `~/.opencode/openai-codex-auth-config.json`. The
+plugin re-reads that file at the start of every request, so edits apply to the
+next request without a restart. Model matching is case-insensitive and uses
+the effective model after request model normalization.
 
 Use `codex-pool` to manage these mappings with ordinary 1-based account
 numbers. The tool resolves those numbers and writes stable IDs to disk:
@@ -607,9 +609,11 @@ codex-pool action="clear" model="gpt-5.6-sol"
 
 Add `dryRun=true` to preview a mutation. Use `format="json"` for structured
 output; stable IDs remain redacted unless `includeSensitive=true` is also set.
-Restart OpenCode after an applied mutation. The plugin configuration is global
-while account storage is per-project by default, so a reference unresolved in
-the current project is reported but never automatically deleted.
+An applied mutation hot-reloads: the request path re-reads the plugin config
+before each fetch, so routing changes take effect on the next request without
+restarting OpenCode. The plugin configuration is global while account storage
+is per-project by default, so a reference unresolved in the current project is
+reported but never automatically deleted.
 
 Routing behavior:
 

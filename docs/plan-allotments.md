@@ -36,7 +36,7 @@ handling into its render path.
 | `self_serve_business_prolite` | ChatGPT Business Premium | 5x | 125 |
 | `prolite` | ChatGPT Pro Lite | 5x | 100 |
 | `pro` | ChatGPT Pro | 20x | 200 |
-| `pro 5x`, `pro 100`, `pro legacy` | ChatGPT Pro (legacy $100) | 5x | 100 |
+| `pro 5x`, `pro 100`, `pro legacy`, `legacy pro`, `legacy pro 5x`, `pro legacy 5x` | ChatGPT Pro (legacy $100) | 5x | 100 |
 | `enterprise` | ChatGPT Enterprise | — | negotiated |
 
 Three entries are not derivable from their text and are matched explicitly:

@@ -12,6 +12,7 @@ Public overview of how `oc-codex-multi-auth` installs config, handles ChatGPT Pl
 - OpenCode loads `dist/index.js` as the provider plugin entry.
 - The plugin registers **24** `codex-*` tools via **24 per-file factories** under `lib/tools/` (`codex-list`, `codex-switch`, `codex-warm`, and 21 others).
 - OpenCode loads `dist/tui.js` as the TUI plugin for active-session quota status.
+- On OpenCode 2.0.16+, the same default exports carry a V2 `setup` hook (`lib/opencode-v2*.ts`) that reuses the shared V1 runtime; the V1 entrypoint remains for OpenCode 1.18.29+.
 - Request handling stays stateless for the ChatGPT-backed Codex API with `store: false`, `stream: true`, and `reasoning.encrypted_content`. Legacy transformation mode enforces all three unconditionally. Native mode carries them through the shipped config templates and the host payload.
 - GPT-6 Astra/Sol/Luna, the Daybreak cyber tiers and the GPT-5.6 tiers use the responses-lite request path; older models keep the classic shape.
 - Account, config, backup, log, and TUI quota state lives under `~/.opencode` and `~/.config/opencode`.
@@ -34,6 +35,7 @@ Install modes:
 | Flag | Config written |
 | --- | --- |
 | (default) / `--plugin-only` | Register plugin entries; preserve `provider.openai` |
+| `--v2` | V2 `plugins` entry only (OpenCode V2; refuses `opencode.jsonc` or V1 `plugin` entries) |
 | `--modern` | Compact modern: 10 base model families + variant picker (53 variants total) |
 | `--full` | Compact modern bases **plus** explicit legacy selector IDs |
 | `--legacy` | Explicit-only catalog (53 model entries) |
@@ -124,7 +126,36 @@ Full catalog: [tools-and-cli.md](tools-and-cli.md).
 
 `tui.ts` exposes an OpenCode TUI plugin that reads the active account, shared quota cache (`lib/tui-quota-cache.ts`), and direct usage endpoints when available. It shows compact prompt status during sessions and provides a quota details command without polluting the home prompt.
 
-### 7. Storage and sync
+### 7. OpenCode V2 adapter
+
+OpenCode **2.0.16+** loads the same `index.ts` / `tui.ts` entries but calls the
+V2 `setup` hook on their default exports instead of the V1 `server`/`plugin`
+hooks. Both delegate to `lib/opencode-v2.ts` and `lib/opencode-v2-tui.ts`,
+which reuse the shared V1 runtime factory — one account pool, one
+rotation/request pipeline, two loader contracts.
+
+- `lib/opencode-v2.ts` registers OAuth methods on the `openai` integration (the
+  primary shows as **Codex OAuth (Add account — ChatGPT Plus/Pro)**), re-points
+  the provider and its models at a distinct `aisdk:` package identity
+  (`lib/opencode-v2-provider.ts`), and installs `aisdk` `sdk`/`language` hooks
+  that force `store: false`, `reasoning.encrypted_content`, and an
+  `opencode/<version>` user agent on the wire and strip server-side
+  conversation references (`previousResponseId`, `conversation`). It bridges
+  every `codex-*` tool through `tool.transform` and registers `CodexStatusRpc`
+  (`lib/opencode-v2-rpc.ts` + `lib/opencode-v2-status.ts`), which formats quota
+  and account data on the plugin side so remote TUIs need no credentials.
+- `lib/opencode-v2-tui.ts` owns the V2 terminal surface: a polling app slot, a
+  prompt-footer status slot, a sidebar account section, the `codex.quota.details`
+  and `codex.accounts` palette commands, and `/codex-accounts`.
+- Each registered location runs inside its own `createStorageScope()`, so
+  per-project account pools resolve per directory. The adapter stays inert
+  until the pool holds an enabled account or an `openai` OAuth connection
+  exists; `credential.updated`/`credential.switched` events re-check and reload
+  the provider.
+- `--v2` registers it: a `plugins` entry in `opencode.json`, with automatic
+  quota UI loading. The V1 entrypoint remains supported for OpenCode 1.18.29+.
+
+### 8. Storage and sync
 
 The storage layer uses V3 account files with migrations from older formats, atomic writes, keychain opt-in, import/export previews, flagged-account recovery, and per-project path resolution. V1 pools migrate to V3 on load. V2 files are rejected with the typed `UNKNOWN_V2_FORMAT` recovery error, and versions above 3 with `UNSUPPORTED_SCHEMA_VERSION`. Mutations flow through one transaction primitive that combines the process-local mutex with a distinct `proper-lockfile` lease on `<storage>.transaction.lock`. The existing `<storage>.lock` JSON sidecar remains advisory collision diagnostics.
 
@@ -152,7 +183,7 @@ This guarantee is intentionally local-filesystem/same-host. A process that exits
 ## Design Constraints
 
 - OpenCode remains the host runtime and provider loader.
-- Package exports: `"."` (provider plugin) and `"./tui"` (TUI quota plugin).
+- Package exports: `"."` (provider plugin) and `"./tui"` (TUI quota plugin). Both default exports satisfy the V1 plugin contract (OpenCode 1.18.29+) and the V2 `setup` contract (OpenCode 2.0.16+); `--v2` writes the `plugins` registration.
 - The canonical package/plugin name is `oc-codex-multi-auth` (legacy npm name `oc-chatgpt-multi-auth` is migration-only).
 - Node engines: `>=18`.
 - OAuth callback port remains `1455`; callback path is `/auth/callback`.

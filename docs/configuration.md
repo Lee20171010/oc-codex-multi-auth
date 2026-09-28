@@ -312,7 +312,7 @@ The sample above intentionally sets `"retryAllAccountsMaxRetries": 3` as a bound
 | `modelAccountPoolModes` | `{}` | optional per-model `preferred` or `strict` policy; omitted models default to `preferred` |
 | `retryProfile` | `balanced` | retry budget profile for request classes (`conservative`, `balanced`, `aggressive`) |
 | `retryBudgetOverrides` | `{}` | optional per-class budget overrides (`authRefresh`, `network`, `server`, `rateLimitShort`, `rateLimitGlobal`, `emptyResponse`) |
-| `perProjectAccounts` | `true` | each project gets its own account storage |
+| `perProjectAccounts` | `true` | each project gets its own account storage (`~/.opencode/projects/<project-key>/`) instead of sharing the global `~/.opencode/` pool. Toggling it switches which scope is active — the change is picked up live, in-flight requests drain first — but it does **not** migrate or delete the other scope's files: the inactive `oc-codex-multi-auth-accounts.json`, its `oc-codex-multi-auth-flagged-accounts.json`, and its `backups/` stay on disk until you copy or remove them yourself |
 | `credentialSnapshots` | `true` | before a significant change to the account store, copy the previous on-disk version into `backups/` so a clobbered store can be restored to a recent state. Refresh tokens are single-use: a snapshot taken just before a refresh holds the consumed token for the one account that refresh rotated, and the live token for every other account, so restoring costs at most a re-login for that one account rather than the whole pool. Snapshots are taken for account additions and removals, token refreshes, identity changes, label/tag/note/enabled changes, plan changes, schema-version changes, and deletion of the store. Rotation bookkeeping never triggers one on its own: `lastUsed`, `lastSwitchReason`, rate-limit and cooldown state, quota-exhaustion stamps, and the `activeIndex` / `activeIndexByFamily` rotation cursor. A snapshot failure is logged and never fails the write it precedes. The flagged-accounts file beside the store is covered the same way, since it retains quarantined refresh tokens. Snapshots cover the default JSON backend only, not `CODEX_KEYCHAIN=1` |
 | `credentialSnapshotsMaxCount` | `10` | how many credential snapshots to keep. Pruning deletes strictly by the snapshot filename prefix, so other files in `backups/` are never touched. `0` means keep every snapshot; use `credentialSnapshots: false` to turn the feature off |
 | `autoUpdate` | `true` | check npm daily and clear the OpenCode-managed plugin cache on exit when a newer version is available; restart OpenCode to install it |
@@ -401,9 +401,11 @@ Notifications**.
 Use `codex-pool action="set" model="gpt-5.6-sol" accounts=[7,8]` to manage a
 pool with 1-based account numbers while persisting stable IDs. The tool also
 supports `status` (default), `add`, `remove`, `clear`, `set-mode`, `dryRun=true`, and JSON
-output. Restart OpenCode after an applied mutation. Because this config is
-global while account storage is per-project by default, references unavailable
-in the current project are reported but not automatically pruned.
+output. An applied mutation hot-reloads: `modelAccountPools` is a request
+setting, re-read from the config file at the start of every request, so the
+next request routes with the new pools — no restart needed. Because this
+config is global while account storage is per-project by default, references
+unavailable in the current project are reported but not automatically pruned.
 
 Model keys are matched case-insensitively after request model normalization.
 Empty lists and unmapped models use the general account pool. A `preferred`
@@ -882,8 +884,8 @@ opencode run "task" --model=openai/gpt-5.6-sol-high
 | `~/.opencode/backups/codex-credential-snapshot-*.json` | pre-write credential-store snapshots, written beside the accounts file they belong to (so the per-project `backups/` directory when `perProjectAccounts` is on). Mode `0600` in a `0700` directory on POSIX systems, because they hold live refresh tokens; on Windows the POSIX-mode hardening is skipped and the profile directory's ACLs apply |
 | `~/.opencode/logs/codex-plugin/` | request/debug logs when enabled |
 | `~/.opencode/cache/` | instruction/catalog and auto-update caches |
-| `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json` | TUI quota snapshot cache shared by the provider and TUI plugins; `$OPENCODE_STATE_DIR` overrides the directory when set |
-| `~/.local/state/opencode/oc-codex-multi-auth-tui-quota-overview.json` | pool-wide quota snapshot cache, written only when `quotaStatus.mode` includes `overview` or `resets`; same directory resolution as above |
+| `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json` | TUI quota snapshot cache shared by the provider and TUI plugins; `$OPENCODE_STATE_DIR` overrides the directory when set. Rewritten after every response carrying quota headers — each write lands a fresh `fetchedAt` even when the values are unchanged (a 500ms debounce absorbs bursts), which is what keeps the snapshot "fresh" |
+| `~/.local/state/opencode/oc-codex-multi-auth-tui-quota-overview.json` | pool-wide quota snapshot cache, written only when `quotaStatus.mode` includes `overview` or `resets`; each poll upserts per-account readings with their own `fetchedAt` timestamps; same directory resolution as above |
 | `$XDG_DATA_HOME/opencode/storage/…` (Windows: `%APPDATA%/opencode/storage`) | OpenCode session message/part store (session recovery) |
 | `openai-codex-accounts.json` / `openai-codex-flagged-accounts.json` / `openai-codex-blocked-accounts.json` | legacy migration sources only |
 

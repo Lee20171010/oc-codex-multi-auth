@@ -106,6 +106,73 @@ Update your `~/.config/opencode/opencode.json`:
 
 ---
 
+## OpenCode V2
+
+The V2 adapter (OpenCode **2.0.16+**) runs the same account pool, OAuth login,
+and Codex request pipeline through the V2 `setup` contract in
+`lib/opencode-v2*.ts`. The V1 entrypoint remains for OpenCode 1.18.29+.
+
+<details>
+<summary><b><code>--v2</code> refuses to write the config</b></summary>
+
+`npx -y oc-codex-multi-auth@latest --v2` fails rather than migrating:
+
+- **`opencode.jsonc` exists** — the installer never writes a second config file
+  beside it. Edit the JSONC `plugins` list directly.
+- **V1 `plugin` entries are present** — `--v2` will not remove a V1
+  registration. Keep separate V1 and V2 configs, or migrate the entries by
+  hand.
+
+V2 registration lives in the `plugins` array (not V1's `plugin`). A manual
+entry is a package name or an absolute path to a checkout:
+
+```json
+{ "plugins": ["oc-codex-multi-auth"] }
+```
+
+For a working checkout, point `plugins` at its absolute directory path and run
+`npm install` + `npm run build` in it first.
+
+</details>
+
+<details>
+<summary><b>V2: registered but nothing works (no pool, no quota line)</b></summary>
+
+1. **Restart the background service** after installing or rebuilding:
+   ```bash
+   opencode service restart
+   ```
+2. **Add an account through the plugin's method.** Run `opencode auth login`
+   and select **OpenAI** → **Codex OAuth (Add account — ChatGPT Plus/Pro)**.
+   The built-in **ChatGPT Pro/Plus (browser)** method does not run the
+   plugin's add-account flow. The plugin's **Device Code**, **Open URL
+   Manually**, and **Manual URL Paste** methods are available through login or
+   `/connect`; each adds to the pool.
+3. **The adapter stays inert until a credential exists.** It enables only when
+   the pool holds an enabled account or an `openai` OAuth connection is
+   active, then reloads the provider. If a request fails with `Connect a
+   Codex multi-account OAuth method with /connect first`, no usable credential
+   was found — repeat `opencode auth login` from the project directory.
+4. **Inspect the pool** with `/codex-accounts`, the **Codex accounts** command
+   palette entry, or the sidebar section. Quota details live in the
+   **Codex quota details** palette command. Tool names are normalized in V2:
+   `codex-list` appears as `codex_list`, and so on.
+
+</details>
+
+<details>
+<summary><b>V2: refresh reports an ambiguous account</b></summary>
+
+`Codex refresh account is ambiguous; reconnect the account` means one stored
+refresh token maps to several pooled entries and the access-token seat claims
+did not disambiguate it — one OAuth grant can back several seats. Remove the
+duplicate entries (`codex-remove`, shown as `codex_remove` in V2) and run
+`opencode auth login` once per account.
+
+</details>
+
+---
+
 ## Performance & Latency
 
 <details open>
@@ -146,7 +213,7 @@ Update your `~/.config/opencode/opencode.json`:
 <summary><b><code>codex-pool</code> reports that plugin configuration is locked</b></summary>
 
 **Symptoms:**
-- A pool mutation reports `config_locked` with `retryable: true` in JSON output.
+- A pool mutation reports `CODEX_CONFIG_LOCK_CONTENTION` with `retryable: true` in JSON output.
 - Text output says the plugin configuration is locked by another process and no change was made.
 
 **Cause.** Another OpenCode process is updating `~/.opencode/openai-codex-auth-config.json`. Pool dry-runs do not acquire this lock. Every non-dry mutation, including a possible no-op, waits for the bounded retry window and is revalidated under the lock so its result cannot rely on a stale preview.
@@ -822,7 +889,7 @@ ssh -L 1455:localhost:1455 user@remote
 <details open>
 <summary><b>Circuit-open account rotations</b></summary>
 
-The plugin keeps a circuit breaker per account and model family in the runtime request pipeline (`lib/circuit-breaker.ts` keyed via `index.ts:2713-2724`). Three failures inside a 60-second window open the circuit for a 30-second cooldown. While it is open, requests short-circuit to the next account instead of retrying the degraded one, and the log line reads `[circuit-breaker] Circuit open ... Rotating account.` After the cooldown the circuit admits a single probe request. A successful probe closes the circuit, and a failed probe reopens it. No action is required. If one account rotates constantly, run `codex-health` to verify its refresh token and `codex-diag` for the breaker aggregates. (Note that standalone `lib/health.ts` defines an isolated breaker instance for diagnostic summaries, whereas active request routing wires its breaker directly in `index.ts`).
+The plugin keeps a circuit breaker per account and model family in the runtime request pipeline (`lib/circuit-breaker.ts` keyed via `index.ts:3172-3186`). Three failures inside a 60-second window open the circuit for a 30-second cooldown. While it is open, requests short-circuit to the next account instead of retrying the degraded one, and the log line reads `[circuit-breaker] Circuit open ... Rotating account.` After the cooldown the circuit admits a single probe request. A successful probe closes the circuit, and a failed probe reopens it. No action is required. If one account rotates constantly, run `codex-health` to verify its refresh token and `codex-diag` for the breaker aggregates. (Note that standalone `lib/health.ts` defines an isolated breaker instance for diagnostic summaries, whereas active request routing wires its breaker directly in `index.ts`).
 
 </details>
 

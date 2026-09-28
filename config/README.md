@@ -14,12 +14,14 @@ This directory contains the official OpenCode config templates for `oc-codex-mul
 | Installer flag | What gets written |
 |----------------|-------------------|
 | default / `--plugin-only` | Register plugin entries; preserve `provider.openai` |
+| `--v2` | OpenCode V2 `plugins` entry only (plugin registration, no catalog) |
 | `--modern` | Compact modern: 10 base OAuth families + variant picker |
 | `--full` | Modern bases **plus** explicit legacy selector IDs |
 | `--legacy` | Explicit-only catalog (53 preset model entries) |
 
 ```bash
 npx -y oc-codex-multi-auth@latest          # plugin entries only
+npx -y oc-codex-multi-auth@latest --v2     # register for OpenCode V2
 npx -y oc-codex-multi-auth@latest --modern # compact modern catalog
 npx -y oc-codex-multi-auth@latest --full   # modern + explicit IDs
 npx -y oc-codex-multi-auth@latest --legacy # explicit only
@@ -146,6 +148,18 @@ npx -y oc-codex-multi-auth@latest --full
 ## Minimal config (advanced)
 
 A barebones debug template is available at [`minimal-opencode.json`](./minimal-opencode.json). It omits the full preset catalog.
+
+## Plugin account storage
+
+These templates configure `~/.config/opencode/opencode.json`. The plugin's own
+runtime settings live in `~/.opencode/openai-codex-auth-config.json` — see
+[`docs/configuration.md`](../docs/configuration.md). One worth knowing up
+front: `perProjectAccounts` (default `true`) stores accounts per project under
+`~/.opencode/projects/<project-key>/` instead of the global
+`~/.opencode/oc-codex-multi-auth-accounts.json`. Toggling it changes which
+scope the plugin uses; it does **not** migrate or delete the other scope's
+account, flagged-account, or backup files, which stay on disk until you copy
+or remove them yourself.
 
 ## Unsupported-model behavior
 

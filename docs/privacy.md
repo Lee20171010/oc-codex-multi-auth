@@ -127,16 +127,33 @@ API and auth traffic go **directly from your machine** to OpenAI/ChatGPT endpoin
 | Service | Endpoint |
 |---------|----------|
 | OAuth authorize / token | `https://auth.openai.com/...` (e.g. `/oauth/authorize`, `/oauth/token`) |
+| Device-code login | `https://auth.openai.com/api/accounts/deviceauth/usercode` (request code) and `https://auth.openai.com/api/accounts/deviceauth/token` (poll); the browser verification page is `https://auth.openai.com/codex/device` and the OAuth redirect URI is `https://auth.openai.com/deviceauth/callback` |
 | Codex API | `https://chatgpt.com/backend-api/codex/responses` |
 | Usage / quota window | `https://chatgpt.com/backend-api/wham/usage` |
+| Workspace names | `https://chatgpt.com/backend-api/wham/accounts/check` |
 | Reset-credit listing (`codex-reset`) | `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits` |
 | Reset-credit redemption (`codex-reset`) | `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume` |
 
 The `wham` endpoints are the same undocumented endpoints the official Codex
-clients use for the `/usage` screen and reset-credit redemption. They are
-reached only from quota-facing surfaces — `codex-limits`, `codex-reset`, the
-"Check quotas" action in the interactive auth dashboard, and the TUI quota
-status refresh. The model request path does not call them.
+clients use for the `/usage` screen, the workspace list, and reset-credit
+redemption. They are reached only from quota-facing surfaces — `codex-limits`,
+`codex-reset`, the "Check quotas" action in the interactive auth dashboard, the
+TUI quota status refresh, the standalone CLI quota commands (which use
+`/wham/accounts/check` to attach workspace names to account output), and the
+background quota monitor below. The model request path does not call them.
+
+### Background quota polling
+
+The plugin runs a quota monitor that polls `/wham/usage` **by default**: the
+poll is unattended whenever `autoProtectCredits` is on (default `true`) or
+`quotaNotifications.enabled` is on (default `false`), at the configured
+interval (default 30 minutes, minimum 30 seconds). Each poll reads only quota
+windows for the pooled accounts — no prompt content is involved. An exhausted
+reading lets `autoProtectCredits` block that account before the next model
+request instead of waiting for a 429. Set `autoProtectCredits: false` (or
+`CODEX_AUTH_AUTO_PROTECT_CREDITS=0`) and leave notifications off to stop the
+unattended polls; `codex-limits` and the TUI status still hit the endpoint on
+demand.
 
 ### What gets sent on a normal model request
 

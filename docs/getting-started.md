@@ -55,6 +55,15 @@ To register the plugin without changing an existing `provider.openai` configurat
 npx -y oc-codex-multi-auth@latest install --plugin-only
 ```
 
+For OpenCode V2 (2.0.16+), register with `--v2`. It is plugin-only: it writes a
+V2 `plugins` entry with automatic quota UI loading, and it refuses an existing
+`opencode.jsonc` or V1 `plugin` entries rather than migrating them. See the
+[README V2 section](../README.md#opencode-v2) for the login flow.
+
+```bash
+npx -y oc-codex-multi-auth@latest --v2
+```
+
 To refresh an existing installation without reading or writing either OpenCode config file:
 
 ```bash
