@@ -25,6 +25,7 @@ import {
   listKeychainMigrationMarkers,
   migrateOnDiskJsonToKeychainBackup,
   retireKeychainMigrationArtifacts,
+  syncKeychainMigrationMarkers,
 } from "./load-save.js";
 import {
   getStoragePath,
@@ -290,7 +291,9 @@ async function loadFlaggedAccountsUnlocked(
   // A missing flagged file with a `.migrated-to-keychain` marker present is
   // the interrupted-migration signature — the marker holds the last good
   // flagged store and must be read before concluding the pool is empty.
-  for (const markerPath of await listKeychainMigrationMarkers(path)) {
+  // Only the NEWEST marker qualifies: an older one is a staler pool state
+  // that would resurrect consumed tokens if served over a corrupt freshest.
+  for (const markerPath of (await listKeychainMigrationMarkers(path)).slice(0, 1)) {
     try {
       const markerData = JSON.parse(
         (await fs.readFile(markerPath, "utf-8")).replace(/^\uFEFF/, ""),
@@ -425,6 +428,10 @@ async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Pr
     );
     const result = await writeFlaggedToKeychain(projectKey, content);
     if (result.ok) {
+      // Mirror the newest marker to the blob just written — a marker left
+      // at the migration-time pool resurrects the pre-rotation flagged set
+      // on the interrupted-migration fallback or an opt-out restore.
+      await syncKeychainMigrationMarkers(path, content);
       return;
     }
     log.warn("keychain: flagged write failed; falling back to JSON for this save", {
@@ -550,9 +557,19 @@ export async function clearFlaggedAccounts(): Promise<void> {
 
         // `.migrated-to-keychain` markers beside the flagged file hold the
         // same plaintext token set — a clear that leaves them behind has not
-        // actually cleared the credentials.
+        // actually cleared the credentials, and the load fallback reads the
+        // newest marker back into memory. Fail loudly on a stranded artefact
+        // rather than report a successful partial clear.
         if (jsonCleared) {
-          await retireKeychainMigrationArtifacts(path);
+          const stranded = await retireKeychainMigrationArtifacts(path);
+          if (stranded.length > 0) {
+            throw new StorageError(
+              `Flagged account storage was cleared, but ${stranded.length} migration artefact(s) could not be removed and still hold the credential set`,
+              "ARTIFACT_RETIRE_FAILED",
+              stranded[0] ?? path,
+              "Remove the leftover .migrated-to-keychain files beside the flagged accounts file, then retry the clear.",
+            );
+          }
         }
       },
     }),

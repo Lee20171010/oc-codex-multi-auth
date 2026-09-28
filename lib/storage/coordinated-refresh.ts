@@ -1,4 +1,6 @@
-import { readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import { extractAccountUserId } from "../auth/token-utils.js";
 import { queuedRefresh } from "../refresh-queue.js";
@@ -323,12 +325,16 @@ async function propagateRotationToSiblingStore(
 // the consumed token and gets `refresh_token_reused`: a permanently dead
 // account.
 //
-// The journal is a tiny sidecar at `<accounts>.refresh.pending` written AFTER
-// the exchange succeeds and deleted only once the rotation is durably applied
-// to every store that still held the consumed token. It deliberately carries
-// only the rotated refresh token — never an access token — so a recovered
-// record is expired-access (`expiresAt = 0`) and re-derives a workspace-scoped
-// access token on its next exchange.
+// The journal is a tiny sidecar at `<accounts>.refresh.pending.<hash>` —
+// one file per consumed token — written AFTER the exchange succeeds and
+// deleted only once the rotation is durably applied to every store that
+// still held the consumed token. Per-token naming matters: a refresh that
+// lost its lease mid-exchange can still write its journal while the new
+// lease holder journals a different rotation, and a single shared slot
+// would let either writer erase the other's only durable mapping. It
+// deliberately carries only the rotated refresh token — never an access
+// token — so a recovered record is expired-access (`expiresAt = 0`) and
+// re-derives a workspace-scoped access token on its next exchange.
 //
 // Residual: a SIGKILL between the provider response landing and the journal
 // write itself (a sub-millisecond window, versus the whole commit round trip
@@ -347,8 +353,46 @@ interface PendingRotationJournal {
 	readonly recordedAt: number;
 }
 
-function pendingRotationJournalPath(storagePath: string): string {
-	return `${storagePath}.refresh.pending`;
+function pendingRotationJournalPath(
+	storagePath: string,
+	consumedToken: string,
+): string {
+	// The journal filename is keyed by the consumed token, not the store: a
+	// process that lost the refresh lease mid-exchange can still write its
+	// own journal while the new lease holder journals a DIFFERENT rotation —
+	// a single shared slot would let either writer clobber the other's only
+	// durable copy of a consumed→rotated mapping (greptile P1 on PR #280).
+	// Two writers can never collide on the same key either: the second
+	// exchange of an already-consumed token fails upstream before it reaches
+	// the journal write, so the same filename only ever records the same
+	// rotation.
+	const suffix = createHash("sha256")
+		.update(consumedToken)
+		.digest("hex")
+		.slice(0, 16);
+	return `${storagePath}.refresh.pending.${suffix}`;
+}
+
+/**
+ * Every pending-rotation journal beside the store, newest naming first:
+ * `<path>.refresh.pending.<hash>` per-token journals plus the legacy
+ * unsuffixed `<path>.refresh.pending` written by older versions — replay
+ * must cover both so an interrupted upgrade can't strand a rotation.
+ */
+async function listPendingRotationJournals(
+	storagePath: string,
+): Promise<string[]> {
+	const dir = dirname(storagePath);
+	const base = `${basename(storagePath)}.refresh.pending`;
+	let entries: string[];
+	try {
+		entries = await readdir(dir);
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((name) => name === base || name.startsWith(`${base}.`))
+		.map((name) => join(dir, name));
 }
 
 async function writePendingRotationJournal(
@@ -427,42 +471,49 @@ async function readPendingRotationJournal(
  * replacement, then the journal is removed.
  *
  * @returns `true` when no journal remains (absent or fully replayed);
- *   `false` when a journal exists but could not be fully applied. The caller
- *   MUST NOT proceed to a fresh exchange in the `false` case: the journal is
- *   the only durable record of a consumed token's replacement, and the new
- *   exchange's journal write is a single slot — it would overwrite and lose
- *   the earlier rotation while the consumed records it was healing still
- *   point at a dead token.
+ *   `false` when any journal exists but could not be fully applied. The
+ *   caller MUST NOT proceed to a fresh exchange in the `false` case: each
+ *   journal is the only durable record of that consumed token's
+ *   replacement, and a fresh exchange's journal write is keyed by ITS
+ *   consumed token — it cannot carry the predecessor's mapping, so the
+ *   stranded records would keep pointing at a dead token forever.
  */
 async function recoverPendingRotation(storagePath: string): Promise<boolean> {
-	const journalPath = pendingRotationJournalPath(storagePath);
-	const journal = await readPendingRotationJournal(journalPath);
-	if (!journal) return true;
+	let complete = true;
+	for (const journalPath of await listPendingRotationJournals(storagePath)) {
+		const journal = await readPendingRotationJournal(journalPath);
+		if (!journal) continue;
 
-	for (const store of ["accounts", "flagged"] as const) {
-		try {
-			const healed = await applyRotationToStore(
-				store,
-				journal.consumedRefreshToken,
-				journal.memberId,
-				journal.rotatedRefreshToken,
-			);
-			if (healed > 0) {
-				logInfo(
-					`Recovered ${healed} record(s) in the ${store} store from a pending rotation journal`,
+		let replayed = true;
+		for (const store of ["accounts", "flagged"] as const) {
+			try {
+				const healed = await applyRotationToStore(
+					store,
+					journal.consumedRefreshToken,
+					journal.memberId,
+					journal.rotatedRefreshToken,
 				);
+				if (healed > 0) {
+					logInfo(
+						`Recovered ${healed} record(s) in the ${store} store from a pending rotation journal`,
+					);
+				}
+			} catch (error) {
+				logWarn(
+					`Failed to replay the pending rotation journal against the ${store} store; leaving it for the next refresh: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				replayed = false;
 			}
-		} catch (error) {
-			logWarn(
-				`Failed to replay the pending rotation journal against the ${store} store; leaving it for the next refresh: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-			return false;
+		}
+		if (replayed) {
+			await deletePendingRotationJournal(journalPath);
+		} else {
+			complete = false;
 		}
 	}
-	await deletePendingRotationJournal(journalPath);
-	return true;
+	return complete;
 }
 
 /**
@@ -683,11 +734,11 @@ async function coordinateRefresh<T extends StorageShape>(
 		if (!journalClear) {
 			// A pending journal could not be fully replayed (one of the stores
 			// is unreachable). Its rotated token is the only live credential
-			// for the records it is healing — proceeding to our own exchange
-			// would overwrite the single journal slot with a NEW pending entry
-			// and strand that rotation permanently. Surface a retryable
-			// contention error instead: the next lease holder retries the
-			// replay before spending anything.
+			// for the records it is healing — a fresh exchange is keyed by ITS
+			// own consumed token and can never carry that predecessor mapping,
+			// so proceeding would strand the healed records on a dead token
+			// forever. Surface a retryable contention error instead: the next
+			// lease holder retries the replay before spending anything.
 			throw new StorageTransactionContentionError(
 				`${storagePath} (pending rotation journal replay incomplete)`,
 			);
@@ -715,7 +766,7 @@ async function coordinateRefresh<T extends StorageShape>(
 		}
 
 		const rotated = refreshResult.refresh !== exchangedToken;
-		const journalPath = pendingRotationJournalPath(storagePath);
+		const journalPath = pendingRotationJournalPath(storagePath, exchangedToken);
 		if (rotated) {
 			// The provider has now invalidated `exchangedToken`; journal the
 			// replacement BEFORE attempting the durable commit so a SIGKILL in

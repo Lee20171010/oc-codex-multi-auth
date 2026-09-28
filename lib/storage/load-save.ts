@@ -510,9 +510,15 @@ async function loadAccountsInternal(
           return "";
         }
       })();
-      for (const markerPath of markerAnchor
-        ? await listKeychainMigrationMarkers(markerAnchor)
-        : []) {
+      // Only the NEWEST marker is a recovery source: every older marker is
+      // by definition an earlier pool state, and serving it after a corrupt
+      // freshest would resurrect consumed tokens and deleted accounts. A
+      // post-migration keychain save keeps the newest marker mirror-fresh,
+      // so the freshest is also the only one worth trusting.
+      const markers = markerAnchor
+        ? (await listKeychainMigrationMarkers(markerAnchor)).slice(0, 1)
+        : [];
+      for (const markerPath of markers) {
         try {
           const markerData = JSON.parse(
             (await fs.readFile(markerPath, "utf-8")).replace(/^\uFEFF/, ""),
@@ -735,21 +741,23 @@ export async function migrateOnDiskJsonToKeychainBackup(
  * to the (now removed) store — an artefact a future `codex-keychain
  * rollback` or a casual `cat` would otherwise expose.
  *
- * Best-effort and strictly append-only on failure: each unlink failure is
- * warned about individually and never fails the enclosing clear, matching
- * the clear's own "partial failure warns, never throws" contract. Exported
- * for the flagged sibling store, whose clear shares the same contract.
+ * Returns the paths whose unlink failed. Callers surface a non-empty list
+ * as an error: a stranded marker is both a plaintext leak and — via the
+ * interrupted-migration load fallback — a resurrection path for the
+ * credentials the clear was asked to destroy. Exported for the flagged
+ * sibling store, whose clear shares the same contract.
  */
 export async function retireKeychainMigrationArtifacts(
   storagePath: string,
-): Promise<void> {
+): Promise<string[]> {
   const dir = dirname(storagePath);
   const prefix = `${basename(storagePath)}.migrated-to-keychain.`;
+  const stranded: string[] = [];
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
   } catch {
-    return; // Directory unreadable or absent — nothing to retire.
+    return stranded; // Directory unreadable or absent — nothing to retire.
   }
   for (const name of entries) {
     if (!name.startsWith(prefix)) continue;
@@ -758,12 +766,19 @@ export async function retireKeychainMigrationArtifacts(
       await fs.unlink(target);
       await fsyncParentDirectory(target);
     } catch (err) {
+      // A surviving marker is now a load target again (the interrupted-
+      // migration fallback reads the newest one), so an unretireable marker
+      // does not just leak plaintext — it can resurrect the accounts the
+      // caller asked to destroy. The failures are returned, not absorbed,
+      // so the clear can fail loudly instead of reporting success.
+      stranded.push(target);
       log.warn("keychain: failed to retire a migration artefact during clear", {
         target,
         error: String(err),
       });
     }
   }
+  return stranded;
 }
 
 /**
@@ -808,6 +823,62 @@ export async function listKeychainMigrationMarkers(
   return withMtime.map((entry) => entry.full);
 }
 
+/**
+ * Keep the freshest `.migrated-to-keychain` marker in lockstep with the blob
+ * just written to the keychain. The marker doubles as the interrupted-
+ * migration load fallback AND the opt-out restore source: if it stayed at
+ * the migration-time pool while the keychain blob advanced (rotations,
+ * removals), a later keychain outage or opt-out would resurrect consumed
+ * refresh tokens and deleted accounts. Rewriting the newest marker with the
+ * post-save blob keeps the fallback current; the older markers are retired
+ * because a stale marker strictly dominates no-marker as a resurrection
+ * hazard — it holds full plaintext credentials that only look authoritative.
+ *
+ * Called only after a SUCCESSFUL keychain write. A refresh or unlink
+ * failure is warned loudly rather than absorbed silently: the save itself
+ * already landed in the keychain, so a stranded stale marker is an
+ * operator-visible integrity gap, not a save failure.
+ */
+export async function syncKeychainMigrationMarkers(
+  storagePath: string,
+  blob: string,
+): Promise<void> {
+  const markers = await listKeychainMigrationMarkers(storagePath);
+  const newest = markers[0];
+  if (!newest) return;
+  const stale = markers.slice(1);
+  try {
+    await writeFileAtomic(newest, blob);
+  } catch (error) {
+    // A marker that cannot be refreshed is a stale resurrection source —
+    // retire it rather than leave the pre-rotation pool as a load target.
+    log.warn(
+      "keychain: failed to refresh the migration marker; removing it so a stale pool cannot be served",
+      { marker: newest, error: String(error) },
+    );
+    try {
+      await fs.unlink(newest);
+      await fsyncParentDirectory(newest);
+    } catch (unlinkError) {
+      log.error(
+        "keychain: a stale migration marker survived both refresh and removal; opting out of the keychain may restore consumed credentials",
+        { marker: newest, error: String(unlinkError) },
+      );
+    }
+  }
+  for (const marker of stale) {
+    try {
+      await fs.unlink(marker);
+      await fsyncParentDirectory(marker);
+    } catch (error) {
+      log.warn("keychain: failed to retire a stale migration marker", {
+        marker,
+        error: String(error),
+      });
+    }
+  }
+}
+
 async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
   // Refresh our lock (or surface a collision) on every write. This also
   // bumps `lastActive`, which is the stale-detection timestamp read by
@@ -841,6 +912,11 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
     );
     const result = await writeToKeychain(projectKey, blob);
     if (result.ok) {
+      // Keep the newest migration marker mirror-fresh: it is the interrupted-
+      // migration fallback and the opt-out restore source, so letting it lag
+      // behind the keychain blob would resurrect the pre-rotation pool on
+      // either path.
+      await syncKeychainMigrationMarkers(path, blob);
       return;
     }
     log.warn("keychain: write failed; falling back to JSON for this save", {
@@ -995,9 +1071,20 @@ export async function clearAccounts(): Promise<void> {
 
         // The migration markers hold plaintext copies of the same token set.
         // A clear that retires only the canonical file and keychain entry
-        // still leaves full credentials sitting next to the store.
+        // still leaves full credentials sitting next to the store — and the
+        // interrupted-migration load fallback reads the newest marker, so a
+        // stranded marker resurrects the accounts the user just cleared.
+        // Fail loudly rather than report a successful partial clear.
         if (jsonCleared) {
-          await retireKeychainMigrationArtifacts(path);
+          const stranded = await retireKeychainMigrationArtifacts(path);
+          if (stranded.length > 0) {
+            throw new StorageError(
+              `Account storage was cleared, but ${stranded.length} migration artefact(s) could not be removed and still hold the credential set`,
+              "ARTIFACT_RETIRE_FAILED",
+              stranded[0] ?? path,
+              "Remove the leftover .migrated-to-keychain files beside the accounts file, then retry the clear.",
+            );
+          }
         }
       },
     }),
