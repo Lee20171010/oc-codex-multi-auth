@@ -229,6 +229,67 @@ describe("flagged-store load/save/clear with CODEX_KEYCHAIN", () => {
 		expect(backup).toBeDefined();
 	});
 
+	it("keeps the newest flagged marker in sync with every keychain save", async () => {
+		// Same stale-marker resurrection guard as the main store (greptile P1
+		// on PR #280): the fallback marker must mirror the freshest blob or a
+		// later opt-out restores flagged accounts that were already removed.
+		setOptIn(false);
+		await saveFlaggedAccounts(makeFlagged());
+
+		setOptIn(true);
+		const updated = makeFlagged();
+		updated.accounts[0]!.accountId = "acct-flagged-fresh";
+		await saveFlaggedAccounts(updated);
+
+		const entries = await fs.readdir(storageDir);
+		const markers = entries.filter((name) =>
+			name.startsWith("oc-codex-multi-auth-flagged-accounts.json.migrated-to-keychain."),
+		);
+		expect(markers).toHaveLength(1);
+		const mirrored = await fs.readFile(join(storageDir, markers[0]!), "utf-8");
+		expect(mirrored).toContain("acct-flagged-fresh");
+
+		// A later save with no canonical file refreshes the marker again.
+		const third = makeFlagged();
+		third.accounts[0]!.accountId = "acct-flagged-newest";
+		await saveFlaggedAccounts(third);
+		const after = (await fs.readdir(storageDir)).filter((name) =>
+			name.startsWith("oc-codex-multi-auth-flagged-accounts.json.migrated-to-keychain."),
+		);
+		expect(after).toHaveLength(1);
+		expect(await fs.readFile(join(storageDir, after[0]!), "utf-8")).toContain(
+			"acct-flagged-newest",
+		);
+	});
+
+	it("fails loudly when a flagged migration marker cannot be unlinked during clear", async () => {
+		setOptIn(true);
+		await saveFlaggedAccounts(makeFlagged());
+		const strandedName = `${flaggedPath}.migrated-to-keychain.2026-01-01T00-00-00-000Z-aaaaaa`;
+		await fs.writeFile(strandedName, JSON.stringify(makeFlagged()), "utf-8");
+
+		const realUnlink = fs.unlink.bind(fs);
+		const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation(async (target) => {
+			if (String(target).includes(".migrated-to-keychain.")) {
+				throw Object.assign(new Error("simulated EBUSY on marker unlink"), {
+					code: "EBUSY",
+				});
+			}
+			return realUnlink(target as string);
+		});
+		try {
+			await expect(clearFlaggedAccounts()).rejects.toThrow(
+				/migration artefact|leftover/i,
+			);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+		expect(existsSync(strandedName)).toBe(true);
+
+		await clearFlaggedAccounts();
+		expect(existsSync(strandedName)).toBe(false);
+	});
+
 	it("with CODEX_KEYCHAIN=1, flagged load reads the keychain blob first", async () => {
 		setOptIn(true);
 		const flagged = makeFlagged();

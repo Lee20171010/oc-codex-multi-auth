@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -249,6 +249,128 @@ describe("persisted refresh coordination", () => {
 		expect(stored?.accounts[0]?.refreshToken).toBe("refresh-0");
 	});
 
+	it("replays every per-token pending journal and deletes each after its own heal", async () => {
+		// given: two stranded rotations by different writers — the per-token
+		// journal naming is exactly what lets both survive instead of fighting
+		// over one slot (greptile P1 on PR #280: a lease-lost writer used to
+		// overwrite the lease holder's only recovery mapping).
+		await saveAccounts({
+			version: 3,
+			activeIndex: 0,
+			accounts: [
+				{ ...identity, accessToken: "access-0", expiresAt: 0, addedAt: 1, lastUsed: 1 },
+				{
+					...identity,
+					accountId: "workspace-2",
+					refreshToken: "refresh-stranded",
+					accessToken: "access-s",
+					expiresAt: 0,
+					addedAt: 1,
+					lastUsed: 1,
+				},
+			],
+		});
+		const journalA = join(directory, "accounts.json.refresh.pending.aaaa1111");
+		const journalB = join(directory, "accounts.json.refresh.pending.bbbb2222");
+		await writeFile(journalA, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "refresh-0",
+			rotatedRefreshToken: "refresh-0r",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+		await writeFile(journalB, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "refresh-stranded",
+			rotatedRefreshToken: "refresh-stranded-r",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+
+		// when
+		const outcome = await refreshAndPersistAccount({ index: 0, identity });
+
+		// then: both rotations healed their records before anything spent a
+		// token, and both journals are gone — each deleted by its own replay.
+		const stored = await loadAccounts();
+		expect(stored?.accounts[0]?.refreshToken).toBe("refresh-0r");
+		expect(stored?.accounts[1]?.refreshToken).toBe("refresh-stranded-r");
+		expect(existsSync(journalA)).toBe(false);
+		expect(existsSync(journalB)).toBe(false);
+		// The probe picked up the healed record — the exchange spends the
+		// ROTATED token (journals stamp expired-access), never the consumed
+		// refresh-0.
+		expect(queuedRefresh).toHaveBeenCalledTimes(1);
+		expect(vi.mocked(queuedRefresh).mock.calls[0]?.[0]).toBe("refresh-0r");
+		expect(outcome.status).toBe("failed"); // the exchange mock rejects; the healing already landed
+	});
+
+	it("deletes healed journals even when a sibling journal cannot be replayed", async () => {
+		// given: one journal that only heals a main-store record (replay lands
+		// everywhere it needs to) and one whose replay MUST write the flagged
+		// store — where writes are failing. The successful journal must still
+		// be retired; a global 'complete' flag would leak it forever.
+		await saveAccounts({
+			version: 3,
+			activeIndex: 0,
+			accounts: [
+				{ ...identity, accessToken: "access-0", expiresAt: 0, addedAt: 1, lastUsed: 1 },
+			],
+		});
+		const flaggedPath = join(directory, "oc-codex-multi-auth-flagged-accounts.json");
+		await writeFile(flaggedPath, JSON.stringify({
+			version: 1,
+			accounts: [{
+				refreshToken: "consumed-elsewhere",
+				accountUserId: "member-1",
+				flaggedAt: 1,
+				addedAt: 1,
+				lastUsed: 1,
+			}],
+		}), "utf-8");
+		const healed = join(directory, "accounts.json.refresh.pending.aaaa1111");
+		const stuck = join(directory, "accounts.json.refresh.pending.zzzz9999");
+		await writeFile(healed, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "refresh-0",
+			rotatedRefreshToken: "refresh-0r",
+			memberId: "member-1",
+			recordedAt: Date.now() - 1000,
+		}), "utf-8");
+		await writeFile(stuck, JSON.stringify({
+			version: 1,
+			consumedRefreshToken: "consumed-elsewhere",
+			rotatedRefreshToken: "rotated-elsewhere",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		}), "utf-8");
+
+		const realRename = fs.rename.bind(fs);
+		const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (src, dst) => {
+			if (String(dst).includes("flagged-accounts")) {
+				throw Object.assign(new Error("simulated flagged write failure"), {
+					code: "EIO",
+				});
+			}
+			return realRename(src as string, dst as string);
+		});
+		try {
+			// when
+			const outcome = await refreshAndPersistAccount({ index: 0, identity });
+
+			// then: the refresh still refuses (stuck journal survives), but
+			// the journal whose replay DID land is already deleted.
+			expect(outcome.status).toBe("failed");
+			expect(queuedRefresh).not.toHaveBeenCalled();
+			expect(existsSync(stuck)).toBe(true);
+			expect(existsSync(healed)).toBe(false);
+			const stored = await loadAccounts();
+			expect(stored?.accounts[0]?.refreshToken).toBe("refresh-0r");
+		} finally {
+			renameSpy.mockRestore();
+		}
+	});
+
 	it("adopts a serial rotation committed while the exchange was in flight instead of clobbering it", async () => {
 		// given: the provider exchange stalls long enough for a serial rotation
 		// (another lease holder's commit) to land on the same record.
@@ -304,9 +426,14 @@ describe("persisted refresh coordination", () => {
 			result: { refreshToken: "refresh-9" },
 		});
 		// The journal was retargeted at the adopted token so records still
-		// holding refresh-0 get healed with a LIVE credential on replay.
-		const journalPath = join(directory, "accounts.json.refresh.pending");
-		expect(existsSync(journalPath)).toBe(true);
+		// holding refresh-0 get healed with a LIVE credential on replay. It is
+		// keyed by the consumed token (`refresh.pending.<sha256-16>`), so glob
+		// the family rather than a fixed name.
+		const journals = (await readdir(directory)).filter((n) =>
+			n.startsWith("accounts.json.refresh.pending"),
+		);
+		expect(journals).toHaveLength(1);
+		const journalPath = join(directory, journals[0]!);
 		const journal = JSON.parse(await readFile(journalPath, "utf-8"));
 		expect(journal).toMatchObject({
 			consumedRefreshToken: "refresh-0",
