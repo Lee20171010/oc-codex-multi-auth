@@ -3,7 +3,7 @@
  * Extracted from storage.ts to reduce module size.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -96,18 +96,54 @@ export function resolvePath(filePath: string): string {
 		resolved = resolve(filePath);
 	}
 
-	const home = homedir();
-	const cwd = process.cwd();
-	const tmp = tmpdir();
-	if (
-		!isWithinDirectory(home, resolved) &&
-		!isWithinDirectory(cwd, resolved) &&
-		!isWithinDirectory(tmp, resolved)
-	) {
+	// Collapse symlinks for the containment check so a symlink inside an
+	// allowed root cannot smuggle a read or write outside it (e.g. a link
+	// under ~/ pointing at /etc, or a symlinked storage directory). Best
+	// effort: realpath fails when the target does not exist yet — which is
+	// every export-to-new-file case — so walk up to the nearest existing
+	// ancestor and realpath THAT, re-appending the missing tail lexically.
+	// Resolving only the immediate parent is not enough: `~/link -> /etc`
+	// plus a target of `~/link/newdir/out.json` fails both realpath calls
+	// while `~/link` already resolves outside every allowed root. The caller
+	// keeps the lexical path: `canonical` is only the authority on WHERE the
+	// bytes would land, which is what the root check must govern.
+	let canonical = resolved;
+	try {
+		canonical = realpathSync(resolved);
+	} catch {
+		const missingTail: string[] = [basename(resolved)];
+		let ancestor = dirname(resolved);
+		while (true) {
+			try {
+				canonical = join(realpathSync(ancestor), ...missingTail);
+				break;
+			} catch {
+				const parent = dirname(ancestor);
+				if (parent === ancestor) break; // reached fs root — keep lexical
+				missingTail.unshift(basename(ancestor));
+				ancestor = parent;
+			}
+		}
+	}
+
+	// `canonical` is physical when any ancestor resolved, so the boundary
+	// roots must be realpathed too — a symlinked HOME (/home -> /data/home,
+	// macOS /tmp -> /private/tmp) would otherwise compare a real canonical
+	// against a lexical root and reject valid exports. The lexical form is
+	// kept as a second candidate for the case where canonical fell back to
+	// the lexical path because no ancestor existed at all.
+	const boundaries = [homedir(), process.cwd(), tmpdir()].flatMap((root) => {
+		try {
+			return [realpathSync(root), root];
+		} catch {
+			return [root];
+		}
+	});
+	if (!boundaries.some((root) => isWithinDirectory(root, canonical))) {
 		throw new StorageError(
 			`Access denied: path must be within home directory, project directory, or temp directory`,
 			"PATH_ACCESS_DENIED",
-			resolved,
+			canonical,
 			"The requested path is outside the allowed roots (home, project, temp). Pick a path inside one of those directories.",
 		);
 	}

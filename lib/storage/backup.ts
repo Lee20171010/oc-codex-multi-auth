@@ -19,6 +19,7 @@ import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
+  fsyncParentDirectory,
   PRE_IMPORT_BACKUP_WRITE_TIMEOUT_MS,
   renameWithWindowsRetry,
   writeFileWithTimeout,
@@ -92,16 +93,38 @@ export function createTimestampedBackupPath(prefix = "codex-backup"): string {
 export async function writeBackupFileContent(backupPath: string, content: string): Promise<void> {
   const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
   const tempPath = `${backupPath}.${uniqueSuffix}.tmp`;
+  // Set when the timed write abandoned a still-open flush handle: it resolves
+  // once the OS releases the fd, which is the earliest point a Windows
+  // temp-file unlink can succeed. The deferred retry hooks it after the
+  // immediate unlink attempt below and is never awaited, so the caller keeps
+  // its existing timeout bound.
+  let abandonedHandleClosed: Promise<void> | undefined;
 
   try {
-    await fs.mkdir(dirname(backupPath), { recursive: true });
-    await writeFileWithTimeout(tempPath, content, PRE_IMPORT_BACKUP_WRITE_TIMEOUT_MS);
+    // `mode` applies only to directories this call actually creates.
+    await fs.mkdir(dirname(backupPath), { recursive: true, mode: 0o700 });
+    await writeFileWithTimeout(
+      tempPath,
+      content,
+      PRE_IMPORT_BACKUP_WRITE_TIMEOUT_MS,
+      (closed) => {
+        abandonedHandleClosed = closed;
+      },
+    );
     await renameWithWindowsRetry(tempPath, backupPath);
+    await fsyncParentDirectory(backupPath);
   } catch (error) {
     try {
       await fs.unlink(tempPath);
     } catch {
       // Best effort temp-file cleanup.
+    }
+    if (abandonedHandleClosed) {
+      const closed = abandonedHandleClosed;
+      void closed.then(
+        () => fs.unlink(tempPath).catch(() => {}),
+        () => {},
+      );
     }
     throw error;
   }

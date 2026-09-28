@@ -130,7 +130,9 @@ function getRefreshLeaseTargetPath(storagePath: string): string {
  * otherwise blow up with an error that names neither the lock nor the cause.
  */
 async function ensureLockDirectory(lockPath: string): Promise<void> {
-	await mkdir(dirname(lockPath), { recursive: true });
+	// `mode` applies only to directories this call actually creates — an
+	// existing directory is never re-chmodded.
+	await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
 }
 
 async function acquireLease(

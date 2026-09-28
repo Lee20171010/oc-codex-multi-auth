@@ -1,6 +1,6 @@
 import { extractAccountUserId } from "../auth/token-utils.js";
 import { queuedRefresh } from "../refresh-queue.js";
-import { logWarn } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import { StorageTransactionContentionError } from "../errors.js";
 import type { TokenResult } from "../types.js";
 import {
@@ -161,6 +161,13 @@ interface StorageShape {
 	accounts: AccountMetadataV3[];
 }
 
+interface RotationCommitOutcome {
+	/** Undefined when the provider did not rotate the token. */
+	readonly rotatedAt?: number;
+	/** Resolved seat identity used for the same-grant sibling filter. */
+	readonly memberId?: string;
+}
+
 type TransactionRunner<T extends StorageShape> = <R>(
 	handler: (current: T, persist: (storage: T) => Promise<void>) => Promise<R>,
 ) => Promise<R>;
@@ -179,7 +186,7 @@ function commitRotation(
 	exchangedToken: string,
 	refreshResult: Extract<TokenResult, { type: "success" }>,
 	persistAccessToken: boolean,
-): number | undefined {
+): RotationCommitOutcome {
 	const index = findRefreshTarget(current.accounts, identity);
 	const target = current.accounts[index];
 	if (!target) {
@@ -225,7 +232,83 @@ function commitRotation(
 	if (rotatedAt !== undefined) {
 		target.tokenRotatedAt = rotatedAt;
 	}
-	return rotatedAt;
+	return { rotatedAt, memberId: targetMemberId };
+}
+
+/**
+ * Apply a rotation committed to one credential store to the records still
+ * holding the consumed token in the OTHER store.
+ *
+ * The main and flagged files each hold a copy of a quarantined account, and
+ * both copies share one single-use refresh token. Without this step the side
+ * that did not refresh keeps the consumed token; whichever copy refreshes
+ * next then re-exchanges it, gets `refresh_token_reused`, and a healthy
+ * account is flagged until the user logs in again — despite a valid rotated
+ * credential sitting in the pool.
+ *
+ * This runs as a SEPARATE transaction opened only after the primary commit
+ * has fully released its storage lease. Nesting a second
+ * `withStorageTransaction` inside the first is a lock-ordering hazard, so
+ * the sibling write happens sequentially while still inside the refresh
+ * lease — the same lease the sibling store's own coordinated refresh takes.
+ * While it is held no other process can be mid-exchange on this token, so
+ * the propagation is race-free even though it is not atomic with the
+ * primary commit.
+ *
+ * Best effort: a sibling-write failure leaves the sibling store exactly as
+ * stale as it was before propagation existed, so the error is logged and
+ * the committed refresh still reports success.
+ */
+async function propagateRotationToSiblingStore(
+	sibling: "accounts" | "flagged",
+	exchangedToken: string,
+	memberId: string | undefined,
+	newRefreshToken: string,
+	rotatedAt: number,
+): Promise<number> {
+	const applyRotation = (accounts: AccountMetadataV3[]): number => {
+		let updated = 0;
+		for (const account of accounts) {
+			if (account.refreshToken !== exchangedToken) continue;
+			// Same seat guard as the in-file sibling filter in commitRotation:
+			// a record that names a different member never shares this grant.
+			if (
+				memberId &&
+				account.accountUserId?.trim() &&
+				account.accountUserId.trim() !== memberId
+			) {
+				continue;
+			}
+			account.refreshToken = newRefreshToken;
+			// Expired, not inherited: each sibling re-derives its own
+			// workspace-scoped access token on its next exchange. Flagged
+			// records drop `expiresAt` on normalize anyway.
+			account.expiresAt = 0;
+			account.tokenRotatedAt = rotatedAt;
+			updated += 1;
+		}
+		return updated;
+	};
+
+	let updated = 0;
+	if (sibling === "flagged") {
+		await withFlaggedAccountStorageTransaction(async (current, persist) => {
+			updated = applyRotation(current.accounts);
+			if (updated > 0) {
+				await persist(current);
+			}
+		});
+		return updated;
+	}
+
+	await withAccountStorageTransaction(async (current, persist) => {
+		if (!current) return;
+		updated = applyRotation(current.accounts);
+		if (updated > 0) {
+			await persist(current);
+		}
+	});
+	return updated;
 }
 
 /**
@@ -246,11 +329,15 @@ function commitRotation(
  * The refresh lease is keyed on the *accounts* storage path even for flagged
  * storage. That is deliberate: a quarantined record and an active one can share
  * a refresh token, and one lease over both keeps them from exchanging it twice.
+ * The same lease also covers the cross-store propagation in
+ * {@link propagateRotationToSiblingStore}, which is what keeps the store that
+ * did not refresh from re-exchanging the consumed token.
  */
 async function coordinateRefresh<T extends StorageShape>(
 	identity: PersistedRefreshIdentity,
 	runTransaction: TransactionRunner<T>,
 	persistAccessToken: boolean,
+	siblingStore: "accounts" | "flagged",
 ): Promise<CoordinatedRefreshResult> {
 	type Probe =
 		| { kind: "adopt"; result: CoordinatedRefreshSuccess }
@@ -301,12 +388,12 @@ async function coordinateRefresh<T extends StorageShape>(
 		// Contention is the one failure worth retrying: a real I/O error (a full
 		// disk, a read-only volume) will not resolve itself, and swallowing it
 		// behind retries would just delay reporting it.
-		let rotatedAt: number | undefined;
+		let commit: RotationCommitOutcome | undefined;
 		for (let attempt = 1; ; attempt += 1) {
 			try {
-				rotatedAt = await runTransaction<number | undefined>(
+				commit = await runTransaction<RotationCommitOutcome>(
 					async (current, persist) => {
-						const stamp = commitRotation(
+						const outcome = commitRotation(
 							current,
 							identity,
 							exchangedToken,
@@ -314,7 +401,7 @@ async function coordinateRefresh<T extends StorageShape>(
 							persistAccessToken,
 						);
 						await persist(current);
-						return stamp;
+						return outcome;
 					},
 				);
 				break;
@@ -331,7 +418,49 @@ async function coordinateRefresh<T extends StorageShape>(
 			}
 		}
 
-		return { ...refreshResult, adopted: false, rotatedAt };
+		// The sibling store may still carry the consumed token for this same
+		// account; propagate the rotation while the refresh lease is still
+		// held so neither direction can re-exchange it (see the function's
+		// docstring for the locking argument). Skipped when the provider did
+		// not rotate: `exchangedToken` is still the live credential there.
+		if (commit?.rotatedAt !== undefined) {
+			// A failed propagation leaves the sibling holding a consumed
+			// single-use token: its next exchange gets `refresh_token_reused`
+			// and can poison the whole grant family. Retry once while the
+			// refresh lease is still held — propagation is idempotent (it
+			// matches on the consumed token), and the lease means no other
+			// process can interleave a second exchange in between.
+			let propagationError: unknown = null;
+			for (let attempt = 0; attempt < 2; attempt += 1) {
+				try {
+					const propagated = await propagateRotationToSiblingStore(
+						siblingStore,
+						exchangedToken,
+						commit.memberId,
+						refreshResult.refresh,
+						commit.rotatedAt,
+					);
+					if (propagated > 0) {
+						logInfo(
+							`Propagated the rotated refresh token to ${propagated} record(s) in the ${siblingStore} store`,
+						);
+					}
+					propagationError = null;
+					break;
+				} catch (error) {
+					propagationError = error;
+				}
+			}
+			if (propagationError !== null) {
+				logWarn(
+					`Failed to propagate a rotated refresh token to the ${siblingStore} store; the stale sibling record keeps the consumed token until its next refresh: ${
+						propagationError instanceof Error ? propagationError.message : String(propagationError)
+					}`,
+				);
+			}
+		}
+
+		return { ...refreshResult, adopted: false, rotatedAt: commit?.rotatedAt };
 	});
 }
 
@@ -349,11 +478,11 @@ const runFlaggedTransaction: TransactionRunner<FlaggedAccountStorageV1> = (handl
 export async function coordinatePersistedRefresh(
 	identity: PersistedRefreshIdentity,
 ): Promise<CoordinatedRefreshResult> {
-	return coordinateRefresh(identity, runAccountTransaction, true);
+	return coordinateRefresh(identity, runAccountTransaction, true, "flagged");
 }
 
 export async function coordinateFlaggedPersistedRefresh(
 	identity: PersistedRefreshIdentity,
 ): Promise<CoordinatedRefreshResult> {
-	return coordinateRefresh(identity, runFlaggedTransaction, false);
+	return coordinateRefresh(identity, runFlaggedTransaction, false, "accounts");
 }

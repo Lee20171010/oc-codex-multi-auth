@@ -12,6 +12,7 @@ import { basename, dirname } from "node:path";
 import { ACCOUNT_LIMITS } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { MODEL_FAMILIES, type ModelFamily } from "../prompts/codex.js";
+import { writeFileAtomic } from "./atomic-write.js";
 import { createTimestampedBackupPath, writePreImportBackupFile } from "./backup.js";
 import { isCredentialSnapshotFileName } from "./credential-snapshots.js";
 import { StorageError } from "./errors.js";
@@ -85,7 +86,8 @@ async function readAndNormalizeImportFile(filePath: string): Promise<{
 
   let imported: unknown;
   try {
-    imported = JSON.parse(content);
+    // A UTF-8 BOM is legal on disk but not to JSON.parse — strip before parse.
+    imported = JSON.parse(content.replace(/^\uFEFF/, ""));
   } catch {
     throw new Error(`Invalid JSON in import file: ${resolvedPath}`);
   }
@@ -176,10 +178,25 @@ export async function exportAccounts(filePath: string, force = false): Promise<v
     throw new Error("No accounts to export");
   }
 
-  await fs.mkdir(dirname(resolvedPath), { recursive: true });
+  await fs.mkdir(dirname(resolvedPath), { recursive: true, mode: 0o700 });
 
   const content = JSON.stringify(storage, null, 2);
-  await fs.writeFile(resolvedPath, content, { encoding: "utf-8", mode: 0o600 });
+  // Atomic + crash-durable like every other credential write. The temp file
+  // is created 0600 and the rename carries that inode, but re-apply the mode
+  // explicitly: an export often lands on filesystems where a pre-existing or
+  // replaced file's mode would otherwise linger, and this file holds raw
+  // refresh tokens. Windows ignores POSIX mode bits, so skip there.
+  await writeFileAtomic(resolvedPath, content);
+  if (process.platform !== "win32") {
+    try {
+      await fs.chmod(resolvedPath, 0o600);
+    } catch (chmodErr) {
+      log.warn("Failed to chmod export to 0o600", {
+        path: resolvedPath,
+        error: String(chmodErr),
+      });
+    }
+  }
   log.info("Exported accounts", { path: resolvedPath, count: storage.accounts.length });
 }
 

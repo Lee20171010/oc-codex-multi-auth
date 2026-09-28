@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PACKAGE_NAME = "oc-codex-multi-auth";
@@ -147,8 +147,21 @@ function printHelp() {
 		"  --full             Install compact base models plus 53 explicit selector entries\n" +
 		"  --legacy           Force explicit legacy config (53 preset model entries)\n" +
 		"  --dry-run          Show actions without writing\n" +
-		"  --no-cache-clear   Skip clearing OpenCode cache\n"
+		"  --no-cache-clear   Skip clearing OpenCode cache\n" +
+		"  --version          Print the installed version\n"
 	);
+}
+
+/** Print the published package version from package.json beside this script. */
+function readPackageVersion() {
+	try {
+		const parsed = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8"));
+		return typeof parsed?.version === "string" && parsed.version.trim()
+			? parsed.version.trim()
+			: "unknown";
+	} catch {
+		return "unknown";
+	}
 }
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -177,7 +190,14 @@ function formatErrorForLog(error) {
 }
 
 function resolveHomeDirectory(env = process.env) {
-	return env.HOME || env.USERPROFILE || homedir();
+	if (env.HOME || env.USERPROFILE) {
+		return env.HOME || env.USERPROFILE;
+	}
+	const detected = homedir();
+	// A silent passwd-database home is surprising in a CLI whose writes all
+	// live under the home directory: say where files will actually go.
+	log(`Warning: neither HOME nor USERPROFILE is set; using the OS-reported home directory (${detected}).`);
+	return detected;
 }
 
 /** Resolve both JSON and JSONC config locations before changing V2 registration. */
@@ -203,6 +223,19 @@ function buildPaths(homeDir) {
 	};
 }
 
+const INSTALLER_FLAGS = new Set([
+	"--help",
+	"-h",
+	"--version",
+	"--plugin-only",
+	"--v2",
+	"--modern",
+	"--full",
+	"--legacy",
+	"--dry-run",
+	"--no-cache-clear",
+]);
+
 /** Keep V2 plugin-only installation separate from V1 model catalog modes. */
 function parseCliArgs(argv = process.argv.slice(2)) {
 	const args = new Set(argv);
@@ -210,6 +243,16 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 		return {
 			wantsHelp: true,
 		};
+	}
+	if (args.has("--version")) {
+		return {
+			wantsHelp: false,
+			wantsVersion: true,
+		};
+	}
+	const unknown = argv.find((arg) => !INSTALLER_FLAGS.has(arg));
+	if (unknown !== undefined) {
+		throw new Error(`Unknown option for install command: ${unknown}`);
 	}
 
 	const requestedModern = args.has("--modern");
@@ -579,14 +622,169 @@ function formatJson(obj) {
 	return `${JSON.stringify(obj, null, 2)}\n`;
 }
 
-function getStandaloneStoragePath(options, env = process.env) {
-	if (options.configPath) return resolve(options.configPath);
-	return join(resolveHomeDirectory(env), ".opencode", "oc-codex-multi-auth-accounts.json");
+// --- Per-project account pool resolution --------------------------------------
+// Mirror of `lib/storage/paths.ts` so the standalone CLI lands on the same
+// accounts file the plugin writes: per-project pools under
+// `~/.opencode/projects/<project-key>/` when `perProjectAccounts` is on (the
+// shipped default), the global `~/.opencode/<file>` otherwise. The plugin
+// receives the project directory from the OpenCode hook input; the CLI
+// equivalent is the directory the command is run from, overridable through
+// `options.projectDir` for tests.
+
+const STANDALONE_ACCOUNTS_FILE_NAME = "oc-codex-multi-auth-accounts.json";
+const STANDALONE_FLAGGED_ACCOUNTS_FILE_NAME = "oc-codex-multi-auth-flagged-accounts.json";
+const STANDALONE_PLUGIN_CONFIG_FILE_NAME = "openai-codex-auth-config.json";
+const STANDALONE_PROJECT_MARKERS = [
+	".git",
+	"package.json",
+	"Cargo.toml",
+	"go.mod",
+	"pyproject.toml",
+	".opencode",
+];
+const STANDALONE_PROJECT_KEY_HASH_LENGTH = 12;
+
+function normalizeStandaloneProjectPath(projectPath) {
+	const resolvedPath = resolve(projectPath);
+	const normalizedSeparators = resolvedPath.replace(/\\/g, "/");
+	return process.platform === "win32"
+		? normalizedSeparators.toLowerCase()
+		: normalizedSeparators;
 }
 
-async function readStandaloneStorage(path) {
+function sanitizeStandaloneProjectName(projectPath) {
+	const name = basename(projectPath);
+	const sanitized = name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+	return sanitized || "project";
+}
+
+function getStandaloneProjectStorageKey(projectPath) {
+	const normalizedPath = normalizeStandaloneProjectPath(projectPath);
+	const hash = createHash("sha256")
+		.update(normalizedPath)
+		.digest("hex")
+		.slice(0, STANDALONE_PROJECT_KEY_HASH_LENGTH);
+	const projectName = sanitizeStandaloneProjectName(normalizedPath).slice(0, 40);
+	return `${projectName}-${hash}`;
+}
+
+function isStandaloneProjectDirectory(dir) {
+	return STANDALONE_PROJECT_MARKERS.some((marker) => existsSync(join(dir, marker)));
+}
+
+function findStandaloneProjectRoot(startDir) {
+	let current = startDir;
+	const root = dirname(current) === current ? current : null;
+	while (current) {
+		if (isStandaloneProjectDirectory(current)) return current;
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return root && isStandaloneProjectDirectory(root) ? root : null;
+}
+
+/**
+ * Mirror of `getPerProjectAccounts` (lib/config.ts): the env override accepts
+ * only the literal "1" as true (every other set value is false, per
+ * EnvBooleanSchema), then the plugin config file's `perProjectAccounts`, then
+ * the shipped default (on). An unreadable config file falls back to the
+ * default exactly as `loadPluginConfig` does. The plugin reads its config
+ * under `homedir()`; the CLI resolves it under the same home it already uses
+ * for the accounts file so a redirected HOME keeps both consistent.
+ */
+function resolvePerProjectAccounts(env, opencodeDir) {
+	const envValue = env.CODEX_AUTH_PER_PROJECT_ACCOUNTS;
+	if (envValue !== undefined) return envValue === "1";
 	try {
-		const raw = await readFile(path, "utf-8");
+		const parsed = JSON.parse(
+			readFileSync(join(opencodeDir, STANDALONE_PLUGIN_CONFIG_FILE_NAME), "utf-8"),
+		);
+		if (isPlainObject(parsed) && typeof parsed.perProjectAccounts === "boolean") {
+			return parsed.perProjectAccounts;
+		}
+	} catch {
+		// Missing or unreadable plugin config falls through to the default.
+	}
+	return true;
+}
+
+/**
+ * Where the standalone commands read the account pool:
+ *   - `explicit` — a `--config-path` file selection, used verbatim;
+ *   - `project`  — the per-project pool the plugin would write from this
+ *     directory (the file need not exist yet; it is the authoritative pool,
+ *     never a silent substitute for the global file);
+ *   - `global`   — the shared `~/.opencode` file, when per-project storage is
+ *     off or no project root resolves.
+ */
+function resolveStandaloneStorage(options, env = process.env, projectDir) {
+	if (options.configPath) {
+		return { storagePath: resolve(options.configPath), scope: "explicit", projectRoot: null };
+	}
+	// The pool path must equal what the plugin runtime resolves — that is
+	// `join(os.homedir(), ".opencode")` in lib/storage/paths.ts. Deriving it
+	// from `resolveHomeDirectory(env)` (which prefers env.HOME) can diverge
+	// from homedir() under a redirected HOME, e.g. Windows shells, and the
+	// CLI would report a different pool than the plugin actually uses.
+	const homeDir = homedir();
+	// homedir() bypasses resolveHomeDirectory's absolute-path check — on
+	// POSIX it echoes $HOME verbatim, so a relative or empty HOME yields a
+	// relative home and `warm`/`status` would write token-bearing state
+	// under the working directory. Refuse exactly like the write root does.
+	if (!isAbsolute(homeDir)) {
+		throw new Error(
+			`Cannot resolve an absolute home directory (os.homedir()=${JSON.stringify(homeDir)}; HOME=${JSON.stringify(env.HOME)}). ` +
+				"Set HOME to an absolute path; refusing to point account storage at a relative path.",
+		);
+	}
+	const opencodeDir = join(homeDir, ".opencode");
+	if (resolvePerProjectAccounts(env, opencodeDir)) {
+		const startDir = typeof projectDir === "string" && projectDir.trim()
+			? projectDir
+			: process.cwd();
+		const projectRoot = findStandaloneProjectRoot(startDir);
+		if (projectRoot) {
+			return {
+				storagePath: join(
+					opencodeDir,
+					"projects",
+					getStandaloneProjectStorageKey(projectRoot),
+					STANDALONE_ACCOUNTS_FILE_NAME,
+				),
+				scope: "project",
+				projectRoot,
+			};
+		}
+	}
+	return {
+		storagePath: join(opencodeDir, STANDALONE_ACCOUNTS_FILE_NAME),
+		scope: "global",
+		projectRoot: null,
+	};
+}
+
+function getStandaloneStoragePath(options, env = process.env, projectDir) {
+	return resolveStandaloneStorage(options, env, projectDir).storagePath;
+}
+
+/**
+ * The flagged (quarantined) pool is a sibling of the active accounts file,
+ * exactly as `getFlaggedAccountsPath` in lib/storage/flagged.ts places it.
+ * `kind` stays "main" everywhere except the inspection paths that genuinely
+ * want the quarantined pool.
+ */
+function resolveStandaloneStorageFile(storagePath, kind = "main") {
+	if (kind === "flagged") {
+		return join(dirname(storagePath), STANDALONE_FLAGGED_ACCOUNTS_FILE_NAME);
+	}
+	return storagePath;
+}
+
+async function readStandaloneStorage(path, kind = "main") {
+	const filePath = resolveStandaloneStorageFile(path, kind);
+	try {
+		const raw = await readFile(filePath, "utf-8");
 		const parsed = JSON.parse(raw);
 		// Shape validation, not just parse validation: a JSON array, scalar, or
 		// object without an `accounts` array is unreadable by the plugin runtime
@@ -616,6 +814,48 @@ async function readStandaloneStorage(path) {
 		if (error?.code === "ENOENT") return { storage: null, error: null };
 		return { storage: null, error: formatErrorForLog(error) };
 	}
+}
+
+/**
+ * The flagged (quarantined) pool obeys the same keychain routing as the main
+ * store: with `CODEX_KEYCHAIN=1` a successful flagged save moves the pool into
+ * the OS keychain and migrates the sibling file away, so reading only the
+ * file reports zero flagged accounts while quarantined records still exist.
+ * Load through the compiled storage layer — which is keychain-aware and
+ * already pointed at the resolved pool — whenever the operator has not
+ * selected an explicit file (a `--config` selection means the file IS the
+ * pool; keychain stays suspended). Falls back to the direct file probe when
+ * the dist build cannot be loaded, preserving the pre-keychain behavior.
+ */
+async function readStandaloneFlaggedPool(storagePath, parsed, resolution, env = process.env, options = {}) {
+	if (!parsed.configPath && env.CODEX_KEYCHAIN === "1") {
+		const loadRuntime = options.loadFlaggedRuntime
+			?? (() => loadDistModules(["storage.js"], "flagged pool inspection"));
+		let storageMod = null;
+		try {
+			[storageMod] = await loadRuntime();
+		} catch (error) {
+			// The file probe is only the fallback for a MISSING dist build (a
+			// dev checkout that never ran `npm run build`). When dist/storage.js
+			// exists the import should have succeeded — a throw here is a real
+			// runtime failure, and falling through would report zero flagged
+			// accounts while the keychain still holds them.
+			const distProbe = options.distFlaggedRuntimePresent
+				?? (() => existsSync(join(repoRoot, "dist", "lib", "storage.js")));
+			if (distProbe()) {
+				return { storage: null, error: formatErrorForLog(error) };
+			}
+		}
+		if (storageMod && typeof storageMod.loadFlaggedAccounts === "function") {
+			try {
+				pointStorageModuleAtResolution(storageMod, resolution);
+				return { storage: (await storageMod.loadFlaggedAccounts()) ?? null, error: null };
+			} catch (error) {
+				return { storage: null, error: formatErrorForLog(error) };
+			}
+		}
+	}
+	return readStandaloneStorage(storagePath, "flagged");
 }
 
 function normalizeStandaloneIdentityPart(value) {
@@ -939,6 +1179,10 @@ function printStandaloneResult(command, payload, json) {
 		}
 	}
 	if (payload.error) console.log(`Error: ${payload.error}`);
+	if (payload.flagged) {
+		console.log(`Flagged: ${payload.flagged.totalAccounts} account(s) in ${payload.flagged.storagePath}`);
+		if (payload.flagged.error) console.log(`Flagged pool error: ${payload.flagged.error}`);
+	}
 	for (const fix of payload.appliedFixes ?? []) console.log(`Fixed: ${fix}`);
 	for (const error of payload.fixErrors ?? []) console.log(`Repair failed: ${error}`);
 	if (payload.nextAction) console.log(`Next: ${payload.nextAction}`);
@@ -1026,23 +1270,96 @@ async function loadLimitsRuntime(env) {
 	};
 }
 
+/**
+ * Mirror of the doctor-path contract: when the operator names a file, that
+ * file - not the OS keychain - is the pool. `CODEX_KEYCHAIN` stays "0" for the
+ * duration so the compiled storage layer cannot reroute reads/writes to the
+ * global keychain entry behind the selected file's back.
+ */
+function suspendKeychainForSelectedFile(parsed) {
+	if (!parsed.configPath) return null;
+	const previous = process.env.CODEX_KEYCHAIN;
+	process.env.CODEX_KEYCHAIN = "0";
+	return () => {
+		if (previous === undefined) delete process.env.CODEX_KEYCHAIN;
+		else process.env.CODEX_KEYCHAIN = previous;
+	};
+}
+
+const KEYCHAIN_MIGRATION_MARKER = ".migrated-to-keychain.";
+
+/**
+ * `codex-keychain migrate` renames the on-disk pool to
+ * `<path>.migrated-to-keychain.<ts>` as a rollback artifact. A selected file
+ * spelled that way is a frozen backup, not the live pool: reading it misleads
+ * (the authoritative copy is in the keychain) and persisting to it would
+ * quietly rename/overwrite a user's rollback file.
+ */
+function isKeychainMigratedBackupPath(filePath) {
+	return basename(filePath).includes(KEYCHAIN_MIGRATION_MARKER);
+}
+
+function keychainSelectedFileError(parsed) {
+	if (!parsed.configPath) return null;
+	if (!isKeychainMigratedBackupPath(parsed.configPath)) return null;
+	return (
+		`${resolve(parsed.configPath)} is a keychain-migration backup (${KEYCHAIN_MIGRATION_MARKER} suffix); ` +
+		"refusing to treat it as the live account pool. Restore it through the codex-keychain rollback flow instead."
+	);
+}
+
+/**
+ * Aim the compiled storage module at the resolved pool. A project scope goes
+ * through `setStoragePath` so the runtime derives the same per-project file -
+ * and project-scoped keychain keys / global seeding - as the plugin; explicit
+ * and global selections keep the previous direct-path behavior.
+ */
+function pointStorageModuleAtResolution(storageMod, resolution) {
+	if (
+		resolution.scope === "project" &&
+		resolution.projectRoot &&
+		typeof storageMod.setStoragePath === "function"
+	) {
+		storageMod.setStoragePath(resolution.projectRoot);
+		return;
+	}
+	storageMod.setStoragePathDirect(resolution.storagePath);
+}
+
 export async function runWarmCommand(parsed, options = {}) {
+	const restoreKeychain = suspendKeychainForSelectedFile(parsed);
+	try {
+		return await runWarmCommandInner(parsed, options);
+	} finally {
+		restoreKeychain?.();
+	}
+}
+
+async function runWarmCommandInner(parsed, options = {}) {
 	const { env = process.env } = options;
-	const storagePath = getStandaloneStoragePath(parsed, env);
+	const resolution = resolveStandaloneStorage(parsed, env, options.projectDir);
+	const storagePath = resolution.storagePath;
+
+	const selectedFileError = keychainSelectedFileError(parsed);
+	if (selectedFileError) {
+		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: selectedFileError };
+		printWarmResult(payload, parsed.json);
+		return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
+	}
 
 	let runtime;
 	try {
 		runtime = await (options.loadWarmRuntime ?? loadWarmRuntime)(env);
 	} catch (error) {
-		const payload = { command: "warm", storagePath, error: formatErrorForLog(error) };
+		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: formatErrorForLog(error) };
 		printWarmResult(payload, parsed.json);
-		return { exitCode: 1, action: "warm", storagePath };
+		return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
 	}
 
 	const { storageMod, usageMod, warmReqMod, warmMod, recoveryMod } = runtime;
 	// Point dist storage at the resolved accounts file so a refreshed token is
 	// persisted to the SAME file the rest of the toolchain reads.
-	storageMod.setStoragePathDirect(storagePath);
+	pointStorageModuleAtResolution(storageMod, resolution);
 
 	let storage = null;
 	try {
@@ -1051,9 +1368,9 @@ export async function runWarmCommand(parsed, options = {}) {
 		// Typed storage errors (e.g. UNSUPPORTED_SCHEMA_VERSION) carry the
 		// upgrade hint; surface them rather than crashing the CLI.
 		const hint = error && typeof error.hint === "string" ? ` ${error.hint}` : "";
-		const payload = { command: "warm", storagePath, error: `${formatErrorForLog(error)}${hint}` };
+		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: `${formatErrorForLog(error)}${hint}` };
 		printWarmResult(payload, parsed.json);
-		return { exitCode: 1, action: "warm", storagePath };
+		return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
 	}
 	const accounts = Array.isArray(storage?.accounts) ? storage.accounts : [];
 	if (accounts.length === 0) {
@@ -1063,13 +1380,14 @@ export async function runWarmCommand(parsed, options = {}) {
 		// empty pool: a missing file legitimately means no accounts yet.
 		const probe = await readStandaloneStorage(storagePath);
 		if (probe.error) {
-			const payload = { command: "warm", storagePath, error: probe.error };
+			const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: probe.error };
 			printWarmResult(payload, parsed.json);
-			return { exitCode: 1, action: "warm", storagePath };
+			return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
 		}
 		const payload = {
 			command: "warm",
 			storagePath,
+			storageScope: resolution.scope,
 			totalAccounts: 0,
 			warmed: 0,
 			blocksCleared: 0,
@@ -1080,7 +1398,7 @@ export async function runWarmCommand(parsed, options = {}) {
 			nextAction: "Run opencode auth login.",
 		};
 		printWarmResult(payload, parsed.json);
-		return { exitCode: 0, action: "warm", storagePath };
+		return { exitCode: 0, action: "warm", storagePath, storageScope: resolution.scope };
 	}
 
 	// Same adapter as lib/tools/codex-warm.ts createWarmOne: refresh → resolve
@@ -1126,6 +1444,7 @@ export async function runWarmCommand(parsed, options = {}) {
 		blocksCleared,
 		blockClearError,
 		storagePath,
+		storageScope: resolution.scope,
 		totalAccounts: summary.total,
 		warmed: summary.warmedCount,
 		failed: summary.failedCount,
@@ -1138,7 +1457,7 @@ export async function runWarmCommand(parsed, options = {}) {
 		})),
 	};
 	printWarmResult(payload, parsed.json);
-	return { exitCode: summary.failedCount > 0 ? 1 : 0, action: "warm", storagePath };
+	return { exitCode: summary.failedCount > 0 ? 1 : 0, action: "warm", storagePath, storageScope: resolution.scope };
 }
 
 function printWarmResult(payload, json) {
@@ -1178,16 +1497,33 @@ function printWarmResult(payload, json) {
  * `--json` consumers of the previous behavior still find the field.
  */
 export async function runLimitsCommand(parsed, options = {}) {
+	const restoreKeychain = suspendKeychainForSelectedFile(parsed);
+	try {
+		return await runLimitsCommandInner(parsed, options);
+	} finally {
+		restoreKeychain?.();
+	}
+}
+
+async function runLimitsCommandInner(parsed, options = {}) {
 	const { env = process.env } = options;
-	const storagePath = getStandaloneStoragePath(parsed, env);
+	const resolution = resolveStandaloneStorage(parsed, env, options.projectDir);
+	const storagePath = resolution.storagePath;
+
+	const selectedFileError = keychainSelectedFileError(parsed);
+	if (selectedFileError) {
+		const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: selectedFileError };
+		printLimitsResult(payload, parsed.json);
+		return { exitCode: 1, action: "limits", storagePath, storageScope: resolution.scope };
+	}
 
 	let runtime;
 	try {
 		runtime = await (options.loadLimitsRuntime ?? loadLimitsRuntime)(env);
 	} catch (error) {
-		const payload = { command: "limits", storagePath, error: formatErrorForLog(error) };
+		const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: formatErrorForLog(error) };
 		printLimitsResult(payload, parsed.json);
-		return { exitCode: 1, action: "limits", storagePath };
+		return { exitCode: 1, action: "limits", storagePath, storageScope: resolution.scope };
 	}
 
 	const {
@@ -1223,7 +1559,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 		planMod?.formatPlanMultiplier?.(planType) ?? null;
 	// Point dist storage at the resolved accounts file so a refreshed token is
 	// persisted to the SAME file the rest of the toolchain reads.
-	storageMod.setStoragePathDirect(storagePath);
+	pointStorageModuleAtResolution(storageMod, resolution);
 
 	let storage = null;
 	try {
@@ -1232,9 +1568,9 @@ export async function runLimitsCommand(parsed, options = {}) {
 		// Typed storage errors (e.g. UNSUPPORTED_SCHEMA_VERSION) carry the
 		// upgrade hint; surface them rather than crashing the CLI.
 		const hint = error && typeof error.hint === "string" ? ` ${error.hint}` : "";
-		const payload = { command: "limits", storagePath, error: `${formatErrorForLog(error)}${hint}` };
+		const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: `${formatErrorForLog(error)}${hint}` };
 		printLimitsResult(payload, parsed.json);
-		return { exitCode: 1, action: "limits", storagePath };
+		return { exitCode: 1, action: "limits", storagePath, storageScope: resolution.scope };
 	}
 	const accounts = Array.isArray(storage?.accounts) ? storage.accounts : [];
 	if (accounts.length === 0) {
@@ -1242,13 +1578,14 @@ export async function runLimitsCommand(parsed, options = {}) {
 		// `status`/`doctor`; a missing file stays a silent empty pool.
 		const probe = await readStandaloneStorage(storagePath);
 		if (probe.error) {
-			const payload = { command: "limits", storagePath, error: probe.error };
+			const payload = { command: "limits", storagePath, storageScope: resolution.scope, error: probe.error };
 			printLimitsResult(payload, parsed.json);
-			return { exitCode: 1, action: "limits", storagePath };
+			return { exitCode: 1, action: "limits", storagePath, storageScope: resolution.scope };
 		}
 		const payload = {
 			command: "limits",
 			storagePath,
+			storageScope: resolution.scope,
 			totalAccounts: 0,
 			// Same shape as a populated pool: `null` when nothing is readable.
 			pool: null,
@@ -1260,7 +1597,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 			nextAction: "Run opencode auth login.",
 		};
 		printLimitsResult(payload, parsed.json);
-		return { exitCode: 0, action: "limits", storagePath };
+		return { exitCode: 0, action: "limits", storagePath, storageScope: resolution.scope };
 	}
 
 	// Same workspace dedupe the codex-limits tool applies, so two entries for one
@@ -1478,6 +1815,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 	const payload = {
 		command: "limits",
 		storagePath,
+		storageScope: resolution.scope,
 		totalAccounts: accounts.length,
 		shownAccounts: results.length,
 		// Both percentages are stated so a consumer never has to know which way
@@ -1498,7 +1836,7 @@ export async function runLimitsCommand(parsed, options = {}) {
 		accounts: sortLimitsEntries(results, sortKeys, sort),
 	};
 	printLimitsResult(payload, parsed.json, render);
-	return { exitCode: failedCount > 0 ? 1 : 0, action: "limits", storagePath };
+	return { exitCode: failedCount > 0 ? 1 : 0, action: "limits", storagePath, storageScope: resolution.scope };
 }
 
 /** Where OpenCode keeps its state, and so where the plugin's quota caches live. */
@@ -1911,7 +2249,13 @@ function printLimitsResult(payload, json, render) {
 }
 
 export async function runStandaloneCommand(command, argv = [], options = {}) {
-	const parsed = parseStandaloneArgs(argv);
+	let parsed;
+	try {
+		parsed = parseStandaloneArgs(argv);
+	} catch (error) {
+		printHelp();
+		throw error;
+	}
 	if (command === "diag") {
 		command = "doctor";
 		parsed.deep = true;
@@ -1927,13 +2271,19 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		return runLimitsCommand(parsed, options);
 	}
 	const { env = process.env } = options;
-	const storagePath = getStandaloneStoragePath(parsed, env);
+	const resolution = resolveStandaloneStorage(parsed, env, options.projectDir);
+	const storagePath = resolution.storagePath;
 	const repairRequested = command === "doctor" && parsed.fix;
+	// The write-capable paths refuse a `.migrated-to-keychain.<ts>` selection:
+	// it is a rollback artifact, and persisting to it would rename/overwrite
+	// the user's own backup (read-only commands may still inspect it).
+	const selectedFileError = repairRequested ? keychainSelectedFileError(parsed) : null;
 	let storage = null;
 	let error = null;
-	if (parsed.configPath || !repairRequested) {
+	if (!selectedFileError && (parsed.configPath || !repairRequested)) {
 		({ storage, error } = await readStandaloneStorage(storagePath));
 	}
+	error ??= selectedFileError;
 	const appliedFixes = [];
 	const fixErrors = [];
 	if (repairRequested && !error) {
@@ -1945,7 +2295,7 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 			const [storageMod, repairMod, shutdownMod] = await loadDoctorRuntime();
 			// A CLI file selection must not read or replace the global keychain pool.
 			if (parsed.configPath) process.env.CODEX_KEYCHAIN = "0";
-			storageMod.setStoragePathDirect(storagePath);
+			pointStorageModuleAtResolution(storageMod, resolution);
 			shutdownMod.setShutdownOwnsProcess(true);
 			try {
 				storage = await storageMod.loadAccounts();
@@ -1992,9 +2342,19 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 	}
 	const accounts = summarizeStandaloneAccounts(storage, parsed.includeSensitive, parsed.tag);
 	const totalAccounts = Array.isArray(storage?.accounts) ? storage.accounts.length : 0;
+	// `doctor` also inspects the quarantined pool beside the active accounts
+	// file (same sibling placement as `getFlaggedAccountsPath` in the plugin):
+	// an unreadable flagged file is reported rather than silently skipped.
+	const flaggedProbe = command === "doctor"
+		? await readStandaloneFlaggedPool(storagePath, parsed, resolution, env, options)
+		: null;
+	const flaggedAccounts = flaggedProbe?.storage
+		? summarizeStandaloneAccounts(flaggedProbe.storage, parsed.includeSensitive, parsed.tag)
+		: [];
 	const payload = {
 		command,
 		storagePath,
+		storageScope: resolution.scope,
 		totalAccounts,
 		shownAccounts: accounts.length,
 		activeIndex: typeof storage?.activeIndex === "number" ? storage.activeIndex : 0,
@@ -2006,6 +2366,12 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		payload.message = "Standalone dashboard server is not launched by this safe CLI; use status/list/limits/health or OpenCode codex-dashboard.";
 		payload.nextAction = "Run oc-codex-multi-auth status or open OpenCode and call codex-dashboard.";
 	} else if (command === "doctor") {
+		payload.flagged = {
+			storagePath: resolveStandaloneStorageFile(storagePath, "flagged"),
+			totalAccounts: flaggedAccounts.length,
+			accounts: flaggedAccounts,
+			error: flaggedProbe?.error ?? null,
+		};
 		payload.message = error ? "Storage could not be parsed." : totalAccounts > 0 ? "Local diagnostics completed." : "No accounts configured.";
 		payload.deep = parsed.deep;
 		payload.fixApplied = parsed.fix ? appliedFixes.length > 0 : undefined;
@@ -2021,7 +2387,13 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		payload.message = totalAccounts > 0 ? "Account storage loaded." : "No accounts configured.";
 	}
 	printStandaloneResult(command, payload, parsed.json);
-	return { exitCode: error || fixErrors.length > 0 ? 1 : 0, action: command, storagePath };
+	const flaggedError = payload.flagged?.error;
+	return {
+		exitCode: error || fixErrors.length > 0 || flaggedError ? 1 : 0,
+		action: command,
+		storagePath,
+		storageScope: resolution.scope,
+	};
 }
 
 // Top-level keys inside `provider.openai` that the installer owns absolutely.
@@ -2036,16 +2408,36 @@ function isPlainObject(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// Keys a config file may spell but a merge loop must never copy: assigning
+// `result["__proto__"] = value` hits the Object.prototype setter and rewrites
+// the merged object's prototype instead of adding an own property, and
+// `constructor`/`prototype` collide with inherited members the same way. A
+// key that names engine internals is not a usable provider/model id anyway.
+const UNSAFE_MERGE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isUnsafeMergeKey(key) {
+	return UNSAFE_MERGE_KEYS.has(key);
+}
+
 // Deep-merge `provider.openai` preserving unknown user keys while letting the
 // installer overwrite the managed shape it ships. This replaces the earlier
 // wholesale overwrite which clobbered custom user-added keys (see audit top-20
-// #6).
+// #6). Managed keys the template replaces - and stale managed model ids the
+// catalog prunes - are reported through `options.onNotice` so the override is
+// never silent (key names only; values may carry secrets).
 function mergeOpenaiProvider(existingOpenai, templateOpenai, options = {}) {
 	const existingSafe = isPlainObject(existingOpenai) ? existingOpenai : {};
 	const templateSafe = isPlainObject(templateOpenai) ? templateOpenai : {};
 	const modelKeysToRemove = options.modelKeysToRemove instanceof Set
 		? options.modelKeysToRemove
 		: new Set();
+	const onNotice = typeof options.onNotice === "function" ? options.onNotice : null;
+
+	if (existingOpenai !== undefined && !isPlainObject(existingOpenai)) {
+		onNotice?.(
+			"Warning: existing provider.openai is not a JSON object; it will be replaced by the template catalog.",
+		);
+	}
 
 	const result = {};
 
@@ -2053,12 +2445,14 @@ function mergeOpenaiProvider(existingOpenai, templateOpenai, options = {}) {
 	for (const [key, value] of Object.entries(existingSafe)) {
 		if (MANAGED_OPENAI_KEYS.has(key)) continue;
 		if (key === "models") continue; // handled explicitly below
+		if (isUnsafeMergeKey(key)) continue;
 		result[key] = value;
 	}
 
 	// 2. Apply template-managed keys. Installer is source of truth for these.
 	for (const [key, value] of Object.entries(templateSafe)) {
 		if (key === "models") continue; // handled explicitly below
+		if (isUnsafeMergeKey(key)) continue;
 		result[key] = value;
 	}
 
@@ -2066,11 +2460,33 @@ function mergeOpenaiProvider(existingOpenai, templateOpenai, options = {}) {
 	const existingModels = isPlainObject(existingSafe.models) ? existingSafe.models : {};
 	const templateModels = isPlainObject(templateSafe.models) ? templateSafe.models : {};
 	const prunedExistingModels = Object.fromEntries(
-		Object.entries(existingModels).filter(([key]) => !modelKeysToRemove.has(key)),
+		Object.entries(existingModels).filter(
+			([key]) => !modelKeysToRemove.has(key) && !isUnsafeMergeKey(key),
+		),
 	);
-	const mergedModels = { ...prunedExistingModels, ...templateModels };
+	const safeTemplateModels = Object.fromEntries(
+		Object.entries(templateModels).filter(([key]) => !isUnsafeMergeKey(key)),
+	);
+	const mergedModels = { ...prunedExistingModels, ...safeTemplateModels };
 	if (Object.keys(mergedModels).length > 0) {
 		result.models = mergedModels;
+	}
+
+	if (onNotice) {
+		const replacedManagedKeys = Object.keys(existingSafe).filter((key) => MANAGED_OPENAI_KEYS.has(key));
+		if (replacedManagedKeys.length > 0) {
+			onNotice(
+				`Warning: provider.openai field(s) ${replacedManagedKeys.join(", ")} are managed by the installer; ` +
+					"the existing values will be replaced by the template catalog.",
+			);
+		}
+		const removedModelKeys = Object.keys(existingModels).filter((key) => modelKeysToRemove.has(key));
+		if (removedModelKeys.length > 0) {
+			onNotice(
+				`Warning: removing stale managed model entr${removedModelKeys.length === 1 ? "y" : "ies"}: ` +
+					`${removedModelKeys.join(", ")}.`,
+			);
+		}
 	}
 
 	return result;
@@ -2173,9 +2589,179 @@ function getTemplateModelKeys(template) {
 	return new Set(Object.keys(template.provider?.openai?.models ?? {}));
 }
 
+/**
+ * Strip `//` and `/* ... *\/` comments while preserving positions: every
+ * removed character becomes a space (newlines kept) so JSON.parse error
+ * positions still point at the user's text. A char-by-char state machine, not
+ * a regex - only text outside string literals is touched, and escapes inside
+ * strings are honored so a `\"` never ends a string early.
+ */
+function stripJsonComments(source) {
+	const length = source.length;
+	let result = "";
+	let index = 0;
+	let inString = false;
+	let inLineComment = false;
+	let inBlockComment = false;
+
+	while (index < length) {
+		const char = source[index];
+		const next = source[index + 1];
+
+		if (inLineComment) {
+			if (char === "\n" || char === "\r") {
+				inLineComment = false;
+				result += char;
+			} else {
+				result += " ";
+			}
+			index += 1;
+			continue;
+		}
+
+		if (inBlockComment) {
+			if (char === "*" && next === "/") {
+				inBlockComment = false;
+				result += "  ";
+				index += 2;
+				continue;
+			}
+			result += char === "\n" || char === "\r" ? char : " ";
+			index += 1;
+			continue;
+		}
+
+		if (inString) {
+			result += char;
+			if (char === "\\" && index + 1 < length) {
+				result += next;
+				index += 2;
+				continue;
+			}
+			if (char === '"') inString = false;
+			index += 1;
+			continue;
+		}
+
+		if (char === '"') {
+			inString = true;
+			result += char;
+			index += 1;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			inLineComment = true;
+			result += "  ";
+			index += 2;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			inBlockComment = true;
+			result += "  ";
+			index += 2;
+			continue;
+		}
+
+		result += char;
+		index += 1;
+	}
+
+	return result;
+}
+
+/**
+ * Remove trailing commas (`[1,]` / `{"a":1,}`) outside string literals,
+ * replacing each dropped comma with a space so positions are preserved.
+ * Run after stripJsonComments: a comma is only "trailing" when the next
+ * non-whitespace character is `}` or `]`, and comments have already been
+ * blanked so a `// x\n, }` sequence reads correctly.
+ */
+function stripJsonTrailingCommas(source) {
+	const length = source.length;
+	let result = "";
+	let index = 0;
+	let inString = false;
+
+	while (index < length) {
+		const char = source[index];
+
+		if (inString) {
+			result += char;
+			if (char === "\\" && index + 1 < length) {
+				result += source[index + 1];
+				index += 2;
+				continue;
+			}
+			if (char === '"') inString = false;
+			index += 1;
+			continue;
+		}
+
+		if (char === '"') {
+			inString = true;
+			result += char;
+			index += 1;
+			continue;
+		}
+
+		if (char === ",") {
+			let lookahead = index + 1;
+			while (lookahead < length && /\s/.test(source[lookahead])) lookahead += 1;
+			if (lookahead < length && (source[lookahead] === "}" || source[lookahead] === "]")) {
+				result += " ";
+				index += 1;
+				continue;
+			}
+		}
+
+		result += char;
+		index += 1;
+	}
+
+	return result;
+}
+
+/**
+ * Conservative JSONC parse: line/block comments and trailing commas are
+ * stripped only where string literals cannot see them. OpenCode's own config
+ * files are JSONC in the wild, so a config carrying comments must merge like
+ * a plain-JSON one instead of falling into the unparseable path.
+ */
+function parseJsonc(content) {
+	return JSON.parse(stripJsonTrailingCommas(stripJsonComments(content)));
+}
+
 async function readJson(filePath) {
 	const content = await readFile(filePath, "utf-8");
-	return JSON.parse(content.charCodeAt(0) === 0xfeff ? content.slice(1) : content);
+	return parseJsonc(content.charCodeAt(0) === 0xfeff ? content.slice(1) : content);
+}
+
+/**
+ * Detect `//` or `/* ... *\/` comments in JSONC source while ignoring `/`
+ * sequences inside string literals (URLs make a naive indexOf check
+ * false-positive on virtually every config). Used to warn before a rewrite
+ * that would silently drop the operator's notes.
+ */
+function jsoncContainsComments(text) {
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < text.length; i += 1) {
+		const ch = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === "\"") inString = false;
+			continue;
+		}
+		if (ch === "\"") {
+			inString = true;
+			continue;
+		}
+		if (ch === "/" && (text[i + 1] === "/" || text[i + 1] === "*")) {
+			return true;
+		}
+	}
+	return false;
 }
 
 async function renameWithWindowsRetry(sourcePath, destinationPath) {
@@ -2229,6 +2815,17 @@ async function writeFileAtomic(filePath, content) {
 	try {
 		await mkdir(dirname(filePath), { recursive: true });
 		await writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
+		try {
+			// rename() unlinks whatever sits at the destination and puts the temp
+			// file there: a symlink is not followed, it is replaced by a regular
+			// file. That silently changes the layout the user configured, so the
+			// replacement is announced while the write itself still proceeds.
+			if (lstatSync(filePath).isSymbolicLink()) {
+				log(`Warning: ${filePath} is a symbolic link; it will be replaced by a regular file.`);
+			}
+		} catch (statError) {
+			if (statError?.code !== "ENOENT") throw statError;
+		}
 		await renameWithWindowsRetry(tempPath, filePath);
 	} catch (error) {
 		await rm(tempPath, { force: true }).catch(() => {});
@@ -2410,7 +3007,13 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	const { env = process.env } = options;
 	const paths = buildPaths(resolveHomeDirectory(env));
 	if (split.kind === "update") {
-		const parsedUpdate = parseUpdateArgs(split.argv);
+		let parsedUpdate;
+		try {
+			parsedUpdate = parseUpdateArgs(split.argv);
+		} catch (error) {
+			printHelp();
+			throw error;
+		}
 		if (parsedUpdate.wantsHelp) {
 			printHelp();
 			return { exitCode: 0, action: "help" };
@@ -2423,10 +3026,23 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 			dryRun: Boolean(parsedUpdate.dryRun),
 		};
 	}
-	const parsed = parseCliArgs(split.argv);
+	let parsed;
+	try {
+		parsed = parseCliArgs(split.argv);
+	} catch (error) {
+		// An unrecognized/conflicting flag gets the usage text on the way out;
+		// the thrown error still fails the process.
+		printHelp();
+		throw error;
+	}
 	if (parsed.wantsHelp) {
 		printHelp();
 		return { exitCode: 0, action: "help" };
+	}
+	if (parsed.wantsVersion) {
+		const version = readPackageVersion();
+		log(version);
+		return { exitCode: 0, action: "version", version };
 	}
 
 	const { configMode, dryRun, skipCacheClear, pluginOnly } = parsed;
@@ -2450,6 +3066,19 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		}
 		log(dryRun ? "V2 registration dry run complete." : "V2 plugin registered. Restart the OpenCode service to load it.");
 		return { exitCode: 0, action: "install", dryRun: Boolean(dryRun), configMode: "v2" };
+	}
+	// On the V1 path OpenCode reads opencode.jsonc as a sibling of
+	// opencode.json. When the .json file is absent but the .jsonc twin exists,
+	// that file is the user's effective config: writing a fresh opencode.json
+	// beside it would silently shadow (or conflict with) what OpenCode actually
+	// loads, so merge into the .jsonc and announce the retarget. The --v2
+	// branch above keeps preferring an existing .jsonc by refusing to create a
+	// second config next to it.
+	const v1ConfigPath = !existsSync(paths.configPath) && existsSync(paths.jsoncConfigPath)
+		? paths.jsoncConfigPath
+		: paths.configPath;
+	if (v1ConfigPath !== paths.configPath) {
+		log(`Using existing ${v1ConfigPath}: opencode.json is absent and the .jsonc sibling is the effective OpenCode config.`);
 	}
 	const effectiveConfigMode = pluginOnly ? "plugin-only" : configMode;
 	const requiredTemplatePaths = pluginOnly
@@ -2483,21 +3112,21 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	}
 
 	let existingConfig;
-	if (existsSync(paths.configPath)) {
+	if (existsSync(v1ConfigPath)) {
 		try {
-			const existing = await readJson(paths.configPath);
+			const existing = await readJson(v1ConfigPath);
 			if (!isPlainObject(existing)) {
 				throw new Error("config root must be a JSON object");
 			}
 			existingConfig = existing;
 		} catch (error) {
-			if (pluginOnly) {
-				throw new Error(
-					`Could not parse existing config (${formatErrorForLog(error)}). Refusing to replace it in --plugin-only mode.`,
-				);
-			}
-			log(`Warning: Could not parse existing config (${formatErrorForLog(error)}). Replacing with template.`);
-			existingConfig = undefined;
+			// An existing config that still cannot be parsed is NEVER replaced:
+			// the template overwrite would destroy whatever the file held, and
+			// a .bak copy is not a substitute for keeping the original in place.
+			throw new Error(
+				`Could not parse existing config at ${v1ConfigPath} (${formatErrorForLog(error)}). ` +
+					"Refusing to overwrite it; the file was left unchanged. Fix or remove it and rerun the installer.",
+			);
 		}
 	} else {
 		log("No existing config found. Creating new global config.");
@@ -2512,13 +3141,10 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 			}
 			existingTuiConfig = existing;
 		} catch (error) {
-			if (pluginOnly) {
-				throw new Error(
-					`Could not parse existing TUI config (${formatErrorForLog(error)}). Refusing to replace it in --plugin-only mode.`,
-				);
-			}
-			log(`Warning: Could not parse existing TUI config (${formatErrorForLog(error)}). Replacing with minimal TUI config.`);
-			existingTuiConfig = undefined;
+			throw new Error(
+				`Could not parse existing TUI config at ${paths.tuiConfigPath} (${formatErrorForLog(error)}). ` +
+					"Refusing to overwrite it; the file was left unchanged. Fix or remove it and rerun the installer.",
+			);
 		}
 	} else {
 		log("No existing TUI config found. Creating new global TUI config.");
@@ -2545,14 +3171,37 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 
 	let nextConfig;
 	if (existingConfig !== undefined) {
-		const merged = { ...existingConfig };
+		// Spreads copy `__proto__`/`constructor`/`prototype` as own data
+		// properties rather than polluting the prototype, but they still land
+		// in the written file; engine-internal names are never usable config
+		// keys, so they are dropped outright.
+		const merged = Object.fromEntries(
+			Object.entries(existingConfig).filter(([key]) => !isUnsafeMergeKey(key)),
+		);
 		merged.plugin = normalizePluginList(existingConfig.plugin, log, normalizeOptions);
 		if (!pluginOnly) {
+			// Catalog modes own the OpenAI credential surface: leftover
+			// config-level apiKey/baseURL entries would shadow the OAuth
+			// provider the catalog wires, so they are removed and named rather
+			// than silently carried into the merged file.
+			const droppedTopLevelKeys = Object.keys(merged).filter((key) => key === "apiKey" || key === "baseURL");
+			for (const key of droppedTopLevelKeys) {
+				delete merged[key];
+			}
+			if (droppedTopLevelKeys.length > 0) {
+				log(
+					`Warning: config-level field(s) ${droppedTopLevelKeys.join(", ")} in ${v1ConfigPath} are managed ` +
+						"OpenAI credential fields; the catalog replaces them and they will be removed.",
+				);
+			}
 			const provider = (existingConfig.provider && typeof existingConfig.provider === "object")
-				? { ...existingConfig.provider }
+				? Object.fromEntries(
+						Object.entries(existingConfig.provider).filter(([key]) => !isUnsafeMergeKey(key)),
+					)
 				: {};
 			provider.openai = mergeOpenaiProvider(existingConfig.provider?.openai, template.provider?.openai, {
 				modelKeysToRemove,
+				onNotice: log,
 			});
 			merged.provider = provider;
 		}
@@ -2573,36 +3222,69 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	if (unregisteredCheckout) {
 		log(
 			`Note: this plugin last loaded from a checkout at ${unregisteredCheckout.root} on ${unregisteredCheckout.lastSeen}, ` +
-			`which ${paths.configPath} does not register. Point the plugin entry back at that path if OpenCode should keep loading your own build.`,
+			`which ${v1ConfigPath} does not register. Point the plugin entry back at that path if OpenCode should keep loading your own build.`,
 		);
 	}
 
 	const configChanged = existingConfig === undefined || formatJson(existingConfig) !== formatJson(nextConfig);
 	const tuiConfigChanged = existingTuiConfig === undefined || formatJson(existingTuiConfig) !== formatJson(nextTuiConfig);
+	// A JSONC config rewrites as plain JSON — the parse strips comments, so an
+	// operator's notes are silently lost from the file even though a .bak
+	// copy keeps them on disk. Say so before the rewrite instead of letting
+	// the loss go unnoticed.
+	let existingConfigHadComments = false;
+	if (configChanged && existsSync(v1ConfigPath)) {
+		try {
+			existingConfigHadComments = jsoncContainsComments(await readFile(v1ConfigPath, "utf-8"));
+		} catch {
+			// The file raced away or became unreadable — the write path below
+			// surfaces its own error; skip the comment probe.
+		}
+	}
+	let existingTuiConfigHadComments = false;
+	if (tuiConfigChanged && existsSync(paths.tuiConfigPath)) {
+		try {
+			existingTuiConfigHadComments = jsoncContainsComments(await readFile(paths.tuiConfigPath, "utf-8"));
+		} catch {
+			// Same as the main config: the write below surfaces its own error.
+		}
+	}
 	let wrote = false;
 	if (dryRun) {
-		log(`[dry-run] ${configChanged ? "Would write" : "Would leave unchanged"} ${paths.configPath} using ${effectiveConfigMode} config`);
-		log(`[dry-run] Diff for ${paths.configPath}:`);
+		log(`[dry-run] ${configChanged ? "Would write" : "Would leave unchanged"} ${v1ConfigPath} using ${effectiveConfigMode} config`);
+		log(`[dry-run] Diff for ${v1ConfigPath}:`);
 		log(formatRedactedConfigDiff(existingConfig, nextConfig));
+		if (existingConfigHadComments) {
+			log(`[dry-run] Note: ${v1ConfigPath} contains comments that an actual install would not preserve; that install would create a backup containing them.`);
+		}
 		log(`[dry-run] ${tuiConfigChanged ? "Would write" : "Would leave unchanged"} ${paths.tuiConfigPath} with the TUI status plugin`);
 		log(`[dry-run] Diff for ${paths.tuiConfigPath}:`);
 		log(formatRedactedConfigDiff(existingTuiConfig, nextTuiConfig));
+		if (existingTuiConfigHadComments) {
+			log(`[dry-run] Note: ${paths.tuiConfigPath} contains comments that an actual install would not preserve; that install would create a backup containing them.`);
+		}
 	} else {
 		if (configChanged) {
-			if (existsSync(paths.configPath)) {
-				const backupPath = await backupConfig(paths.configPath, false);
+			if (existsSync(v1ConfigPath)) {
+				const backupPath = await backupConfig(v1ConfigPath, false);
 				log(`Backup created: ${backupPath}`);
 			}
-			await writeFileAtomic(paths.configPath, formatJson(nextConfig));
+			if (existingConfigHadComments) {
+				log(`Note: ${v1ConfigPath} contains comments that the rewrite does not preserve; your notes remain in the .bak backup above.`);
+			}
+			await writeFileAtomic(v1ConfigPath, formatJson(nextConfig));
 			wrote = true;
-			log(`Wrote ${paths.configPath} (${effectiveConfigMode} config)`);
+			log(`Wrote ${v1ConfigPath} (${effectiveConfigMode} config)`);
 		} else {
-			log(`Left ${paths.configPath} unchanged`);
+			log(`Left ${v1ConfigPath} unchanged`);
 		}
 		if (tuiConfigChanged) {
 			if (existsSync(paths.tuiConfigPath)) {
 				const backupPath = await backupConfig(paths.tuiConfigPath, false);
 				log(`Backup created: ${backupPath}`);
+			}
+			if (existingTuiConfigHadComments) {
+				log(`Note: ${paths.tuiConfigPath} contains comments that the rewrite does not preserve; your notes remain in the .bak backup above.`);
 			}
 			await writeFileAtomic(paths.tuiConfigPath, formatJson(nextTuiConfig));
 			wrote = true;
@@ -2631,7 +3313,7 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		action: "install",
 		configMode: effectiveConfigMode,
 		pluginOnly,
-		configPath: paths.configPath,
+		configPath: v1ConfigPath,
 		tuiConfigPath: paths.tuiConfigPath,
 		dryRun: Boolean(dryRun),
 		wrote,
@@ -2640,21 +3322,36 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 
 export const __test = {
 	ORIGIN_HISTORY_FILE_NAME,
+	UNSAFE_MERGE_KEYS,
 	buildPaths,
 	backupConfig,
 	classifyPluginEntry,
 	copyFileWithWindowsRetry,
+	findStandaloneProjectRoot,
 	findUnregisteredLocalCheckout,
 	formatConfigDiff,
 	formatRedactedConfigDiff,
+	getStandaloneProjectStorageKey,
+	getStandaloneStoragePath,
+	isKeychainMigratedBackupPath,
+	isUnsafeMergeKey,
+	jsoncContainsComments,
 	mergeFullTemplate,
 	mergeOpenaiProvider,
 	mergeTuiConfig,
 	normalizePluginList,
 	parseCliArgs,
+	parseJsonc,
+	readJson,
+	readStandaloneStorage,
 	removeWithWindowsRetry,
+	resolvePerProjectAccounts,
+	resolveStandaloneStorage,
+	resolveStandaloneStorageFile,
 	runStandaloneCommand,
 	splitCommandArgv,
+	stripJsonComments,
+	stripJsonTrailingCommas,
 	writeFileAtomic,
 	renameWithWindowsRetry,
 	resolveHomeDirectory,
