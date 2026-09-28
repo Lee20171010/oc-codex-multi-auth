@@ -17,7 +17,7 @@ This guide covers the full installation and first-run flow for `oc-codex-multi-a
 |-------------|-------|
 | OpenCode | Install from [opencode.ai](https://opencode.ai) |
 | ChatGPT Plus or Pro | Required for OAuth access and model entitlements |
-| Node.js `>=18` | Needed for local OpenCode runtime and plugin installation |
+| Node.js `>=22.19` | Needed for local OpenCode runtime and plugin installation |
 
 ## Fastest Install Path
 

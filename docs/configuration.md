@@ -319,7 +319,7 @@ The sample above intentionally sets `"retryAllAccountsMaxRetries": 3` as a bound
 | `toastDurationMs` | `5000` | how long toast notifications stay visible (ms) |
 | `accountToasts` | `true` | show the transient `Using <account> (N/N)` account-selection toast; set `false` to hide only this informational toast (rate-limit/auth/recovery warnings and errors still show) |
 | `retryAllAccountsRateLimited` | `true` | wait and retry when all accounts hit rate limits |
-| `retryAllAccountsMaxWaitMs` | `0` | max wait time in ms (0 = unlimited) |
+| `retryAllAccountsMaxWaitMs` | `0` | max wait time in ms when every account is rate-limited. A positive bound applies unchanged. `0` asks to wait as long as the backend requires — which an interactive request caps at a 10-minute ceiling (`INTERACTIVE_ALL_LIMITED_CEILING_MS`); set `CODEX_RETRY_ALL_UNBOUNDED=1` to restore truly unbounded waits |
 | `retryAllAccountsMaxRetries` | `Infinity` | max retry attempts (omit this key for unlimited retries) |
 | `unsupportedCodexPolicy` | `strict` | unsupported-model behavior: `strict` (return entitlement error) or `fallback` (retry with configured fallback chain) |
 | `fallbackOnUnsupportedCodexModel` | `false` | legacy fallback toggle mapped to `unsupportedCodexPolicy` (prefer using `unsupportedCodexPolicy`) |
@@ -744,6 +744,7 @@ override any config with env vars (boolean values are truthy only for `"1"`):
 | `CODEX_AUTH_ACCOUNT_TOASTS=0` | hide the `Using <account> (N/N)` account-selection toast (warnings and errors still show) |
 | `CODEX_AUTH_RETRY_ALL_RATE_LIMITED=0` | disable wait-and-retry |
 | `CODEX_AUTH_RETRY_ALL_MAX_WAIT_MS=30000` | set max wait time |
+| `CODEX_RETRY_ALL_UNBOUNDED=1` | opt into a truly unbounded all-accounts-limited wait: without it, a configured wait of `0` is bounded by a 10-minute interactive ceiling (`INTERACTIVE_ALL_LIMITED_CEILING_MS`), since upstream quota blocks can stretch for days |
 | `CODEX_AUTH_RETRY_ALL_MAX_RETRIES=1` | set max retries |
 | `CODEX_AUTH_UNSUPPORTED_MODEL_POLICY=fallback` | enable generic unsupported-model fallback policy |
 | `CODEX_AUTH_FALLBACK_UNSUPPORTED_MODEL=1` | legacy fallback toggle (prefer policy variable above) |

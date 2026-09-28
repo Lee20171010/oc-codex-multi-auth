@@ -746,6 +746,13 @@ Rate limit reached for gpt-6-sol
    opencode run "task" --model=openai/gpt-5.1
    ```
 
+When **every** account is limited, the wait-and-retry loop honors
+`retryAllAccountsMaxWaitMs`. A configured `0` once meant "wait as long as the
+backend asks"; it is now bounded by a 10-minute interactive ceiling
+(`INTERACTIVE_ALL_LIMITED_CEILING_MS`) because upstream quota blocks can
+stretch for days. Set `CODEX_RETRY_ALL_UNBOUNDED=1` to restore truly
+unbounded waits; any positive configured bound applies unchanged.
+
 </details>
 
 <details>

@@ -24,7 +24,6 @@ lib/
 ├── error-sentinels.ts      # structured special-case errors
 ├── errors.ts               # custom error types
 ├── health.ts               # account health status
-├── index.ts                # barrel exports
 ├── logger.ts               # debug/request logging
 ├── oauth-constants.ts      # OAuth port/path constants
 ├── oauth-success.ts        # OAuth success HTML source copied during build
@@ -129,7 +128,7 @@ lib/
 
 ## CONVENTIONS
 
-- Public exports via `lib/index.ts` barrel; internal code imports focused modules directly.
+- Internal code imports focused modules directly; there is no lib-wide barrel.
 - Model families are defined in `prompts/codex.ts` through `MODEL_FAMILIES` and helper functions.
 - Account health uses a 0-100 score, decrements on failure, and recovers on success/passive recovery paths.
 - Token bucket tracking is per account and helps avoid known rate-limit windows.

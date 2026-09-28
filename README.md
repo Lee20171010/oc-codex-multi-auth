@@ -651,6 +651,7 @@ Selected runtime/environment overrides:
 | `CODEX_AUTH_ACCOUNT_ID=<id>` | Force a specific workspace/account id |
 | `CODEX_AUTH_FETCH_TIMEOUT_MS=<ms>` | Request timeout override |
 | `CODEX_AUTH_STREAM_STALL_TIMEOUT_MS=<ms>` | SSE stream stall timeout override |
+| `CODEX_RETRY_ALL_UNBOUNDED=1` | Restore truly unbounded waits when every account is rate-limited; otherwise a configured `retryAllAccountsMaxWaitMs` of `0` is bounded by a 10-minute interactive ceiling |
 | `ENABLE_PLUGIN_REQUEST_LOGGING=1` | Enable request metadata logs |
 | `CODEX_PLUGIN_LOG_BODIES=1` | Include raw request/response bodies in logs; sensitive |
 | `CODEX_KEYCHAIN=1` | Opt in to OS-native keychain account storage |

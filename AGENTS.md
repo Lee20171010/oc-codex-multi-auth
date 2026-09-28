@@ -71,7 +71,7 @@ duplicating it.
 
 - Source: root `index.ts`, `tui.ts`, `lib/`, and `scripts/`; `dist/` is generated output.
 - ESLint flat config: `no-explicit-any` enforced, unused args prefixed `_`.
-- ESM only (`"type": "module"`), Node >= 18.
+- ESM only (`"type": "module"`), Node >= 22.19.
 - Canonical package/plugin name is `oc-codex-multi-auth`.
 - The npm bin is an installer and thin standalone CLI, not a long-running runtime daemon.
 - OpenCode loads the provider plugin and TUI plugin from built package exports.

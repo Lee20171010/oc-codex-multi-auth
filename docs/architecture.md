@@ -185,7 +185,7 @@ This guarantee is intentionally local-filesystem/same-host. A process that exits
 - OpenCode remains the host runtime and provider loader.
 - Package exports: `"."` (provider plugin) and `"./tui"` (TUI quota plugin). Both default exports satisfy the V1 plugin contract (OpenCode 1.18.29+) and the V2 `setup` contract (OpenCode 2.0.16+); `--v2` writes the `plugins` registration.
 - The canonical package/plugin name is `oc-codex-multi-auth` (legacy npm name `oc-chatgpt-multi-auth` is migration-only).
-- Node engines: `>=18`.
+- Node engines: `>=22.19`.
 - OAuth callback port remains `1455`; callback path is `/auth/callback`.
 - ChatGPT-backed Codex requests require `store: false`, `stream: true`, and `reasoning.encrypted_content`. Legacy transformation mode (`transformRequestBody`) enforces all three unconditionally. Native mode carries `store: false` and `reasoning.encrypted_content` through the shipped config templates and `stream` through the host payload.
 - Multi-turn continuity depends on `reasoning.encrypted_content` and the host-supplied conversation history.
