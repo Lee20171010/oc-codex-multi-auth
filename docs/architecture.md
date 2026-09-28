@@ -1,202 +1,138 @@
 # oc-codex-multi-auth Architecture
 
-Public overview of how `oc-codex-multi-auth` installs config, handles ChatGPT Plus/Pro OAuth, routes Codex/GPT-5 requests, rotates local account pools, exposes diagnostics, and publishes TUI quota status.
+Public overview of how the plugin installs config, handles ChatGPT Plus/Pro OAuth, routes Codex/GPT-5 requests, rotates local account pools, exposes diagnostics, and publishes TUI quota status.
 
 ---
 
 ## The Short Version
 
-`oc-codex-multi-auth` is an OpenCode plugin for ChatGPT OAuth-backed Codex and GPT-5 workflows.
-
-- The `oc-codex-multi-auth` npm bin is an installer and a small standalone CLI, not a replacement for OpenCode.
-- OpenCode loads `dist/index.js` as the provider plugin entry.
+- `oc-codex-multi-auth` is an OpenCode plugin. Its npm bin is an installer plus a small standalone CLI, not a replacement for OpenCode.
+- OpenCode loads `dist/index.js` as the provider plugin (built from `index.ts`) and `dist/tui.js` as the TUI quota-status plugin (built from `tui.ts`). On OpenCode 2.0.16+, the same default exports also carry a V2 `setup` hook (`lib/opencode-v2*.ts`) that reuses the shared V1 runtime.
 - The plugin registers **24** `codex-*` tools via **24 per-file factories** under `lib/tools/` (`codex-list`, `codex-switch`, `codex-warm`, and 21 others).
-- OpenCode loads `dist/tui.js` as the TUI plugin for active-session quota status.
-- On OpenCode 2.0.16+, the same default exports carry a V2 `setup` hook (`lib/opencode-v2*.ts`) that reuses the shared V1 runtime; the V1 entrypoint remains for OpenCode 1.18.29+.
-- Request handling stays stateless for the ChatGPT-backed Codex API with `store: false`, `stream: true`, and `reasoning.encrypted_content`. Legacy transformation mode enforces all three unconditionally. Native mode carries them through the shipped config templates and the host payload.
-- GPT-6 Astra/Sol/Luna, the Daybreak cyber tiers and the GPT-5.6 tiers use the responses-lite request path; older models keep the classic shape.
-- Account, config, backup, log, and TUI quota state lives under `~/.opencode` and `~/.config/opencode`.
-- Per-project account pools are enabled by default under `~/.opencode/projects/<project-key>/...`.
+- Requests to the ChatGPT-backed Codex API stay stateless: `store: false`, `stream: true`, and `reasoning.encrypted_content`.
+- GPT-6 Astra/Sol/Luna, the Daybreak tiers, and GPT-5.6 use the responses-lite request shape; other models keep the classic shape.
+- Account, config, backup, log, and quota state stays local under `~/.opencode` and `~/.config/opencode`. Per-project account pools are on by default.
 
 ---
 
-## Main Components
+## Data Flow
 
-### 1. Installer and standalone CLI
+```text
+opencode auth login                npx -y oc-codex-multi-auth@latest
+  | OAuth (port 1455 callback)       | writes opencode.json / tui.json,
+  v                                  | model catalog, cache cleanup
+~/.opencode account pool (V3)  <-----+
+  |
+  | OpenCode prompt -> provider fetch
+  v
+index.ts
+  |- resolve config (file + env overrides)
+  |- pick account: modelAccountPools -> rotationStrategy (hybrid default)
+  |- refresh token if needed (queued, cross-process lease)
+  |- shape body: native or legacy mode; responses-lite for GPT-6/5.6/Daybreak
+  |- attach OAuth headers + client identity
+  |- retry budgets, circuit breaker, rate-limit backoff, fallback chains
+  v
+chatgpt.com/backend-api/codex/responses  (or an explicitly trusted gateway)
+  |
+  |- SSE folded into a response; quota headers update the TUI cache
+  v
+tui.ts renders prompt quota status; codex-* tools expose the same state
+```
 
-`package.json` publishes one bin:
+---
 
-- `oc-codex-multi-auth` → `scripts/install-oc-codex-multi-auth.js`
+## Components
 
-With no subcommand (or with `install`), the installer updates OpenCode config, backs up previous files, normalizes stale plugin entries (including the legacy package name `oc-chatgpt-multi-auth`), enables the TUI status plugin, writes model templates, and clears OpenCode's cached package copy so the next OpenCode start uses the latest plugin.
+### Installer and standalone CLI
 
-Install modes:
+`oc-codex-multi-auth` → `scripts/install-oc-codex-multi-auth.js` (delegates to `scripts/install-oc-codex-multi-auth-core.js`).
 
 | Flag | Config written |
 | --- | --- |
 | (default) / `--plugin-only` | Register plugin entries; preserve `provider.openai` |
-| `--v2` | V2 `plugins` entry only (OpenCode V2; refuses `opencode.jsonc` or V1 `plugin` entries) |
-| `--modern` | Compact modern: 10 base model families + variant picker (53 variants total) |
-| `--full` | Compact modern bases **plus** explicit legacy selector IDs |
-| `--legacy` | Explicit-only catalog (53 model entries) |
+| `--v2` | V2 `plugins` entry only (refuses `opencode.jsonc` or V1 `plugin` entries) |
+| `--modern` | Compact modern template: 10 base model families + variant picker (53 variants) |
+| `--full` | Modern bases **plus** 53 explicit selector IDs |
+| `--legacy` | Explicit-only template (53 entries) |
 
-Standalone read/ops commands (no OpenCode agent loop required): `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm`. See [tools-and-cli.md](tools-and-cli.md).
+Standalone commands (no agent loop): `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm`. See [tools-and-cli.md](tools-and-cli.md).
 
-### 2. OpenCode plugin entry
+### Provider plugin (`index.ts`)
 
-`index.ts` is the runtime entry OpenCode loads. It owns:
+Owns the auth loader, account manager lifecycle, the custom fetch pipeline, runtime metrics, and `ToolContext` construction for the tool registry. `PluginInput.directory` (falling back to `worktree`) binds per-project storage to the project OpenCode was launched in.
 
-- OAuth login modes: default-browser callback, open-URL-manually callback, device code, and manual URL paste
-- account manager lifecycle and local account storage (V3)
-- request URL/body/header transformation (native or legacy, plus responses-lite for GPT-6 Astra/Sol/Luna, Daybreak and GPT-5.6)
-- health-aware account selection, `rotationStrategy`, and `modelAccountPools`
-- retry budgets, circuit breaking (per account, workspace identity, and model family), rate-limit backoff, and failover
-- recoverable error detection with a recovery toast in the current plugin runtime, plus beginner-safe next-action guidance
-- `ToolContext` construction for the `codex-*` registry
+Auth methods exposed to OpenCode are the **four OAuth labels only**: default browser, open URL manually, device code, and manual URL paste. There is no API-key login. All four land in the same account pool; the manual URL paste requires the full callback URL because its `state` parameter binds the pasted value to the login attempt.
 
-### 3. Request pipeline
+### Request pipeline
 
-OpenCode calls the plugin through the provider fetch path.
+- URL rewrite to `chatgpt.com/backend-api/codex/responses` by default. `OPENAI_BASE_URL` is honored only when `CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1` explicitly trusts a gateway, and the check is fail-closed: HTTPS required for remote hosts, literal loopback IPs (`127.0.0.0/8`, `::1`) are the only HTTP targets, credentials/query/fragments and redirects are rejected. A rejected value fails loudly with a `[oc-codex-multi-auth]`-prefixed error.
+- **Native mode** (default) preserves the host payload shape, normalizes the model name, and upserts one `## Backend Model Identity` developer message naming the outgoing model. `store: false` and `reasoning.encrypted_content` ride in via the shipped config templates. **Legacy mode** (`lib/request/request-transformer.ts`) applies compatibility rewrites and sets all three invariants unconditionally.
+- **Responses-lite** reshapes the body for `gpt-6-astra`/`gpt-6-sol`/`gpt-6-luna`, the Daybreak tiers, and `gpt-5.6-*`: tool definitions move into `input` as `additional_tools`, instructions become a developer message, top-level `tools` is omitted, and `x-openai-internal-codex-responses-lite: true` is sent. The reshape applies per attempt against the model actually sent, so a fallback to a classic model re-serializes correctly.
+- **Client identity** defaults to `opencode` for responses-lite models and `codex_cli_rs` otherwise; override with `CODEX_AUTH_CLIENT_IDENTITY`.
+- **Auto-fallback** covers preview entitlement gates: GPT-6 Astra/Sol/Luna chains down through the GPT-5.6 tiers to `gpt-5.6-luna` (opt out with `CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK=1`), GPT-5.6 chains to `gpt-5.5`/`gpt-6-luna`/`gpt-5.6-luna` (`CODEX_AUTH_DISABLE_GPT56_AUTO_FALLBACK=1`), and the Daybreak cyber tiers have no chain — they fail loudly. `unsupportedCodexPolicy: "fallback"` enables broader chains; a single request hops at most `MAX_QUOTA_FALLBACK_SWITCHES` (6) models.
+- `lib/request/response-handler.ts` folds SSE events into one response as lines arrive, guards stream stalls, and detects empty responses for the retry loop.
 
-```text
-OpenCode prompt
-  |
-  v
-OpenCode provider system
-  |
-  | custom fetch()
-  v
-oc-codex-multi-auth index.ts
-  |- rewrite OpenAI SDK URL to chatgpt.com/backend-api/codex/responses by default
-  |- preserve OPENAI_BASE_URL when CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1 explicitly trusts a compatible gateway
-  |- shape body for native or legacy transform mode
-  |- for lite models (GPT-6 Astra/Sol/Luna, Daybreak, GPT-5.6): apply responses-lite reshape (per attempt)
-  |- force stream:true, store:false, reasoning.encrypted_content
-  |- select/refresh a healthy account (pools + rotationStrategy)
-  |- attach OAuth headers + client identity (originator / User-Agent)
-  |- handle SSE, errors, retries, fallback, and metrics
-  v
-ChatGPT-backed Codex endpoint or configured OpenAI-compatible gateway
-```
+### Account rotation and pools
 
-The gateway override is fail-closed. Remote gateways require HTTPS, literal loopback IPs are the only accepted HTTP targets, embedded credentials/query strings/fragments are rejected, and redirects are not followed. Any address in `127.0.0.0/8` and the IPv6 loopback `::1` count as loopback, so several local services can each hold their own address. Hostnames such as `localhost` are not trusted for cleartext OAuth transport because name resolution can be redirected. A rejected value fails the auth loader with a `[oc-codex-multi-auth]`-prefixed reason and an error toast rather than silently falling back to the default endpoint, and a gateway that answers with a 3xx yields a `502` naming the redirect origin instead of being retried as a malformed response. The gateway receives the same short-lived ChatGPT OAuth access token and account header as the default Codex endpoint, so setting `OPENAI_BASE_URL` alone does not activate the override.
-
-**Native mode** (default) keeps the host payload shape. It normalizes the model name, sets the backend instruction identity line, and upserts one `## Backend Model Identity` developer message naming the outgoing model, refreshed again when fallback changes the model. `store: false` and the `reasoning.encrypted_content` include are not added by the native transform. They ride the provider options in `opencode.json`, which the shipped config templates write. **Legacy mode** applies compatibility rewrites for older OpenCode/AI SDK behavior through `lib/request/request-transformer.ts`. It sets `store: false` and the include itself, filters unsupported `item_reference` payloads, and strips IDs that cannot be used with `store: false`.
-
-**Responses-lite:** for `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, the Daybreak-gated cyber tiers (`gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-5.6-cyber`), `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, the plugin reshapes the request the way Codex does: tool definitions move into `input` as a leading `additional_tools` developer item, Codex instructions follow as a developer message, top-level `instructions` is emptied, `tools` is omitted, `parallel_tool_calls` is forced off, `reasoning.context` is set to `all_turns`, image `detail` fields are stripped, and `x-openai-internal-codex-responses-lite: true` is sent. Lite reshape is applied per request attempt against the model actually being sent, so a sol → gpt-5.5 fallback re-serializes into the classic shape and keeps its tools.
-
-**Client identity:** by default every responses-lite model uses the host/opencode identity (`originator: opencode` with an `opencode/...` User-Agent). Other families default to the Codex CLI identity. Override with `CODEX_AUTH_CLIENT_IDENTITY`.
-
-**Auto-fallback (preview entitlement gates):**
-
-- GPT-6 Astra: `gpt-6-astra` → `gpt-6-sol` → `gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5` → `gpt-6-luna` → `gpt-5.6-luna` (disable with `CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK=1`)
-- GPT-6 Sol and GPT-6 Luna share the same `CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK` opt-out and fall back down the same tail of that order
-- Cyber tiers (`gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-5.6-cyber`): no chain. They fail loudly rather than silently answering from a general model.
-- GPT-5.6: `gpt-5.6-sol` → `gpt-5.6-terra` → `gpt-5.5` → `gpt-6-luna` → `gpt-5.6-luna` (disable with `CODEX_AUTH_DISABLE_GPT56_AUTO_FALLBACK=1`)
-- GPT-5.5 / canonical Codex also have default auto-fallback: GPT-5.5 through `gpt-6-sol` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-6-luna` / `gpt-5.6-luna`, canonical Codex through `gpt-5.6-terra` / `gpt-5.6-luna`; broader fallback chains require `unsupportedCodexPolicy: "fallback"`. `gpt-5.2` was removed as the terminal of every chain after openai/codex #44250 (2026-09-09) removed `gpt-5.2` from the catalog; the terminal is now `gpt-5.6-luna` (not `gpt-5.5`), since OpenAI's Codex model docs say GPT-5.5 retires from Codex with ChatGPT sign-in on 2026-10-14 while 5.6 Luna has no retirement date. GPT-5.4 and GPT-5.4 Mini were retired from Codex on 2026-08-31; the catalog marks both `visibility: "hide"` and names their replacements (`gpt-5.4` -> `gpt-6-sol`, `gpt-5.4-mini` -> `gpt-6-luna`), and `gpt-5.4-nano` has no catalog entry. The default chains therefore end at live models rather than leading with retired ones.
-
-### 4. Account rotation and model pools
-
-`rotationStrategy` (`hybrid` | `sticky` | `round-robin`, default `hybrid`) selects how the plugin load-balances across healthy accounts:
+`rotationStrategy` (default `hybrid`):
 
 | Strategy | Behavior |
 | --- | --- |
-| `hybrid` (default) | Stay on the current account while it is selectable; otherwise score candidates with `health*2 + tokens*5 + hoursSinceUsed*2.0` and take the best, falling back to the least-recently-used account when all are blocked |
-| `sticky` | Drain one account until rate-limited/cooling, then move to the lowest-indexed available account |
+| `hybrid` | Keep the current account while selectable; else pick the best `health*2 + tokens*5 + hoursSinceUsed*2.0` score, falling back to least-recently-used when all are blocked |
+| `sticky` | Drain one account until limited, then move to the lowest-indexed available account |
 | `round-robin` | Advance through accounts in order |
 
-`modelAccountPools` maps effective model IDs to stable account or Business-seat identities. `modelAccountPoolModes` selects `preferred` (the default, with general-pool fallback) or `strict` (never leave the configured pool). Strict exhaustion returns immediately without entering the global account wait loop. All modes still apply quota, cooldown, and token-health rules. Manage pools with `codex-pool` or edit `~/.opencode/openai-codex-auth-config.json`.
+`modelAccountPools` maps model IDs to stable account or Business-seat identities; `modelAccountPoolModes` selects `preferred` (default, falls back to the general pool) or `strict` (never leaves the pool). Manage with `codex-pool` or `~/.opencode/openai-codex-auth-config.json`.
 
-### 5. Tool registry
+### Tool registry
 
-`lib/tools/index.ts` builds the OpenCode tool map from **24 per-file factories** under `lib/tools/`.
+`lib/tools/index.ts` builds the tool map from **24 per-file factories** under `lib/tools/`; every registered `codex-*` tool is its own file. Groups: setup (`codex-setup`, `codex-help`, `codex-next`), daily account use (`codex-list`, `codex-switch`, `codex-warm`, `codex-status`, `codex-limits`, `codex-reset`), metadata and routing (`codex-label`, `codex-tag`, `codex-note`, `codex-pool`, `codex-remove`, `codex-refresh`), diagnostics (`codex-health`, `codex-metrics`, `codex-doctor`, `codex-diag`, `codex-diff`), backup/secrets (`codex-export`, `codex-import`, `codex-keychain`), and the interactive `codex-dashboard`. Full catalog: [tools-and-cli.md](tools-and-cli.md).
 
-Common groups:
+### TUI quota plugin (`tui.ts`)
 
-- setup: `codex-setup`, `codex-help`, `codex-next`
-- daily account use: `codex-list`, `codex-switch`, `codex-warm`, `codex-status`, `codex-limits`, `codex-reset`
-- account metadata and routing: `codex-label`, `codex-tag`, `codex-note`, `codex-pool`, `codex-remove`, `codex-refresh`
-- diagnostics and resilience: `codex-health`, `codex-metrics`, `codex-doctor`, `codex-diag`, `codex-diff`
-- backup and secrets: `codex-export`, `codex-import`, `codex-keychain`
-- interactive surface: `codex-dashboard`
+Reads the active account, the shared quota cache (`lib/tui-quota-cache.ts`), and usage endpoints to render a compact prompt status line during sessions, plus a `codex.quota.details` command. `quotaStatus.mode` selects `active`, `overview`, or `resets` screens (or a list to rotate). The request path writes quota snapshots from response headers so the line reflects the account that actually served the last request.
 
-Full catalog: [tools-and-cli.md](tools-and-cli.md).
+### OpenCode V2 adapter
 
-### 6. TUI quota status plugin
+On OpenCode 2.0.16+, the default exports' `setup` hooks delegate to `lib/opencode-v2.ts` / `lib/opencode-v2-tui.ts`, which reuse the same V1 runtime factory — one account pool, one request pipeline, two loader contracts.
 
-`tui.ts` exposes an OpenCode TUI plugin that reads the active account, shared quota cache (`lib/tui-quota-cache.ts`), and direct usage endpoints when available. It shows compact prompt status during sessions and provides a quota details command without polluting the home prompt.
+- `lib/opencode-v2.ts` re-registers the OAuth methods on the `openai` integration, re-points the provider and models at a distinct `aisdk:` package identity (`lib/opencode-v2-provider.ts`), installs `sdk`/`language` hooks that re-apply `store: false` and `reasoning.encrypted_content` and strip server-side conversation references, bridges the `codex-*` tools through `tool.transform`, and registers `CodexStatusRpc` (`lib/opencode-v2-rpc.ts` + `lib/opencode-v2-status.ts`) so remote TUIs need no credentials.
+- `lib/opencode-v2-tui.ts` owns the terminal surface: app poller, `prompt.footer.status`, `sidebar.content`, the `codex.quota.details` / `codex.accounts` palette commands, and `/codex-accounts`.
+- Each registered location runs in its own `createStorageScope()`, and the adapter stays inert until a pooled account or `openai` OAuth connection exists.
+- Install with `npx -y oc-codex-multi-auth@latest --v2`.
 
-### 7. OpenCode V2 adapter
+### Storage
 
-OpenCode **2.0.16+** loads the same `index.ts` / `tui.ts` entries but calls the
-V2 `setup` hook on their default exports instead of the V1 `server`/`plugin`
-hooks. Both delegate to `lib/opencode-v2.ts` and `lib/opencode-v2-tui.ts`,
-which reuse the shared V1 runtime factory — one account pool, one
-rotation/request pipeline, two loader contracts.
+V3 JSON account files with atomic writes, V1→V3 migration on load, per-project path resolution, import/export with dry-run preview, flagged-account recovery, and credential snapshots under `backups/codex-credential-snapshot-*.json`. V2-format files are rejected with `UNKNOWN_V2_FORMAT`; versions above 3 with `UNSUPPORTED_SCHEMA_VERSION`. Mutations run under a process mutex plus a `proper-lockfile` lease on `<storage>.transaction.lock`; OAuth refresh uses a second lease on `<storage>.refresh.lock` because refresh tokens are single-use. These guarantees are local-filesystem/same-host only.
 
-- `lib/opencode-v2.ts` registers OAuth methods on the `openai` integration (the
-  primary shows as **Codex OAuth (Add account — ChatGPT Plus/Pro)**), re-points
-  the provider and its models at a distinct `aisdk:` package identity
-  (`lib/opencode-v2-provider.ts`), and installs `aisdk` `sdk`/`language` hooks
-  that force `store: false`, `reasoning.encrypted_content`, and an
-  `opencode/<version>` user agent on the wire and strip server-side
-  conversation references (`previousResponseId`, `conversation`). It bridges
-  every `codex-*` tool through `tool.transform` and registers `CodexStatusRpc`
-  (`lib/opencode-v2-rpc.ts` + `lib/opencode-v2-status.ts`), which formats quota
-  and account data on the plugin side so remote TUIs need no credentials.
-- `lib/opencode-v2-tui.ts` owns the V2 terminal surface: a polling app slot, a
-  prompt-footer status slot, a sidebar account section, the `codex.quota.details`
-  and `codex.accounts` palette commands, and `/codex-accounts`.
-- Each registered location runs inside its own `createStorageScope()`, so
-  per-project account pools resolve per directory. The adapter stays inert
-  until the pool holds an enabled account or an `openai` OAuth connection
-  exists; `credential.updated`/`credential.switched` events re-check and reload
-  the provider.
-- `--v2` registers it: a `plugins` entry in `opencode.json`, with automatic
-  quota UI loading. The V1 entrypoint remains supported for OpenCode 1.18.29+.
-
-### 8. Storage and sync
-
-The storage layer uses V3 account files with migrations from older formats, atomic writes, keychain opt-in, import/export previews, flagged-account recovery, and per-project path resolution. V1 pools migrate to V3 on load. V2 files are rejected with the typed `UNKNOWN_V2_FORMAT` recovery error, and versions above 3 with `UNSUPPORTED_SCHEMA_VERSION`. Mutations flow through one transaction primitive that combines the process-local mutex with a distinct `proper-lockfile` lease on `<storage>.transaction.lock`. The existing `<storage>.lock` JSON sidecar remains advisory collision diagnostics.
-
-The optional keychain backend uses the OS keychain service name `oc-codex-multi-auth`. The global pool is stored under the account key `accounts:global`, and a project pool under `accounts:<project-storage-key>`. Migrating a JSON pool into the keychain renames the original file to `<file>.migrated-to-keychain.<timestamp>` and keeps it as the rollback artifact.
-
-OAuth refresh uses a **second, independent** lease on `<storage>.refresh.lock`. That split is deliberate. The refresh lease serializes the provider exchange across processes, because refresh tokens are single-use and two concurrent exchanges of the same token would leave one process with `refresh_token_reused`. The storage lease is only ever held for a local read or write. A refresh therefore opens two short storage transactions (an authoritative reload that either adopts a rotation another process already committed or reports the current token, then a durable commit) with the multi-second network round trip sitting *between* them rather than inside either. Unrelated writers (`codex-note`, `codex-tag`, account toggles, rotation stamps, TUI quota writes) never queue behind a network call. The two leases use distinct lock targets, because `proper-lockfile` keys its in-process registry by target path and would otherwise corrupt that registry when one lease nests inside the other.
-
-This guarantee is intentionally local-filesystem/same-host. A process that exits after the provider accepts a refresh token but before the replacement token is committed still requires reauthentication, and cross-host or unreliable network filesystems require an external coordinator.
+The optional keychain backend (`CODEX_KEYCHAIN=1`) stores pools under service `oc-codex-multi-auth` with keys `accounts:global` / `accounts:<project-storage-key>`; migrating renames the JSON file to `<file>.migrated-to-keychain.<timestamp>` as the rollback artifact.
 
 | State | Default path |
 | --- | --- |
 | OpenCode config | `~/.config/opencode/opencode.json` |
 | OpenCode TUI config | `~/.config/opencode/tui.json` |
-| OpenCode auth tokens | `~/.opencode/auth/openai.json` (convention reference in docs; no plugin code reads this path) |
-| OpenCode host auth store | `~/.local/share/opencode/auth.json`, read and backfilled from the account pool by `backfillHostOpenAIAuthFromPool` |
+| OpenCode host auth store | `~/.local/share/opencode/auth.json` (backfilled from the pool) |
 | Plugin config | `~/.opencode/openai-codex-auth-config.json` |
 | Global account pool | `~/.opencode/oc-codex-multi-auth-accounts.json` |
 | Project account pool | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` |
-| Flagged accounts | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-flagged-accounts.json` when `perProjectAccounts` is on (default), else `~/.opencode/oc-codex-multi-auth-flagged-accounts.json` |
-| TUI quota cache | OpenCode state path (`api.state.path.state`), then `$OPENCODE_STATE_DIR`, then `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json` |
+| Flagged accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active pool file |
+| TUI quota cache | OpenCode state path, else `$OPENCODE_STATE_DIR`, else `~/.local/state/opencode/` |
 | Logs | `~/.opencode/logs/codex-plugin/` |
 
 ---
 
 ## Design Constraints
 
-- OpenCode remains the host runtime and provider loader.
-- Package exports: `"."` (provider plugin) and `"./tui"` (TUI quota plugin). Both default exports satisfy the V1 plugin contract (OpenCode 1.18.29+) and the V2 `setup` contract (OpenCode 2.0.16+); `--v2` writes the `plugins` registration.
-- The canonical package/plugin name is `oc-codex-multi-auth` (legacy npm name `oc-chatgpt-multi-auth` is migration-only).
-- Node engines: `>=22.19`.
-- OAuth callback port remains `1455`; callback path is `/auth/callback`.
-- ChatGPT-backed Codex requests require `store: false`, `stream: true`, and `reasoning.encrypted_content`. Legacy transformation mode (`transformRequestBody`) enforces all three unconditionally. Native mode carries `store: false` and `reasoning.encrypted_content` through the shipped config templates and `stream` through the host payload.
-- Multi-turn continuity depends on `reasoning.encrypted_content` and the host-supplied conversation history.
-- Account pool limits: max **20** accounts; auth-failure cooldown **30s**; disable (retain credentials) after **3** consecutive auth failures.
-- Account bootstrap can hydrate from Codex CLI storage under `~/.codex` unless `CODEX_AUTH_SYNC_CODEX_CLI=0`.
-- Auth methods exposed to OpenCode are the four OAuth labels only (default browser, open URL manually, device code, manual URL paste). There is no registered API-key login method.
-- Credentials and account metadata stay local unless the user exports or migrates them.
-- Diagnostic commands redact sensitive account/token details by default.
-- The optional keychain backend must fall back without deleting JSON credentials silently.
-- When `sessionRecovery` is enabled, the request path detects recoverable errors and shows a recovery toast in the current plugin runtime. The full message/part rewriting and auto-resume engine in `lib/recovery/hook.ts` exists but is not hooked into host event streams or request handlers.
-- The shutdown handler registers cleanup on SIGINT, SIGTERM, and beforeExit. Running inside the OpenCode host it drains cleanup without terminating the process. The standalone CLI opts in and exits 130 on SIGINT and 143 on SIGTERM.
+- Canonical package/plugin name: `oc-codex-multi-auth` (`oc-chatgpt-multi-auth` is migration-only). Exports `"."` (provider) and `"./tui"` (quota status); both default exports satisfy the V1 contract (OpenCode 1.18.29+) and the V2 `setup` contract (2.0.16+).
+- Node `>=22.19.0`, ESM only.
+- OAuth callback is `http://localhost:1455/auth/callback` on both `127.0.0.1` and `::1`.
+- ChatGPT-backed Codex requests require `store: false`, `stream: true`, `reasoning.encrypted_content`. Multi-turn continuity depends on `reasoning.encrypted_content` plus the host-supplied history.
+- Account pool limits: max 20 accounts, 30s auth-failure cooldown, disable (credentials retained) after 3 consecutive auth failures.
+- Codex CLI hydration from `~/.codex` is on unless `CODEX_AUTH_SYNC_CODEX_CLI=0`.
+- Credentials stay local unless the user exports or migrates them; diagnostics redact tokens and emails by default; keychain fallback never silently deletes JSON credentials.
+- When `sessionRecovery` is enabled the request path classifies recoverable errors and shows a recovery toast. The message/part rewriting and auto-resume engine in `lib/recovery/hook.ts` exists but is not invoked by request handlers or host event streams.
+- Shutdown handlers drain cleanup on SIGINT/SIGTERM/beforeExit; as a host plugin the process is not the package's to terminate (the standalone CLI opts in and exits 130/143).
 
 ---
 
@@ -208,4 +144,3 @@ This guarantee is intentionally local-filesystem/same-host. A process that exits
 - [troubleshooting.md](troubleshooting.md)
 - [privacy.md](privacy.md)
 - [development/ARCHITECTURE.md](development/ARCHITECTURE.md)
-- [development/GITHUB_DISCOVERABILITY.md](development/GITHUB_DISCOVERABILITY.md)

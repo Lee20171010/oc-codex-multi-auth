@@ -1,160 +1,76 @@
 # Testing Guide
 
-This guide describes the current validation surface for `oc-codex-multi-auth` on `main`.
+Validation surface for `oc-codex-multi-auth`. For suite layout and conventions (naming, directories, anti-patterns), see `test/AGENTS.md`; this file covers the commands and the checks that matter when changing things.
 
-## Release-Grade Commands
+## Release-Gate Commands
 
-Run these before opening a PR:
+Run all of these before opening a PR — the same six commands run in CI (`.github/workflows/ci.yml`):
 
 ```bash
-npm run lint
+npm ci
 npm run typecheck
+npm run lint
 npm test
-npm run test:coverage
 npm run build
 npm run audit:ci
 ```
 
-What they cover:
+| Command | What it checks |
+| --- | --- |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run lint` | ESLint flat config (`no-explicit-any`; tests linted under relaxed rules) |
+| `npm test` | Vitest suite — auth, config, transforms, storage, rotation, tools, TUI, recovery, docs parity |
+| `npm run test:coverage` | Coverage thresholds from `vitest.config.ts` |
+| `npm run build` | clean `dist/`, compile, copy OAuth success page |
+| `npm run audit:ci` | production audit + dev-advisory allowlist |
 
-- `lint`: ESLint for TypeScript sources and `scripts/`
-- `typecheck`: `tsc --noEmit`
-- `test`: Vitest suite across auth, config, request transformation, storage, UI, recovery, and rotation
-- `test:coverage`: Vitest coverage threshold gate from `vitest.config.ts`; statements/functions/lines keep an 80% global floor, while branch and legacy `index.ts` floors are calibrated to the current baseline
-- `build`: clean `dist/`, compile TypeScript, and materialize `dist/lib/oauth-success.html` from `lib/oauth-success.ts` via `scripts/copy-oauth-success.js`
-- `audit:ci`: production dependency audit plus the dev-advisory allowlist
+## Suite Layout
 
-## Current High-Value Test Areas
+`find test -name '*.test.ts'` is the inventory — do not hardcode counts or file lists anywhere. Roughly: top-level `test/*.test.ts` unit/integration suites (named after the module under test, e.g. `lib/storage/keychain.ts` → `storage-keychain.test.ts`), plus `test/chaos/` fault injection, `test/property/` fast-check tests (`FC_SEED=<n>` replays a run), `test/contracts/` upstream wire shapes, and `test/tools-codex-*.test.ts` per-tool regressions.
 
-Representative suites on `main`:
+Conventions: vitest globals on; `vitest.config.ts` redirects `HOME` to a per-run throwaway dir so suites never touch real credentials (`OC_CODEX_TEST_HOME` to opt into your own); OAuth tests bind the real port `1455`; fake timers over wall-clock assertions; source imports only, never `dist/`.
 
-| File / area | Focus |
-|------|---------|
-| `test/gpt55-release.test.ts` | GPT-5.5 model ids, prompt-family routing, fallback chain |
-| `test/gpt54-models.test.ts` | GPT-5.4 family defaults and model surface |
-| `test/request-transformer.test.ts` | model normalization, request shaping, `store: false`, reasoning options |
-| `test/config.test.ts` | config loading and provider model handling |
-| `test/plugin-config.test.ts` | plugin runtime config defaults and env overrides |
-| `test/index.test.ts` | tool registration, beginner flows, account command behavior |
-| `test/tools-codex-*.test.ts` | per-tool regressions for extracted `lib/tools` modules |
-| `test/doc-parity.test.ts` | docs/config parity with runtime contracts and current structure |
-| `test/beginner-ui.test.ts` | checklist, doctor findings, next-action output |
-| `test/storage.test.ts` / `test/storage-async.test.ts` | account persistence, backup paths, import/export safety |
-| `test/recovery*.test.ts` | recovery storage and resume behavior |
-| `test/rotation*.test.ts` / `test/refresh-queue.test.ts` | multi-account rotation, refresh serialization, retry flow |
-| `test/auth*.test.ts` / `test/oauth-server.integration.test.ts` | OAuth flow and auth edge cases |
-| `test/ui-*.test.ts` | TUI formatting, runtime, theme behavior |
+## Coverage Floors
 
-The repository also includes `test/property/` and `test/chaos/` directories for higher-variance regression coverage.
+`vitest.config.ts` enforces `perFile` thresholds per directory glob — each floor sits under the weakest file it matches today, so a real drop trips the gate without blocking routine drift. Deliberately low: `lib/ui/**` (interactive widgets can't run under the harness), `tui.ts`, and the re-export barrels. Keeping them instrumented keeps the gap visible.
 
 ## Documentation-Adjacent Checks
 
-When documentation changes touch setup or config guidance, verify the docs against the live repo surface:
+When docs touch setup/config/tooling claims, verify against the live surface:
 
-1. Confirm commands exist in `lib/tools/index.ts` and have a matching `lib/tools/codex-*.ts` module.
-2. Confirm config examples match `config/opencode-modern.json`, `config/opencode-legacy.json`, and `config/minimal-opencode.json`.
+1. Confirm commands exist in `lib/tools/index.ts` and each has a matching `lib/tools/codex-*.ts` module.
+2. Confirm config examples match `config/opencode-modern.json`, `config/opencode-legacy.json`, `config/minimal-opencode.json`.
 3. Confirm install/update guidance matches `scripts/install-oc-codex-multi-auth.js`.
-4. Confirm repo scripts listed in docs still exist in `package.json`.
+4. Confirm repo scripts quoted in docs still exist in `package.json`.
 
-Useful commands:
-
-```bash
-rg -n "codex-setup|codex-doctor|codex-next|codex-help" lib/tools
-rg -n "\"build\"|\"typecheck\"|\"lint\"|\"test\"" package.json
-```
+`npm test -- test/doc-parity.test.ts` automates most of this — catalog counts, tool counts, path references, npm scripts, auth labels, version strings.
 
 ## Manual Smoke Checks
 
-Use these when a change affects setup, auth flow, or account operations.
-
-### Install + config smoke
-
 ```bash
-npx -y oc-codex-multi-auth@latest --dry-run
-opencode debug config
-```
-
-Verify:
-
-- the global config path is `~/.config/opencode/opencode.json`
-- the plugin entry resolves to `oc-codex-multi-auth`
-- the selected template contributes the expected `provider.openai` block
-
-### Model surface smoke
-
-```bash
-opencode debug config
-opencode models openai
-```
-
-Important note:
-
-- `opencode debug config` shows merged custom/template model entries
-- `opencode models openai` currently shows only OpenCode's built-in provider catalog
-
-### Request-path smoke
-
-```bash
+npx -y oc-codex-multi-auth@latest --dry-run      # install + config merge
+opencode debug config                          # merged provider.openai + plugin entry
 ENABLE_PLUGIN_REQUEST_LOGGING=1 opencode run "ping" --model=openai/gpt-5.5 --variant=medium
 ```
 
-Verify:
+Verify the last one writes logs under `~/.opencode/logs/codex-plugin/` and keeps `store: false` + `reasoning.encrypted_content`. For payload-level debugging add `DEBUG_CODEX_PLUGIN=1 CODEX_PLUGIN_LOG_BODIES=1` — it can log sensitive request/response bodies, so use it only when needed.
 
-- log files appear under `~/.opencode/logs/codex-plugin/`
-- transformed requests keep `store: false`
-- `reasoning.encrypted_content` is included
-
-### Beginner command smoke
-
-Run these in an interactive session:
-
-```text
-codex-setup
-codex-setup wizard=true
-codex-doctor
-codex-doctor fix=true
-codex-next
-codex-list
-```
-
-Verify:
-
-- checklist and wizard output render cleanly
-- doctor findings and next-action output remain coherent
-- commands that omit `index` degrade gracefully outside interactive TTYs
+Interactive commands worth a manual pass when the auth menu or account flows change: `codex-setup`, `codex-doctor`, `codex-next`, `codex-list`, `codex-dashboard`.
 
 ## Failure Triage
 
-If validation fails, sort the failure first:
-
-| Surface | Typical command |
-|------|---------|
+| Surface | Command |
+| --- | --- |
 | lint/style | `npm run lint` |
 | type drift | `npm run typecheck` |
-| runtime or transform behavior | `npm test -- request-transformer` |
-| account storage / migration | `npm test -- storage` |
-| UI command output | `npm test -- index` or `npm test -- beginner-ui` |
-
-For request-path debugging:
-
-```bash
-DEBUG_CODEX_PLUGIN=1 ENABLE_PLUGIN_REQUEST_LOGGING=1 CODEX_PLUGIN_LOG_BODIES=1 opencode run "ping" --model=openai/gpt-5.5 --variant=medium
-```
-
-Use that only when you need payload-level detail because it can log sensitive request and response bodies.
-
-## PR Checklist
-
-- `npm run lint`
-- `npm run typecheck`
-- `npm test`
-- `npm run test:coverage`
-- `npm run build`
-- `npm run audit:ci`
-- Manual doc/config spot-check if the PR changes docs, setup, or config templates
+| transform/request behavior | `npm test -- request-transformer` |
+| storage/migration | `npm test -- storage` |
+| tool output | `npm test -- tools-codex-<name>` or `npm test -- index` |
+| docs/metadata drift | `npm test -- doc-parity` |
 
 ## See Also
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
 - [CONFIG_FLOW.md](./CONFIG_FLOW.md)
 - [../../test/README.md](../../test/README.md)
+- `test/AGENTS.md`

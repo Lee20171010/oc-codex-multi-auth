@@ -1,105 +1,58 @@
-# TUI Parity Checklist (Codex Multi-Auth)
+# TUI Parity Checklist
 
-Use this checklist to keep `oc-codex-multi-auth` aligned with the Antigravity-style auth TUI pattern, while preserving Codex-specific logic and storage behavior.
+Manual QA checklist for the interactive auth dashboard (`lib/ui/auth-menu.ts`, `lib/cli.ts`) and the quota status surface (`tui.ts`). Run through it before releases that touch the auth menu, account actions, or quota display — the items below mirror the live code, so a drift here is a real regression.
 
-## Scope
+## Dashboard Structure
 
-- Match interaction shape and operator experience.
-- Do not copy provider-specific business logic from Antigravity.
-- Keep Codex storage/auth semantics as source of truth.
+`opencode auth login` on a TTY opens the account dashboard (`showAuthMenu`); non-TTY falls back to a readline menu (`(a)dd, (f)resh, (c)heck, (d)eep, (v)erify flagged, or (q)uit`), and non-interactive mode defaults to add.
 
-## Menu Structure Parity
+- Sections render in order: `Actions`, `Accounts`, `Danger zone`.
+- Actions, in order: `Add account`, `Check quotas`, `Deep check accounts`, `Verify flagged accounts` (suffixed with the flagged count when non-zero), `Start fresh`, then `Delete all accounts` under Danger zone.
+- Each account row shows: numeric index, email (masked when `maskEmail`), `workspace:<label>`, `id:`/`seat:` suffixes when present, state badge, and a `used <relative time>` hint.
 
-- `opencode auth login` -> provider -> login method -> account dashboard.
-- Dashboard sections exist in this order:
-  - `Actions`
-  - `Accounts`
-  - `Danger zone`
-- Core actions visible:
-  - `Add account`
-  - `Check quotas`
-  - `Deep check accounts`
-  - `Verify flagged accounts`
-  - `Start fresh`
-  - `Delete all accounts`
-- Account row format includes:
-  - numeric index
-  - account label/email
-  - state badges (`[current]`, `[active]`, `[ok]`, `[rate-limited]`, `[disabled]`, `[flagged]`)
-  - usage hint (`used today`, `used yesterday`, etc.)
+## Account Badges
 
-## Keyboard and Navigation Parity
+`statusBadge` renders `[active]`/`[ok]` (success), `[rate-limited]`/`[cooldown]` (warning), `[flagged]`/`[disabled]`/`[error]` (danger); `[current]` marks the serving account. V2 styling (`codexTuiV2`, default on) paints the same badges through `formatUiBadge` instead of raw ANSI.
 
-- `Up/Down` moves selection.
-- `Enter` confirms selected item.
-- `Esc` returns/back/cancel.
-- Ctrl+C exits gracefully without corrupting terminal state.
-- Cursor visibility restored on exit from menu.
+## Navigation
 
-## Account Detail Menu Parity
+- Up/Down moves selection; Enter confirms; Esc backs out; Ctrl+C exits without corrupting terminal state; cursor visibility is restored on exit.
+- Selecting an account opens the detail menu: `Back`, `Enable/Disable account` (label flips with state), `Refresh account`, `Delete this account`.
+- Destructive actions confirm first: `Delete all accounts` and `Start fresh` both require typing `DELETE` at the `Type DELETE to confirm removing all accounts:` prompt.
 
-- Selecting an account opens account detail actions:
-  - `Enable/Disable account`
-  - `Refresh account` (re-auth that account)
-  - `Delete this account`
-  - `Back`
-- Destructive actions require confirmation.
-- `Delete all accounts` requires explicit typed confirmation (`DELETE`).
+## Health / Quota Checks
 
-## Health/Quota Check Parity
+- `Check quotas` iterates enabled accounts printing `[i/N] <label>: <status>` lines (`OK`, `OK (cached access)`, `OK (Codex CLI cache)`, `DISABLED`, `ERROR (<reason>)`), then a summary count line.
+- `Deep check accounts` performs stricter per-account validation with richer diagnostic output on the same `[i/N]` progress format.
+- `Verify flagged accounts` re-probes flagged entries and prints `[i/N] <label>: RESTORED` or `STILL FLAGGED (<reason>)`.
 
-- `Check quotas` scans all active accounts and prints per-account results.
-- `Deep check accounts` performs stricter validation and surfaces richer diagnostic output.
-- Output includes index progress (`[i/N]`) and per-account status (`OK`, `ERROR`, `DISABLED`).
-- Summary line always shown at end (`ok/error/disabled` counts).
+## Disabled / Flagged Semantics
 
-## Flagged/Disabled State Parity
+- Disabled accounts stay visible in the dashboard but are skipped by rotation and by health-check iteration.
+- Accounts whose refresh token is rejected move to flagged storage beside the active pool file; `Verify flagged accounts` restores ones that refresh successfully.
+- Deleting clears both the active pool and flagged state for that account.
 
-- Invalid-refresh accounts are moved to flagged storage.
-- `Verify flagged accounts` can restore accounts that refresh successfully.
-- Disabled accounts remain visible but are skipped from active rotation and health execution paths.
-- Account manager never selects disabled accounts as current/next candidate.
+## Visual / Privacy Controls
 
-## Persistence and Cache Behavior
+- `codexTuiV2` / `CODEX_TUI_V2` (default on) selects the V2-styled menu; `0`/`false` falls back to the legacy look.
+- `codexTuiColorProfile`: `truecolor` (default) / `ansi256` / `ansi16`.
+- `codexTuiGlyphMode`: `ascii` (default) / `unicode` / `auto`.
+- `maskEmail: true` / `CODEX_TUI_MASK_EMAIL=1` masks the account email on every human-facing surface — auth menu, `codex-list`/`codex-status`/`codex-limits`/`codex-health`/`codex-dashboard`, runtime/log messages, standalone CLI login menu, and the prompt quota line. A user-defined account label wins over the email where one exists. `maskEmailInQuotaDetails: true` / `CODEX_TUI_MASK_EMAIL_DETAILS=1` additionally masks the quota **details** view. Shared helpers live in `lib/account-display.ts` — new surfaces must route through them.
 
-- Storage writes occur after:
-  - account add/update/delete
-  - enable/disable toggle
-  - flagged pool migration/restore
-- In-memory account manager caches are invalidated after any account pool mutation.
-- Import flow invalidates both cached manager object and pending manager promise.
+## Quota Status Line
 
-## V2 Rollout Controls
+- `quotaStatus.mode` selects `active`, `overview`, `resets`, or a list rotated every `rotateMs`; empty screens are skipped, `resets` appears only at `resetsMinUsedPercent` (default 100) weighted usage.
+- The prompt slot width is measured from the rendered row (`measureStatusSlot`), so an open sidebar shrinks the line correctly; `rows` (1–4, default 1) is a ceiling, not a measurement.
+- Quota percentages use the shared `quotaDisplay` free/used wording across the TUI, `codex-limits`, the standalone CLI, and notifications.
 
-- Default behavior: Codex-style TUI is enabled.
-- Opt-out is supported through config/env:
-  - `codexTuiV2: false`
-  - `CODEX_TUI_V2=0`
-- Visual controls:
-  - `codexTuiColorProfile`: `truecolor` / `ansi256` / `ansi16`
-  - `codexTuiGlyphMode`: `ascii` / `unicode` / `auto`
-- Privacy controls: `maskEmail: true` or `CODEX_TUI_MASK_EMAIL=1` masks the account email across **every** human-facing surface, including the interactive auth menu, `codex-list` / `codex-status` / `codex-limits` / `codex-health` / `codex-dashboard` output, runtime and log messages, the standalone CLI login menu, and TUI prompt quota status. A user-defined account label is preferred over the email wherever one exists. `maskEmailInQuotaDetails: true` or `CODEX_TUI_MASK_EMAIL_DETAILS=1` additionally masks the email in the quota **details** view. The shared helpers live in `lib/account-display.ts`; new display surfaces must route through them rather than formatting the email directly.
+## Release Smoke
 
-## Tooling Parity
-
-- `codex-list` reflects account states and active selection.
-- `codex-status` shows per-family active index and account-level state details.
-- `codex-import` and `codex-export` remain compatible with multi-account storage.
-
-## Verification Checklist (Before Release)
-
-- `npm run -s typecheck` passes.
-- `npm test` passes.
-- Manual smoke run:
-  - login -> dashboard appears
-  - add account works
-  - check quotas runs and summarizes
-  - disable account prevents rotation to it
-  - verify flagged restores a recoverable account
-  - delete-all requires typed confirmation and clears active + flagged pools
-
-## Non-Goals
-
-- Replicating Antigravity Google token semantics.
-- Sharing storage files with unrelated plugins.
-- Editing Antigravity repo files as part of Codex plugin maintenance.
+- [ ] `npm run typecheck` and `npm test` pass
+- [ ] Login → dashboard appears with Actions / Accounts / Danger zone
+- [ ] Add account completes an OAuth round trip into the pool
+- [ ] Check quotas prints `[i/N]` lines and a summary
+- [ ] Disable account removes it from rotation candidates
+- [ ] Verify flagged restores a recoverable account
+- [ ] Delete-all requires typed `DELETE` and clears active + flagged pools
+- [ ] `maskEmail` on → no raw email anywhere
+- [ ] `codexTuiV2` off → legacy menu still works
