@@ -143,6 +143,14 @@ export interface CacheMetadata {
         tag: string;
         lastChecked: number;
         url: string;
+        /**
+         * Git-blob SHA-1 of the cached body, recorded at persist time. The
+         * offline disk-serve gate hash-binds content against this (falling
+         * back to `etag` for entries written before the field existed), so
+         * catalog-derived or etag-less upstreams still get a verifiable
+         * disk cache instead of an offline dead-end.
+         */
+        contentSha?: string | null;
 }
 
 /**
