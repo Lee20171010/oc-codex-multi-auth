@@ -220,6 +220,23 @@ describe("Storage Paths Module", () => {
 			).toThrow("Access denied");
 		});
 
+		it("accepts a valid export when an allowed root is itself a symlink", () => {
+			// Home lives behind a symlink (`/fake-storage-paths-home ->
+			// /data/home/user`). The new-nested-directory target resolves its
+			// existing ancestor to the PHYSICAL home, so the boundary roots must
+			// be realpathed the same way — comparing physical-canonical against
+			// the lexical home rejects an export that is genuinely inside it.
+			const physicalHome = "/data/home/user";
+			const mockedRealpath = vi.mocked(realpathSync);
+			mockedRealpath.mockImplementation((candidate) => {
+				if (String(candidate) === FAKE_HOME) return physicalHome;
+				throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+			});
+			expect(() =>
+				resolvePath(path.join(FAKE_HOME, "newdir", "out.json")),
+			).not.toThrow();
+		});
+
 		it("rejects lookalike prefix paths outside current working directory", () => {
 			const cwd = process.cwd();
 			const parent = path.dirname(cwd);

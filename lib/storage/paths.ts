@@ -126,14 +126,20 @@ export function resolvePath(filePath: string): string {
 		}
 	}
 
-	const home = homedir();
-	const cwd = process.cwd();
-	const tmp = tmpdir();
-	if (
-		!isWithinDirectory(home, canonical) &&
-		!isWithinDirectory(cwd, canonical) &&
-		!isWithinDirectory(tmp, canonical)
-	) {
+	// `canonical` is physical when any ancestor resolved, so the boundary
+	// roots must be realpathed too — a symlinked HOME (/home -> /data/home,
+	// macOS /tmp -> /private/tmp) would otherwise compare a real canonical
+	// against a lexical root and reject valid exports. The lexical form is
+	// kept as a second candidate for the case where canonical fell back to
+	// the lexical path because no ancestor existed at all.
+	const boundaries = [homedir(), process.cwd(), tmpdir()].flatMap((root) => {
+		try {
+			return [realpathSync(root), root];
+		} catch {
+			return [root];
+		}
+	});
+	if (!boundaries.some((root) => isWithinDirectory(root, canonical))) {
 		throw new StorageError(
 			`Access denied: path must be within home directory, project directory, or temp directory`,
 			"PATH_ACCESS_DENIED",
