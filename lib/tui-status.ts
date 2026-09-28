@@ -15,6 +15,17 @@ import {
 	formatQuotaPercent,
 	type QuotaDisplayMode,
 } from "./quota-display.js";
+import {
+	displayWidth,
+	formatClockTime,
+	formatShortDate,
+	formatShortWeekday,
+	sanitizeDisplayText,
+} from "./ui/display-text.js";
+import {
+	resolveUiGlyphs,
+	type UiGlyphMode,
+} from "./ui/theme.js";
 
 export type ReasoningVariant =
 	| "none"
@@ -78,7 +89,14 @@ const variantSuffixes: ReasoningVariant[] = [
 	"low",
 	"none",
 ];
-const STATUS_SEPARATOR = ` ${String.fromCharCode(183)} `;
+/**
+ * Segment separator for the compact status line, padded with a space on each
+ * side. The glyph comes from `codexTuiGlyphMode`; callers that never heard of
+ * glyph modes (including older tests) get the original middle dot.
+ */
+function statusSeparator(mode: UiGlyphMode | undefined): string {
+	return ` ${resolveUiGlyphs(mode ?? "unicode").separator} `;
+}
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const WARNING_LIMIT_LEFT_PERCENT = 25;
 const DANGER_LIMIT_LEFT_PERCENT = 10;
@@ -259,7 +277,10 @@ function formatAccountEmail(
 	email: string | undefined,
 	maskEmail: boolean,
 ): string | undefined {
-	const trimmed = email?.trim() || undefined;
+	// Whatever the snapshot carries is untrusted text headed for the status
+	// line: escape sequences and controls are stripped before the address is
+	// even looked for.
+	const trimmed = sanitizeDisplayText(email);
 	if (!trimmed) return undefined;
 	if (!maskEmail) return `[${trimmed}]`;
 	const address = extractEmailFromLabel(trimmed);
@@ -282,8 +303,13 @@ function maskEmailsInText(
 	maskEmail: boolean,
 ): string | undefined {
 	if (!value) return undefined;
-	if (!maskEmail) return value;
-	return value.replace(TEXT_TOKEN_GLOBAL, (token) =>
+	// Free text from the snapshot may carry escapes or bidi controls; strip
+	// them whether or not masking is on, so the details dialog cannot paint
+	// them into the terminal.
+	const clean = sanitizeDisplayText(value);
+	if (!clean) return undefined;
+	if (!maskEmail) return clean;
+	return clean.replace(TEXT_TOKEN_GLOBAL, (token) =>
 		token.includes("@") ? maskEmailToken(token) : token,
 	);
 }
@@ -295,7 +321,9 @@ function formatQuotaLimit(
 	mode: QuotaDisplayMode,
 ): string | undefined {
 	if (!isPercent(limit.leftPercent)) return undefined;
-	const label = limit.label.trim() || "quota";
+	// The label comes from a cached snapshot the request path wrote, not from
+	// anything this process verified — sanitize before it reaches a terminal.
+	const label = sanitizeDisplayText(limit.label) ?? "quota";
 	const base = `${label} ${formatQuotaPercent(limit.leftPercent, mode)}`;
 	const reset =
 		includeReset && limit === resetLimit ? formatResetTime(limit.resetAtMs) : undefined;
@@ -375,10 +403,11 @@ function formatQuotaParts(
 function formatQuota(
 	quota: CompactQuotaStatus,
 	mode: QuotaDisplayMode,
+	separator: string,
 ): string | undefined {
 	if (quota.type === "ready") {
 		const parts = formatQuotaParts(quota, true, mode);
-		return parts.length > 0 ? parts.join(STATUS_SEPARATOR) : undefined;
+		return parts.length > 0 ? parts.join(separator) : undefined;
 	}
 	if (quota.type === "missing") return "no auth";
 	if (quota.type === "unavailable") return "limits ?";
@@ -417,27 +446,36 @@ export function formatPromptStatusText(params: {
 	variant?: ReasoningVariant;
 	quota: CompactQuotaStatus;
 	width?: number;
+	/**
+	 * Columns the renderer measured for this slot. When present it wins over
+	 * the `width` heuristics outright — the slot may share its row with
+	 * other content, and only the measurement knows how much.
+	 */
+	availableChars?: number;
 	maskEmail?: boolean;
 	quotaDisplay?: QuotaDisplayMode;
+	/** `codexTuiGlyphMode`; `auto` resolves against the environment. */
+	glyphMode?: UiGlyphMode;
 }): string {
 	const variant = params.variant;
 	const mode = params.quotaDisplay ?? DEFAULT_QUOTA_DISPLAY_MODE;
+	const separator = statusSeparator(params.glyphMode);
 	const accountForms = formatAccountHints(params.quota, params.maskEmail);
 	const quotaParts = formatQuotaParts(params.quota, true, mode);
 	const quotaPartsWithoutReset = formatQuotaParts(params.quota, false, mode);
 	const quota = quotaParts.length > 0
-		? quotaParts.join(STATUS_SEPARATOR)
-		: formatQuota(params.quota, mode);
+		? quotaParts.join(separator)
+		: formatQuota(params.quota, mode, separator);
 	const primaryQuota = quotaParts[0] ?? quota;
 	const quotaWithoutReset = quotaPartsWithoutReset.length > 0
-		? quotaPartsWithoutReset.join(STATUS_SEPARATOR)
+		? quotaPartsWithoutReset.join(separator)
 		: quota;
 	const primaryQuotaWithoutReset = quotaPartsWithoutReset[0] ?? primaryQuota;
 	// Each account-bearing rung tries every hint form before the ladder gives
 	// up on showing the account at all.
 	const withAccount = (rest: string | undefined, prefix?: string) =>
 		accountForms.map((form) =>
-			[prefix, form, rest].filter(Boolean).join(STATUS_SEPARATOR),
+			[prefix, form, rest].filter(Boolean).join(separator),
 		);
 	const candidates = [
 		...withAccount(quota),
@@ -449,12 +487,23 @@ export function formatPromptStatusText(params: {
 		quotaWithoutReset,
 		primaryQuotaWithoutReset,
 		...withAccount(quota, variant),
-		[variant, quota].filter(Boolean).join(STATUS_SEPARATOR),
+		[variant, quota].filter(Boolean).join(separator),
 		variant,
 		...accountForms,
 	].filter((candidate): candidate is string => Boolean(candidate));
-	const maxChars = maxStatusChars(params.width);
-	return candidates.find((candidate) => candidate.length <= maxChars) ?? "";
+	const available = params.availableChars;
+	// Budgets are display columns, not code units: a candidate is only
+	// eligible if its grapheme-aware width fits, so CJK labels and emoji
+	// cannot overflow a terminal `string.length` would call short enough.
+	const maxChars =
+		typeof available === "number" &&
+		Number.isFinite(available) &&
+		available > 0
+			? Math.floor(available)
+			: maxStatusChars(params.width);
+	return (
+		candidates.find((candidate) => displayWidth(candidate) <= maxChars) ?? ""
+	);
 }
 
 /**
@@ -526,20 +575,22 @@ export function wrapStatusCandidate(
 	maxChars: number,
 	maxRows: number,
 ): string[] | undefined {
-	if (candidate.length <= maxChars) return [candidate];
+	if (displayWidth(candidate) <= maxChars) return [candidate];
 	if (maxRows <= 1 || maxChars <= 0) return undefined;
 	const segments = candidate.split(", ");
 	const rows: string[] = [];
 	let row = "";
 	for (const [position, segment] of segments.entries()) {
 		const piece = position === segments.length - 1 ? segment : `${segment},`;
-		if (piece.length > maxChars) return undefined;
+		// Display columns, not code units: a CJK account label takes two of
+		// them per character.
+		if (displayWidth(piece) > maxChars) return undefined;
 		if (row.length === 0) {
 			row = piece;
 			continue;
 		}
 		const joined = `${row} ${piece}`;
-		if (joined.length <= maxChars) {
+		if (displayWidth(joined) <= maxChars) {
 			row = joined;
 			continue;
 		}
@@ -668,7 +719,7 @@ export function resolveQuotaPromptTone(
 
 type ResetParts = {
 	date: Date;
-	/** Locale-formatted 24-hour clock time, e.g. `02:25`. */
+	/** Fixed 24-hour clock time, e.g. `02:25` — identical under every locale. */
 	time: string;
 	sameDay: boolean;
 	/**
@@ -697,11 +748,7 @@ function describeReset(resetAtMs: number | undefined): ResetParts | undefined {
 	const now = new Date();
 	return {
 		date,
-		time: date.toLocaleTimeString(undefined, {
-			hour: "2-digit",
-			minute: "2-digit",
-			hour12: false,
-		}),
+		time: formatClockTime(date),
 		sameDay:
 			now.getFullYear() === date.getFullYear() &&
 			now.getMonth() === date.getMonth() &&
@@ -711,10 +758,9 @@ function describeReset(resetAtMs: number | undefined): ResetParts | undefined {
 }
 
 function formatResetDay(date: Date): string {
-	return date.toLocaleDateString(undefined, {
-		month: "short",
-		day: "2-digit",
-	});
+	// Fixed English `Sep 05` — no `toLocaleDateString`, so the line reads the
+	// same under every configured locale.
+	return formatShortDate(date);
 }
 
 function formatReset(resetAtMs: number | undefined): string | undefined {
@@ -737,10 +783,7 @@ function formatResetTime(resetAtMs: number | undefined): string | undefined {
 	// Within a week each weekday occurs exactly once, so the weekday alone
 	// disambiguates weekly windows; beyond that the absolute date does.
 	if (parts.dayDiff > 0 && parts.dayDiff < 7) {
-		const weekday = parts.date.toLocaleDateString(undefined, {
-			weekday: "short",
-		});
-		return `${weekday} ${parts.time}`;
+		return `${formatShortWeekday(parts.date)} ${parts.time}`;
 	}
 	return `${formatResetDay(parts.date)} ${parts.time}`;
 }
@@ -776,7 +819,7 @@ function formatDetailsLimit(
 	limit: CompactQuotaLimit,
 	mode: QuotaDisplayMode,
 ): string {
-	const label = limit.label.trim() || "quota";
+	const label = sanitizeDisplayText(limit.label) ?? "quota";
 	const percent = isPercent(limit.leftPercent)
 		? formatNamedQuotaPercent(limit.leftPercent, mode)
 		: "unavailable";

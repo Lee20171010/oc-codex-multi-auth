@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { logError } from "../logger.js";
+import { logError, maskString } from "../logger.js";
 import type { TokenResult } from "../types.js";
 import { AUTHORIZE_URL, CLIENT_ID, exchangeAuthorizationCode } from "./auth.js";
 
@@ -55,27 +55,35 @@ function getDeviceRedirectUri(authBaseUrl?: string): string {
 	return `${getAuthOrigin(authBaseUrl)}/deviceauth/callback`;
 }
 
+function truncateBody(bodyText: string): string {
+	const trimmed = bodyText.trim();
+	if (trimmed.length <= DEVICE_CODE_LOG_BODY_LIMIT) {
+		return trimmed;
+	}
+	return `${trimmed.slice(0, DEVICE_CODE_LOG_BODY_LIMIT)}...`;
+}
+
+// The auth-server error body is untrusted upstream text: it can echo
+// identifiers like device_auth_id and is otherwise unbounded, so both the log
+// copy and the user-facing copy are masked and truncated before use.
 function getErrorMessage(status: number, bodyText: string, fallback: string): string {
 	const trimmed = bodyText.trim();
 	if (!trimmed) {
 		return fallback;
 	}
-	return `${fallback} (${status}): ${trimmed}`;
+	return `${fallback} (${status}): ${maskString(truncateBody(trimmed))}`;
 }
 
-// Auth-server error bodies can echo identifiers like device_auth_id, so logs keep
-// only a short prefix while the user-facing message still gets the full response.
 function getRedactedErrorBody(bodyText: string): string {
 	const trimmed = bodyText.trim();
 	if (!trimmed) {
 		return "<empty>";
 	}
 
-	if (trimmed.length <= DEVICE_CODE_LOG_BODY_LIMIT) {
-		return trimmed;
-	}
-
-	return `${trimmed.slice(0, DEVICE_CODE_LOG_BODY_LIMIT)}...`;
+	// Mask here too, not only in the user-facing path: this text is built for
+	// the log line, and relying on the logger to catch a token-shaped leak in
+	// an upstream body is one layer of defence too few.
+	return maskString(truncateBody(trimmed));
 }
 
 function parseIntervalSeconds(value: unknown): number {
@@ -215,7 +223,10 @@ export async function createDeviceCodeSession(options?: {
 			failure: {
 				type: "failed",
 				reason: "network_error",
-				message: err?.message,
+				// Raw Node error text is kept for diagnosability (paths/hosts are
+				// fine), but it is still run through the credential masker before
+				// reaching the user-facing auth result.
+				message: typeof err?.message === "string" ? maskString(err.message) : undefined,
 			},
 		};
 	}
@@ -287,7 +298,8 @@ export async function completeDeviceCodeSession(
 		return {
 			type: "failed",
 			reason: "unknown",
-			message: "Device code authorization timed out after 15 minutes",
+			message:
+				"Device code authorization timed out after 15 minutes; restart login for a fresh code",
 		};
 	} catch (error) {
 		const err = error as Error;
@@ -295,7 +307,7 @@ export async function completeDeviceCodeSession(
 		return {
 			type: "failed",
 			reason: "network_error",
-			message: err?.message,
+			message: typeof err?.message === "string" ? maskString(err.message) : undefined,
 		};
 	}
 }

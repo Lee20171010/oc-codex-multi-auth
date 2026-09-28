@@ -8,6 +8,7 @@ import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
 import { AccountManager } from "../accounts.js";
 import { logWarn } from "../logger.js";
 import { getWorkspaceIdentityKey } from "../storage/identity.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
@@ -68,7 +69,10 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 			if (!account) return `Account ${resolvedIndex} not found.`;
 			const identityKey = getWorkspaceIdentityKey(account);
 
-			const normalizedNote = (note ?? "").trim();
+			// Notes persist and are later rendered — strip escapes/controls at
+			// write time so a note cannot carry concealment or cursor movement.
+			const normalizedNote =
+				sanitizeDisplayText((note ?? "").trim(), { maxLength: 240 }) ?? "";
 			if (normalizedNote.length > 240) {
 				return "Note is too long (max 240 characters).";
 			}

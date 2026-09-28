@@ -672,6 +672,39 @@ describe("RecoveryStorage", () => {
     });
   });
 
+  describe("validatePathId on messageID write/delete paths", () => {
+    // The messageID is joined into a filesystem path by every mutator; without
+    // the same guard readParts/getMessageDir already apply, "../escape" would
+    // write outside PART_STORAGE.
+    it("should reject unsafe messageIDs on injectTextPart", () => {
+      expect(() => storage.injectTextPart("s", "msg/../escape", "hi")).toThrow(
+        "Invalid messageID: contains unsafe characters",
+      );
+      expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it("should reject unsafe messageIDs on prependThinkingPart", () => {
+      expect(() => storage.prependThinkingPart("s", "msg/evil")).toThrow(
+        "Invalid messageID: contains unsafe characters",
+      );
+      expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it("should reject unsafe messageIDs on stripThinkingParts", () => {
+      expect(() => storage.stripThinkingParts("msg\\evil")).toThrow(
+        "Invalid messageID: contains unsafe characters",
+      );
+      expect(fsMock.unlinkSync).not.toHaveBeenCalled();
+    });
+
+    it("should reject unsafe messageIDs on replaceEmptyTextParts", () => {
+      expect(() => storage.replaceEmptyTextParts("", "replacement")).toThrow(
+        "Invalid messageID: contains unsafe characters",
+      );
+      expect(fsMock.writeFileSync).not.toHaveBeenCalled();
+    });
+  });
+
   describe("findMessageByIndexNeedingThinking - line 353", () => {
     it("should return null when first part is thinking", () => {
       const msgDir = join(MESSAGE_STORAGE, "s");

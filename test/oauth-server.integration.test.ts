@@ -84,9 +84,20 @@ describe("OAuth Server Integration", () => {
 		const callbackUrl = `http://127.0.0.1:1455/auth/callback?code=test&state=wrong-state`;
 		const response = await fetch(callbackUrl);
 		expect(response.status).toBe(400);
+		expect(response.headers.get("content-type")).toContain("text/html");
+		expect(response.headers.get("cache-control")).toContain("no-store");
+
+		const csp = response.headers.get("content-security-policy") ?? "";
+		expect(csp).toContain("default-src 'none'");
+		expect(csp).toContain("script-src 'none'");
+		const nonce = csp.match(/style-src 'nonce-([^']+)'/)?.[1];
+		expect(nonce).toBeTruthy();
 
 		const body = await response.text();
-		expect(body).toContain("State mismatch");
+		expect(body).toContain("Sign-in link mismatch");
+		expect(body).toContain(`<style nonce="${nonce}">`);
+		expect(body).toContain("restart the login flow");
+		expect(body).not.toContain("<script");
 	});
 
 	it("should reject callback without code", async () => {
@@ -98,9 +109,13 @@ describe("OAuth Server Integration", () => {
 		const callbackUrl = `http://127.0.0.1:1455/auth/callback?state=${testState}`;
 		const response = await fetch(callbackUrl);
 		expect(response.status).toBe(400);
+		expect(response.headers.get("content-type")).toContain("text/html");
+		expect(response.headers.get("cache-control")).toContain("no-store");
 
 		const body = await response.text();
 		expect(body).toContain("Missing authorization code");
+		expect(body).toContain("restart the login flow");
+		expect(body).not.toContain("<script");
 	});
 
 	it("should return 404 for non-callback paths", async () => {

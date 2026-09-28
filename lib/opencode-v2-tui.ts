@@ -2,6 +2,8 @@ import type { Plugin } from "@opencode/plugin/tui";
 import { createElement, spread } from "@opentui/solid";
 import { createSignal, onCleanup } from "solid-js";
 import { CodexStatusRpc } from "./opencode-v2-rpc.js";
+import { sanitizeDisplayBlock, sanitizeDisplayText } from "./ui/display-text.js";
+import { resolveUiGlyphs } from "./ui/theme.js";
 
 /** Register quota and account views; return a disposer for the V2 TUI slots. */
 export function setupV2Tui(context: Plugin.Context) {
@@ -21,23 +23,39 @@ export function setupV2Tui(context: Plugin.Context) {
 				if (pending || disposed) return;
 				pending = true;
 				try {
-					const result = await rpc.status({ width: Math.max(1, Math.min(1000, context.renderer.width - 40)) }, {
+					// The raw renderer width goes to the service; the status
+					// formatters apply their own single-width reserve, so
+					// subtracting here would discount the line twice. An unset or
+					// zero width means "unknown", not a one-column terminal.
+					const measured = context.renderer.width;
+					const width =
+						typeof measured === "number" && Number.isFinite(measured) && measured > 0
+							? Math.max(1, Math.min(1000, Math.floor(measured)))
+							: 80;
+					const result = await rpc.status({ width }, {
 						location: context.location ?? context.data.location.default(), signal: controller.signal,
 					});
 					if (disposed) return;
-					setText(result.text);
+					// The payload crosses an RPC boundary, so treat it as untrusted:
+					// strip escapes/controls before it reaches a rendered node. `auto`
+					// resolves against this TUI's environment, not the service's.
+					const glyphs = resolveUiGlyphs(result.glyphMode ?? "unicode");
+					setText(sanitizeDisplayBlock(result.text, { maxLength: 1024 }) ?? "");
 					setShowFor(result.showFor);
 					setAccountStorage(result.accountStorage);
 					setAccounts(result.accounts.length ? result.accounts.map((account) =>
-						`${account.active ? "●" : "○"} ${account.index}. ${account.label}${account.enabled ? "" : " (disabled)"}`,
+						`${account.active ? glyphs.active : glyphs.inactive} ${account.index}. ${sanitizeDisplayText(account.label) ?? "unknown"}${account.enabled ? "" : " (disabled)"}`,
 					).join("\n") : "No Codex accounts in this pool.");
-					details = result.details;
+					details = sanitizeDisplayBlock(result.details, { maxLength: 2048 }) ?? "Quota unavailable.";
 				} catch {
 					if (!disposed) {
+						// No RPC result to take a glyph mode from — `auto` resolves
+						// against this TUI's own environment.
+						const fallback = resolveUiGlyphs("auto");
 						setText("limits ?");
 						setAccountStorage("unknown");
-						setAccounts("Accounts unavailable — retry shortly.");
-						details = "Quota unavailable — retry shortly.";
+						setAccounts(`Accounts unavailable ${fallback.emDash} retry shortly.`);
+						details = `Quota unavailable ${fallback.emDash} retry shortly.`;
 					}
 				} finally {
 					pending = false;
@@ -71,12 +89,18 @@ export function setupV2Tui(context: Plugin.Context) {
 							});
 							return;
 						}
+						// Credential labels come from the connected service — sanitize
+						// before they are interpolated into a rendered dialog.
+						const connectionNames = credentials.map(
+							(connection) =>
+								sanitizeDisplayText(connection.label || connection.id) ?? "unnamed",
+						);
 						const confirmed = await context.ui.dialog.confirm({
 							title: "Codex logout",
 							message:
-								credentials.length === 1
-									? `Remove the OpenAI OAuth connection (${credentials[0]?.label || credentials[0]?.id})? The Codex account pool is kept — reconnect any account with opencode auth login.`
-									: `Remove ${credentials.length} OpenAI OAuth connections (${credentials.map((connection) => connection.label || connection.id).join(", ")})? The Codex account pool is kept — reconnect any account with opencode auth login.`,
+								connectionNames.length === 1
+									? `Remove the OpenAI OAuth connection (${connectionNames[0]})? The Codex account pool is kept — reconnect any account with opencode auth login.`
+									: `Remove ${connectionNames.length} OpenAI OAuth connections (${connectionNames.join(", ")})? The Codex account pool is kept — reconnect any account with opencode auth login.`,
 							label: { confirm: "Log out" },
 						});
 						if (confirmed !== true) return;

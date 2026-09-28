@@ -99,17 +99,13 @@ describe("codex usage helpers", () => {
 		// day inside the 60s offset and take the "on <date>" branch instead.
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date(2026, 0, 15, 12, 0, 0));
-		const formatTime = vi
-			.spyOn(Date.prototype, "toLocaleTimeString")
-			.mockReturnValue("22:30");
+		const formatTime = vi.spyOn(Date.prototype, "toLocaleTimeString");
 
 		try {
-			expect(formatUsageReset(Date.now() + 60_000)).toBe("22:30");
-			expect(formatTime).toHaveBeenCalledWith(undefined, {
-				hour: "2-digit",
-				minute: "2-digit",
-				hour12: false,
-			});
+			// `formatClockTime` renders HH:MM from calendar fields directly — the
+			// output must not consult locale-aware formatters at all.
+			expect(formatUsageReset(Date.now() + 60_000)).toBe("12:01");
+			expect(formatTime).not.toHaveBeenCalled();
 		} finally {
 			formatTime.mockRestore();
 			vi.useRealTimers();

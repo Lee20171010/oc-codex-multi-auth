@@ -418,12 +418,35 @@ export type TokenResultFromSchema = z.infer<typeof TokenResultSchema>;
 // ============================================================================
 
 /**
+ * Conservative default token lifetime (seconds) applied when the OAuth
+ * server omits `expires_in` or sends a value outside the sane range.
+ *
+ * Both directions of a bogus `expires_in` are harmful: a negative or tiny
+ * value produces an `expires` stamp in the past and triggers a refresh on
+ * every request (a refresh storm that also burns single-use refresh tokens),
+ * while an absurd value (1e290, Infinity via 1e306) makes the access token
+ * look immortal so it is never refreshed. And a missing field must NOT fail
+ * the whole response — the tokens in it are real, and the authorization code
+ * or refresh token that produced them may already be consumed server-side,
+ * so rejecting on shape alone loses an unrecoverable credential.
+ */
+export const OAUTH_EXPIRES_IN_MAX_SECONDS = 31_536_000; // 1 year
+export const OAUTH_EXPIRES_IN_DEFAULT_SECONDS = 3_600; // 1 hour
+
+/**
  * OAuth token response from OpenAI.
  */
 export const OAuthTokenResponseSchema = z.object({
 	access_token: z.string().min(1),
 	refresh_token: z.string().optional(),
-	expires_in: z.number(),
+	// Bounded AND defaulted: out-of-range/missing/non-finite values degrade to
+	// a 1-hour lifetime rather than failing the exchange or skewing expiry math.
+	expires_in: z
+		.number()
+		.finite()
+		.min(1)
+		.max(OAUTH_EXPIRES_IN_MAX_SECONDS)
+		.catch(OAUTH_EXPIRES_IN_DEFAULT_SECONDS),
 	id_token: z.string().optional(),
 	token_type: z.string().optional(),
 	scope: z.string().optional(),

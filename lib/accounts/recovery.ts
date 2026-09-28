@@ -36,6 +36,23 @@ const CODEX_CLI_ACCOUNTS_PATH = join(homedir(), ".codex", "accounts.json");
 const CODEX_CLI_CACHE_TTL_MS = 5_000;
 let codexCliTokenCache: Map<string, CodexCliTokenCacheEntry> | null = null;
 let codexCliTokenCacheLoadedAt = 0;
+/**
+ * Test seam for `getCodexCliTokenCache`. While set — including to `null` —
+ * every read returns this map instead of touching `~/.codex/accounts.json`,
+ * and the vitest/NODE_ENV early-exit is bypassed. That gate keeps fixture runs
+ * away from real developer credentials, which also makes the hydrate path
+ * unreachable under vitest; tests exercise it by injecting the decoded cache
+ * here. Pass `undefined` to restore normal reads.
+ */
+let codexCliTokenCacheOverride: Map<string, CodexCliTokenCacheEntry> | null | undefined;
+
+export function setCodexCliTokenCacheForTests(
+	cache: Map<string, CodexCliTokenCacheEntry> | null | undefined,
+): void {
+	codexCliTokenCacheOverride = cache;
+	codexCliTokenCache = null;
+	codexCliTokenCacheLoadedAt = 0;
+}
 
 function extractExpiresAtFromAccessToken(accessToken: string): number | undefined {
 	const decoded = decodeJWT(accessToken);
@@ -48,6 +65,9 @@ function extractExpiresAtFromAccessToken(accessToken: string): number | undefine
 }
 
 async function getCodexCliTokenCache(): Promise<Map<string, CodexCliTokenCacheEntry> | null> {
+	// An injected cache wins over every gate — including the vitest/NODE_ENV
+	// early-exit — so the hydrate path stays exercisable under test.
+	if (codexCliTokenCacheOverride !== undefined) return codexCliTokenCacheOverride;
 	const syncEnabled = process.env.CODEX_AUTH_SYNC_CODEX_CLI !== "0";
 	const skip =
 		!syncEnabled ||
@@ -163,8 +183,17 @@ export class AccountRecovery {
 				continue;
 			}
 
+			// `account.expires` absent is "unknown", not "expired": the record may
+			// hold a perfectly live access token whose expiry was simply never
+			// stamped. Only a cache entry whose own expiry is PROVEN future (the
+			// guard above already rejected `<= now`) may displace a held
+			// credential like that — otherwise an undated, possibly-expired CLI
+			// cache token would overwrite fresh in-memory creds.
 			const missingOrExpired =
-				!account.access || account.expires === undefined || account.expires <= now;
+				!account.access ||
+				(account.expires === undefined &&
+					typeof cached.expiresAt === "number") ||
+				(account.expires !== undefined && account.expires <= now);
 			if (missingOrExpired) {
 				account.access = cached.accessToken;
 				// The Codex CLI cache is keyed by EMAIL, so one person's Business seat

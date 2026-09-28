@@ -2,6 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+/**
+ * OpenCode resolves its data root as `XDG_DATA_HOME || ~/.local/share` on
+ * every platform — its `Global.Path.data` goes through the `xdg-basedir`
+ * package unconditionally, so on Windows session storage is
+ * `%USERPROFILE%\.local\share\opencode`, not `%APPDATA%`. These tests pin
+ * that cross-platform contract; an APPDATA branch made recovery a silent
+ * no-op on Windows.
+ */
 describe("recovery/constants.ts", () => {
   const originalPlatform = process.platform;
   const originalAppData = process.env.APPDATA;
@@ -41,22 +49,35 @@ describe("recovery/constants.ts", () => {
   });
 
   describe("getXdgData on Windows", () => {
-    it("should use APPDATA when set", async () => {
+    it("should still use XDG_DATA_HOME when set", async () => {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      process.env.XDG_DATA_HOME = "D:\\custom\\xdg";
+
+      const { OPENCODE_STORAGE } = await import("../lib/recovery/constants.js");
+
+      expect(OPENCODE_STORAGE).toBe(join("D:\\custom\\xdg", "opencode", "storage"));
+    });
+
+    it("should fallback to ~/.local/share, not APPDATA, when XDG_DATA_HOME is not set", async () => {
       Object.defineProperty(process, "platform", { value: "win32" });
       process.env.APPDATA = "C:\\Users\\Test\\AppData\\Roaming";
 
       const { OPENCODE_STORAGE } = await import("../lib/recovery/constants.js");
 
-      expect(OPENCODE_STORAGE).toBe(join("C:\\Users\\Test\\AppData\\Roaming", "opencode", "storage"));
+      expect(OPENCODE_STORAGE).toBe(join(homedir(), ".local", "share", "opencode", "storage"));
     });
 
-    it("should fallback to AppData/Roaming when APPDATA is not set", async () => {
+    it("should resolve the same directory as POSIX", async () => {
+      delete process.env.XDG_DATA_HOME;
+
       Object.defineProperty(process, "platform", { value: "win32" });
-      delete process.env.APPDATA;
+      const windows = (await import("../lib/recovery/constants.js")).OPENCODE_STORAGE;
 
-      const { OPENCODE_STORAGE } = await import("../lib/recovery/constants.js");
+      vi.resetModules();
+      Object.defineProperty(process, "platform", { value: "linux" });
+      const linux = (await import("../lib/recovery/constants.js")).OPENCODE_STORAGE;
 
-      expect(OPENCODE_STORAGE).toBe(join(homedir(), "AppData", "Roaming", "opencode", "storage"));
+      expect(windows).toBe(linux);
     });
   });
 

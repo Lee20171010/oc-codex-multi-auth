@@ -472,11 +472,23 @@ describe('Logger Module', () => {
 		it('should partially mask long string tokens (line 61 coverage)', () => {
 			const mockLog = vi.fn();
 			initLogger({ app: { log: mockLog } });
-			logError('test', { 
+			logError('test', {
 				access_token: 'this-is-a-longer-token-value',
 			});
 			const data = mockLog.mock.calls[0][0].body.extra?.data;
 			expect(data.access_token).toBe('this-i...alue');
+		});
+
+		it('should mask tokenSuffix/token_suffix credential fragments', () => {
+			const mockLog = vi.fn();
+			initLogger({ app: { log: mockLog } });
+			logError('test', {
+				tokenSuffix: 'tail-fragment-abcdef',
+				token_suffix: 'another-tail-fragment',
+			});
+			const data = mockLog.mock.calls[0][0].body.extra?.data;
+			expect(JSON.stringify(data)).not.toContain('tail-fragment-abcdef');
+			expect(JSON.stringify(data)).not.toContain('another-tail-fragment');
 		});
 
 		it('should handle arrays in sanitization', () => {
@@ -600,49 +612,50 @@ describe('Logger Module', () => {
 		});
 
 		it('logs startup message when request logging is enabled', async () => {
-			const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+			// Console output is routed to stderr so stdout stays machine-readable.
+			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 			await loadLoggerModule({
 				ENABLE_PLUGIN_REQUEST_LOGGING: '1',
 				CODEX_CONSOLE_LOG: '1',
 			});
-			expect(consoleLog).toHaveBeenCalledWith(
+			expect(consoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Request logging ENABLED'),
 			);
 		});
 
 		it('logs startup message when debug logging is enabled', async () => {
-			const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 			await loadLoggerModule({
 				DEBUG_CODEX_PLUGIN: '1',
 				CODEX_CONSOLE_LOG: '1',
 				CODEX_PLUGIN_LOG_LEVEL: 'debug',
 				ENABLE_PLUGIN_REQUEST_LOGGING: '0',
 			});
-			expect(consoleLog).toHaveBeenCalledWith(
+			expect(consoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Debug logging ENABLED'),
 			);
 		});
 
 		it('skips info logs when debug and request logging are disabled', async () => {
-			const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 			const { logInfo: logInfoDisabled } = await loadLoggerModule({
 				CODEX_CONSOLE_LOG: '1',
 			});
-			consoleLog.mockClear();
+			consoleError.mockClear();
 			logInfoDisabled('not logged');
-			expect(consoleLog).not.toHaveBeenCalled();
+			expect(consoleError).not.toHaveBeenCalled();
 		});
 
 		it('respects log level threshold when debug is enabled', async () => {
-			const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 			const { logDebug: logDebugSuppressed } = await loadLoggerModule({
 				DEBUG_CODEX_PLUGIN: '1',
 				CODEX_CONSOLE_LOG: '1',
 				CODEX_PLUGIN_LOG_LEVEL: 'error',
 			});
-			consoleLog.mockClear();
+			consoleError.mockClear();
 			logDebugSuppressed('suppressed');
-			expect(consoleLog).not.toHaveBeenCalled();
+			expect(consoleError).not.toHaveBeenCalled();
 		});
 
 		it('routes console logs by level and data presence', async () => {
@@ -671,7 +684,9 @@ describe('Logger Module', () => {
 			logWarnEnabled('warn without data');
 			logErrorEnabled('error without data');
 
-			expect(consoleLog).toHaveBeenCalled();
+			// stdout is reserved for machine-readable output; every level that
+			// logs must go to stderr (warn -> console.warn, rest -> console.error).
+			expect(consoleLog).not.toHaveBeenCalled();
 			expect(consoleWarn).toHaveBeenCalled();
 			expect(consoleError).toHaveBeenCalled();
 		});
@@ -707,13 +722,13 @@ describe('Logger Module', () => {
 		});
 
 		it('writes request logs and sanitizes deep values', async () => {
-			const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 			mockExistsSync.mockReturnValue(false);
 			const { logRequest: logRequestEnabled, setCorrelationId: setId } = await loadLoggerModule({
 				ENABLE_PLUGIN_REQUEST_LOGGING: '1',
 				CODEX_CONSOLE_LOG: '1',
 			});
-			consoleLog.mockClear();
+			consoleError.mockClear();
 
 			setId('correlation-123');
 			const deepData: Record<string, unknown> = {};
@@ -736,7 +751,7 @@ describe('Logger Module', () => {
 			const parsed = JSON.parse(rawPayload as string) as Record<string, unknown>;
 			expect(JSON.stringify(parsed)).toContain('[max depth]');
 			expect(parsed.correlationId).toBe('correlation-123');
-			expect(consoleLog).toHaveBeenCalledWith(
+			expect(consoleError).toHaveBeenCalledWith(
 				expect.stringContaining('Logged deep-stage to'),
 			);
 		});
@@ -837,7 +852,7 @@ describe('Logger Module', () => {
 			endTimer();
 			logger.timeEnd('operation', performance.now() - 5);
 
-			expect(consoleLog).toHaveBeenCalled();
+			expect(consoleLog).not.toHaveBeenCalled();
 			expect(consoleWarn).toHaveBeenCalled();
 			expect(consoleError).toHaveBeenCalled();
 		});

@@ -9,15 +9,15 @@ import { homedir } from "node:os";
 
 /**
  * Get the XDG data directory for OpenCode storage.
- * Falls back to ~/.local/share on Linux/Mac, or APPDATA on Windows.
+ *
+ * OpenCode resolves its data root as `XDG_DATA_HOME || ~/.local/share` on
+ * every platform — its `Global.Path.data` goes through the `xdg-basedir`
+ * package unconditionally, with no win32 branch. Session data on Windows
+ * therefore lives at `%USERPROFILE%\.local\share\opencode`, NOT under
+ * `%APPDATA%`; an APPDATA branch here points recovery at a directory
+ * OpenCode never writes, making it a silent no-op on Windows.
  */
 function getXdgData(): string {
-  const platform = process.platform;
-
-  if (platform === "win32") {
-    return process.env.APPDATA || join(homedir(), "AppData", "Roaming");
-  }
-
   return process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
 }
 

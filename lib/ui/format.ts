@@ -1,3 +1,4 @@
+import { displayWidth, sanitizeDisplayText } from "./display-text.js";
 import type { UiRuntimeOptions } from "./runtime.js";
 
 export type UiTextTone =
@@ -30,28 +31,49 @@ export function paintUiText(ui: UiRuntimeOptions, text: string, tone: UiTextTone
 	return `${ui.theme.colors[colorKey]}${text}${ui.theme.colors.reset}`;
 }
 
+/**
+ * Untrusted text (titles, account labels, server-provided strings) is
+ * sanitized before interpolation: control characters, bidi overrides, and
+ * every escape sequence — SGR included — are stripped so a persisted value
+ * cannot smuggle cursor movement, reordering, or concealment (`ESC[8m`) into
+ * rendered output. Intentional styling enters through `paintUiText` tones or
+ * the `suffix` channel below, never through the sanitized text itself.
+ *
+ * `maxLength` bounds the untrusted-label default (160): trusted but
+ * legitimately long strings — warnings that interpolate storage paths — pass
+ * an explicit, larger bound so a hard cut cannot eat the message's reason.
+ */
+function sanitizeUiText(value: string, maxLength?: number): string {
+	return sanitizeDisplayText(value, { preserveSgr: false, maxLength }) ?? "";
+}
+
 export function formatUiHeader(ui: UiRuntimeOptions, title: string): string[] {
-	if (!ui.v2Enabled) return [title];
-	const divider = "-".repeat(Math.max(8, title.length));
+	const text = sanitizeUiText(title);
+	if (!ui.v2Enabled) return [text];
+	const divider = "-".repeat(Math.max(8, displayWidth(text)));
 	return [
-		paintUiText(ui, title, "heading"),
+		paintUiText(ui, text, "heading"),
 		paintUiText(ui, divider, "muted"),
 	];
 }
 
 export function formatUiSection(ui: UiRuntimeOptions, title: string): string[] {
-	if (!ui.v2Enabled) return [title];
-	return [paintUiText(ui, title, "accent")];
+	const text = sanitizeUiText(title);
+	if (!ui.v2Enabled) return [text];
+	return [paintUiText(ui, text, "accent")];
 }
 
 export function formatUiItem(
 	ui: UiRuntimeOptions,
 	text: string,
 	tone: UiTextTone = "normal",
+	suffix = "",
+	maxLength?: number,
 ): string {
-	if (!ui.v2Enabled) return `- ${text}`;
+	const item = sanitizeUiText(text, maxLength);
+	if (!ui.v2Enabled) return `- ${item}${suffix}`;
 	const bullet = paintUiText(ui, ui.theme.glyphs.bullet, "muted");
-	return `${bullet} ${paintUiText(ui, text, tone)}`;
+	return `${bullet} ${paintUiText(ui, item, tone)}${suffix}`;
 }
 
 export function formatUiKeyValue(
@@ -59,10 +81,13 @@ export function formatUiKeyValue(
 	key: string,
 	value: string,
 	valueTone: UiTextTone = "normal",
+	maxLength?: number,
 ): string {
-	if (!ui.v2Enabled) return `${key}: ${value}`;
-	const keyText = paintUiText(ui, `${key}:`, "muted");
-	const valueText = paintUiText(ui, value, valueTone);
+	const safeKey = sanitizeUiText(key);
+	const safeValue = sanitizeUiText(value, maxLength);
+	if (!ui.v2Enabled) return `${safeKey}: ${safeValue}`;
+	const keyText = paintUiText(ui, `${safeKey}:`, "muted");
+	const valueText = paintUiText(ui, safeValue, valueTone);
 	return `${keyText} ${valueText}`;
 }
 
@@ -71,7 +96,7 @@ export function formatUiBadge(
 	label: string,
 	tone: Exclude<UiTextTone, "normal" | "heading"> = "accent",
 ): string {
-	const text = `[${label}]`;
+	const text = `[${sanitizeUiText(label)}]`;
 	return paintUiText(ui, text, tone);
 }
 

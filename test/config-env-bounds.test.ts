@@ -23,6 +23,7 @@ import {
 	getFetchTimeoutMs,
 	getParallelProbingMaxConcurrency,
 	getQuotaNotifications,
+	getQuotaStatus,
 	getRetryAllAccountsMaxRetries,
 	getRetryAllAccountsMaxWaitMs,
 	getStreamStallTimeoutMs,
@@ -216,5 +217,65 @@ describe("file-side schema bounds", () => {
 		expect(
 			PluginConfigSchema.safeParse({ retryAllAccountsMaxWaitMs: 1e15 }).success,
 		).toBe(true);
+	});
+});
+
+describe("non-finite values in an unvalidated PluginConfig", () => {
+	// The getters also serve callers holding a PluginConfig that never went
+	// through loadPluginConfig's schema pass. A NaN field used to sail through
+	// Math.max/Math.min and reach setTimeout as ~0 — a silent hot re-poll.
+	it("falls back to the default on NaN duration fields", () => {
+		expect(getFetchTimeoutMs({ fetchTimeoutMs: Number.NaN })).toBe(60_000);
+		expect(getStreamStallTimeoutMs({ streamStallTimeoutMs: Number.NaN })).toBe(45_000);
+		expect(getTokenRefreshSkewMs({ tokenRefreshSkewMs: Number.NaN })).toBe(60_000);
+	});
+
+	it("falls back to the default on NaN nested duration fields", () => {
+		expect(
+			getQuotaNotifications({ quotaNotifications: { intervalMs: Number.NaN } })
+				.intervalMs,
+		).toBe(1_800_000);
+	});
+
+	it("falls back to the default on NaN / Infinity integer fields", () => {
+		expect(getEmptyResponseMaxRetries({ emptyResponseMaxRetries: Number.NaN })).toBe(2);
+		expect(
+			getParallelProbingMaxConcurrency({
+				parallelProbingMaxConcurrency: Number.NaN,
+			}),
+		).toBe(2);
+		expect(
+			getFastSessionMaxInputItems({
+				fastSessionMaxInputItems: Number.POSITIVE_INFINITY,
+			}),
+		).toBe(30);
+	});
+
+	it("still honours the deliberate Infinity default for retryAllAccountsMaxRetries", () => {
+		expect(getRetryAllAccountsMaxRetries({})).toBe(Number.POSITIVE_INFINITY);
+		expect(
+			getRetryAllAccountsMaxRetries({
+				retryAllAccountsMaxRetries: Number.NaN,
+			}),
+		).toBe(Number.POSITIVE_INFINITY);
+	});
+
+	it("clamps quotaStatus.resetsMinUsedPercent and defaults non-finite input", () => {
+		expect(
+			getQuotaStatus({ quotaStatus: { resetsMinUsedPercent: Number.NaN } })
+				.resetsMinUsedPercent,
+		).toBe(100);
+		expect(
+			getQuotaStatus({ quotaStatus: { resetsMinUsedPercent: 250 } })
+				.resetsMinUsedPercent,
+		).toBe(100);
+		expect(
+			getQuotaStatus({ quotaStatus: { resetsMinUsedPercent: -5 } })
+				.resetsMinUsedPercent,
+		).toBe(0);
+		expect(
+			getQuotaStatus({ quotaStatus: { resetsMinUsedPercent: 80 } })
+				.resetsMinUsedPercent,
+		).toBe(80);
 	});
 });

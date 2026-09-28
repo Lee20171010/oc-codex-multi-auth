@@ -208,7 +208,9 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 					lines.push(
 						formatUiItem(
 							ui,
-							`${label} ${state} health=${Math.round(entry.healthScore)} tokens=${entry.tokensAvailable.toFixed(1)} reasons=${entry.reasons.join(", ")}`,
+							`${label} health=${Math.round(entry.healthScore)} tokens=${entry.tokensAvailable.toFixed(1)} reasons=${entry.reasons.join(", ")}`,
+							"normal",
+							` ${state}`,
 						),
 					);
 				}

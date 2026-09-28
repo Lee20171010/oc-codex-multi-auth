@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -10,15 +11,81 @@ vi.mock("node:fs", () => ({
 	},
 }));
 
+vi.mock("../lib/storage/atomic-write.js", () => ({
+	writeFileAtomic: vi.fn(async () => undefined),
+}));
+
 const originalFetch = global.fetch;
 let mockFetch: ReturnType<typeof vi.fn>;
 
 import { getModelFamily, getCodexInstructions, ensureInstructionIdentity, MODEL_FAMILIES, TOOL_REMAP_MESSAGE, __clearCacheForTesting } from "../lib/prompts/codex.js";
 import { BUNDLED_CODEX_INSTRUCTIONS } from "../lib/prompts/codex-instructions.js";
+import { writeFileAtomic } from "../lib/storage/atomic-write.js";
 
 const mockedReadFile = vi.mocked(fs.readFile);
-const mockedWriteFile = vi.mocked(fs.writeFile);
+const mockedWriteFileAtomic = vi.mocked(writeFileAtomic);
 const mockedMkdir = vi.mocked(fs.mkdir);
+
+// Fixture bodies must clear the 128-char minimum-length sanity check real
+// prompts are held to — pad a recognizable label with filler so assertions
+// can still `toContain` the label.
+const padPrompt = (label: string): string => `${label}\n\n${"x".repeat(200)}`;
+
+/**
+ * URL-aware fetch stub matching the response surface the production code
+ * actually reads — `text()` on every hop (the tag API, the HTML fallback, the
+ * catalog, and prompt bodies), plus `url` and `headers.get` where used.
+ */
+const stubOkFetch = (opts: {
+	tag?: string;
+	catalog?: string;
+	prompt?: string;
+	etag?: string;
+} = {}): void => {
+	const tag = opts.tag ?? "rust-v0.111.0";
+	mockFetch.mockImplementation((url: unknown) => {
+		const href = String(url);
+		if (href.includes("api.github.com")) {
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				text: () => Promise.resolve(JSON.stringify({ tag_name: tag })),
+				headers: { get: () => null },
+			});
+		}
+		if (href.includes("github.com/openai/codex/releases")) {
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				url: `https://github.com/openai/codex/releases/tag/${tag}`,
+				text: () => Promise.resolve("<html></html>"),
+				headers: { get: () => null },
+			});
+		}
+		const body = href.includes("models.json")
+			? (opts.catalog ?? JSON.stringify({ models: [] }))
+			: (opts.prompt ?? padPrompt("content"));
+		return Promise.resolve({
+			ok: true,
+			status: 200,
+			text: () => Promise.resolve(body),
+			headers: { get: () => opts.etag ?? "etag" },
+		});
+	});
+};
+
+/**
+ * git blob SHA of a body — `sha1("blob <len>\0<body>")` — which is what
+ * `raw.githubusercontent.com` etags contain and what the 304 path verifies
+ * disk bytes against before serving them.
+ */
+const gitBlobSha1 = (content: string): string => {
+	const payload = Buffer.from(content, "utf8");
+	return createHash("sha1")
+		.update(`blob ${payload.length}\0`)
+		.update(payload)
+		.digest("hex");
+};
 
 describe("Codex Prompts Module", () => {
 	beforeEach(() => {
@@ -123,44 +190,56 @@ describe("Codex Prompts Module", () => {
 	describe("getCodexInstructions", () => {
 		describe("Memory cache behavior", () => {
 			it("should return cached content within TTL", async () => {
-				const recentTimestamp = Date.now() - 5 * 60 * 1000;
-				mockedReadFile.mockImplementation((filePath) => {
-					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
-						return Promise.resolve(JSON.stringify({
-							etag: "cached-etag",
-							tag: "rust-v0.43.0",
-							lastChecked: recentTimestamp,
-							url: "https://example.com",
-						}));
-					}
-					return Promise.resolve("cached instructions");
-				});
+				// Memory entries only exist after a real fetch — a seeded disk
+				// file can never populate them unverified.
+				stubOkFetch({ prompt: padPrompt("cached instructions") });
 
 				const first = await getCodexInstructions("gpt-5.1-codex");
 				const second = await getCodexInstructions("gpt-5.1-codex");
-				
-				expect(first).toBe("cached instructions");
+
+				expect(first).toContain("cached instructions");
 				expect(second).toBe(first);
 			});
 		});
 
 		describe("Disk cache with TTL", () => {
-			it("should use disk cache if within TTL", async () => {
+			it("should serve disk cache within TTL only when the stored etag hash-binds the body", async () => {
 				const recentTimestamp = Date.now() - 5 * 60 * 1000;
+				const diskBody = padPrompt("disk cached instructions");
+				// A legitimately-fetched cache carries the upstream etag (the git
+				// blob SHA), which hash-binds the body — the conditional revalidation
+				// can then trust the file exactly as the 304 path does.
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached-etag",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "rust-v0.43.0",
 							lastChecked: recentTimestamp,
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("disk cached instructions");
+					return Promise.resolve(diskBody);
+				});
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.43.0" })),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: false,
+						status: 304,
+						text: () => Promise.resolve(""),
+						headers: { get: () => null },
+					});
 				});
 
 				const result = await getCodexInstructions("gpt-5.2");
-				expect(result).toBe("disk cached instructions");
+				expect(result).toContain("disk cached instructions");
 			});
 
 			it("prepends backend identity when native instructions have no model identity", () => {
@@ -187,7 +266,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -210,7 +289,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -243,7 +322,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -266,7 +345,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.\n\nRest of prompt.",
+						padPrompt("You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer."),
 					);
 				});
 
@@ -281,50 +360,123 @@ describe("Codex Prompts Module", () => {
 		describe("GitHub fetch with ETag", () => {
 			it("should fetch from GitHub API for latest release tag", async () => {
 				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					json: () => Promise.resolve({ tag_name: "rust-v0.50.0" }),
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					text: () => Promise.resolve("new instructions from github"),
-					headers: { get: () => "new-etag" },
+				stubOkFetch({
+					tag: "rust-v0.50.0",
+					prompt: padPrompt("new instructions from github"),
+					etag: "new-etag",
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("codex-max");
-				expect(result).toBe("new instructions from github");
+				expect(result).toContain("new instructions from github");
+				// Tag lookup plus the prompt fetch — and no more.
 				expect(mockFetch).toHaveBeenCalledTimes(2);
 			});
 
 			it("should handle 304 Not Modified response", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				const diskBody = padPrompt("disk cached content");
+				// The 304 path serves disk bytes only when they hash to the
+				// etag the server just confirmed — this meta carries the real
+				// git blob SHA, so the conditional refetch can trust the file.
+				const etag = `"${gitBlobSha1(diskBody)}"`;
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "existing-etag",
+							etag,
 							tag: "rust-v0.43.0",
 							lastChecked: oldTimestamp,
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("disk cached content");
+					return Promise.resolve(diskBody);
 				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					json: () => Promise.resolve({ tag_name: "rust-v0.43.0" }),
-				});
-				mockFetch.mockResolvedValueOnce({
-					status: 304,
-					ok: false,
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.43.0" })),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: false,
+						status: 304,
+						text: () => Promise.resolve(""),
+						headers: { get: () => null },
+					});
 				});
 
 				const result = await getCodexInstructions("gpt-5.1");
-				expect(result).toBe("disk cached content");
+				expect(result).toContain("disk cached content");
+				// The 304 needed no body, and the hash-verified disk body needed
+				// no unconditional refetch — two calls total.
+				expect(mockFetch).toHaveBeenCalledTimes(2);
 			});
 
-			it("should refresh stale cache in background when release tag changes", async () => {
+			it("should refetch unconditionally when the disk body does not hash to the confirmed etag", async () => {
+				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				// Planted body + forged meta: the etag acknowledges *some*
+				// upstream content, but the planted bytes can never hash to it.
+				const etag = `"${"0".repeat(40)}"`;
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag,
+							tag: "rust-v0.43.0",
+							lastChecked: oldTimestamp,
+							url: "https://example.com",
+						}));
+					}
+					return Promise.resolve(padPrompt("planted body"));
+				});
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.43.0" })),
+							headers: { get: () => null },
+						});
+					}
+					const conditional = mockFetch.mock.calls.length <= 2;
+					if (conditional) {
+						return Promise.resolve({
+							ok: false,
+							status: 304,
+							text: () => Promise.resolve(""),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						text: () => Promise.resolve(padPrompt("real upstream body")),
+						headers: { get: () => '"fresh-etag"' },
+					});
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5.1");
+
+				// The forged etag passed a 304, the planted body failed the hash
+				// check, and the unconditional refetch supplied real bytes.
+				expect(result).toContain("real upstream body");
+				expect(result).not.toContain("planted body");
+				const rawCalls = mockFetch.mock.calls.filter(
+					(call) => typeof call[0] === "string" && call[0].includes("raw.githubusercontent.com"),
+				);
+				expect(rawCalls.length).toBe(2);
+				const secondInit = rawCalls[1]?.[1] as { headers?: Record<string, string> } | undefined;
+				expect(secondInit?.headers?.["If-None-Match"]).toBeUndefined();
+			});
+
+			it("should fetch synchronously when the cached copy is stale and unverified", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
@@ -335,84 +487,110 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("old content");
+					return Promise.resolve(padPrompt("old content"));
 				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					json: () => Promise.resolve({ tag_name: "rust-v0.50.0" }),
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					text: () => Promise.resolve("new version content"),
-					headers: { get: () => "new-etag" },
+				stubOkFetch({
+					tag: "rust-v0.50.0",
+					prompt: padPrompt("new version content"),
+					etag: "new-etag",
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
+				// A stale same-UID-writable cache never serves until this process
+				// has hit the trusted source — the fetch is synchronous, not
+				// stale-while-revalidate.
 				const first = await getCodexInstructions("gpt-5.1-codex");
-				expect(first).toBe("old content");
-				await new Promise((resolve) => setTimeout(resolve, 0));
+				expect(first).toContain("new version content");
+				const callsAfterFirst = mockFetch.mock.calls.length;
 				const second = await getCodexInstructions("gpt-5.1-codex");
-				expect(second).toBe("new version content");
+				expect(second).toContain("new version content");
+				expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
 			});
 		});
 
 		describe("GitHub HTML fallback", () => {
 			it("should fall back to HTML releases page when API fails", async () => {
 				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-				mockFetch.mockResolvedValueOnce({
-					ok: false,
-					status: 403,
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					url: "https://github.com/openai/codex/releases/tag/rust-v0.45.0",
-					text: () => Promise.resolve(""),
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					text: () => Promise.resolve("fallback instructions"),
-					headers: { get: () => "fallback-etag" },
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: false,
+							status: 403,
+							text: () => Promise.resolve(""),
+							headers: { get: () => null },
+						});
+					}
+					if (href.includes("github.com/openai/codex/releases")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							url: "https://github.com/openai/codex/releases/tag/rust-v0.45.0",
+							text: () => Promise.resolve(""),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						text: () => Promise.resolve(padPrompt("fallback instructions")),
+						headers: { get: () => "fallback-etag" },
+					});
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("gpt-5.2-codex");
-				expect(result).toBe("fallback instructions");
+				expect(result).toContain("fallback instructions");
 			});
 
 			it("should parse tag from HTML content if URL parsing fails", async () => {
 				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-				mockFetch.mockResolvedValueOnce({
-					ok: false,
-					status: 500,
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					url: "https://github.com/openai/codex/releases/latest",
-					text: () => Promise.resolve('<a href="/openai/codex/releases/tag/rust-v0.47.0">Release</a>'),
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					text: () => Promise.resolve("html parsed instructions"),
-					headers: { get: () => "html-etag" },
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: false,
+							status: 500,
+							text: () => Promise.resolve(""),
+							headers: { get: () => null },
+						});
+					}
+					if (href.includes("github.com/openai/codex/releases")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							url: "https://github.com/openai/codex/releases/latest",
+							text: () => Promise.resolve('<a href="/openai/codex/releases/tag/rust-v0.47.0">Release</a>'),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						text: () => Promise.resolve(padPrompt("html parsed instructions")),
+						headers: { get: () => "html-etag" },
+					});
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("codex");
-				expect(result).toBe("html parsed instructions");
+				expect(result).toContain("html parsed instructions");
 			});
 
 		it("should fall back to bundled when HTML fallback page request fails", async () => {
 			mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-			mockFetch.mockResolvedValueOnce({
-				ok: false,
-				status: 403,
-			});
-			mockFetch.mockResolvedValueOnce({
-				ok: false,
-				status: 500,
+			mockFetch.mockImplementation((url: unknown) => {
+				const href = String(url);
+				const status = href.includes("api.github.com") ? 403 : 500;
+				return Promise.resolve({
+					ok: false,
+					status,
+					text: () => Promise.resolve(""),
+					headers: { get: () => null },
+				});
 			});
 
 			const result = await getCodexInstructions("gpt-5.2");
@@ -429,14 +607,23 @@ describe("Codex Prompts Module", () => {
 
 		it("should fall back to bundled when both URL parsing and HTML regex fail", async () => {
 			mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-			mockFetch.mockResolvedValueOnce({
-				ok: false,
-				status: 403,
-			});
-			mockFetch.mockResolvedValueOnce({
-				ok: true,
-				url: "https://github.com/openai/codex/releases/latest",
-				text: () => Promise.resolve("no matching content here"),
+			mockFetch.mockImplementation((url: unknown) => {
+				const href = String(url);
+				if (href.includes("api.github.com")) {
+					return Promise.resolve({
+						ok: false,
+						status: 403,
+						text: () => Promise.resolve(""),
+						headers: { get: () => null },
+					});
+				}
+				return Promise.resolve({
+					ok: true,
+					status: 200,
+					url: "https://github.com/openai/codex/releases/latest",
+					text: () => Promise.resolve("no matching content here"),
+					headers: { get: () => null },
+				});
 			});
 
 			const result = await getCodexInstructions("gpt-5.1");
@@ -448,47 +635,60 @@ describe("Codex Prompts Module", () => {
 	});
 
 		describe("Fallback behavior", () => {
-			it("should fall back to disk cache on fetch error", async () => {
+			it("should fall back to a hash-bound disk cache on fetch error", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				const diskBody = padPrompt("fallback disk content");
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "old",
+							url: "https://example.com",
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve("fallback disk content");
+					return Promise.resolve(diskBody);
 				});
 				mockFetch.mockRejectedValue(new Error("Network error"));
 
 				const result = await getCodexInstructions("gpt-5.1");
-				expect(result).toBe("fallback disk content");
+				expect(result).toContain("fallback disk content");
 			});
 
-			it("should fall back to disk cache on HTTP error response", async () => {
+			it("should fall back to a hash-bound disk cache on HTTP error response", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				const diskBody = padPrompt("disk cache fallback");
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "rust-v0.43.0",
+							url: "https://example.com",
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve("disk cache fallback");
+					return Promise.resolve(diskBody);
 				});
-				mockFetch.mockResolvedValueOnce({
-					ok: true,
-					json: () => Promise.resolve({ tag_name: "rust-v0.43.0" }),
-				});
-				mockFetch.mockResolvedValueOnce({
-					ok: false,
-					status: 500,
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.43.0" })),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: false,
+						status: 500,
+						text: () => Promise.resolve(""),
+						headers: { get: () => null },
+					});
 				});
 
 				const result = await getCodexInstructions("gpt-5.2");
-				expect(result).toBe("disk cache fallback");
+				expect(result).toContain("disk cache fallback");
 			});
 
 			it("should fall back to bundled instructions when all else fails", async () => {
@@ -517,6 +717,195 @@ describe("Codex Prompts Module", () => {
 			});
 		});
 
+		describe("Cache poisoning defenses", () => {
+			it("treats a future lastChecked as absent and fetches fresh", async () => {
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"planted"',
+							tag: "rust-v0.43.0",
+							url: "https://raw.githubusercontent.com/openai/codex/rust-v0.43.0/codex-rs/core/gpt_5_codex_prompt.md",
+							// A stamp in the future satisfies `now - lastChecked < TTL`
+							// forever; it must not pin the planted body in place.
+							lastChecked: Date.now() + 60 * 60 * 1000,
+						}));
+					}
+					return Promise.resolve(padPrompt("planted disk content"));
+				});
+				stubOkFetch({
+					tag: "rust-v0.99.0",
+					prompt: padPrompt("freshly fetched"),
+					etag: '"new-etag"',
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				expect(mockFetch).toHaveBeenCalled();
+				expect(result).toContain("freshly fetched");
+			});
+
+			it("never serves a plausible planted body without an upstream exchange", async () => {
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"planted-etag"',
+							tag: "rust-v0.43.0",
+							url: "https://example.com/prompt.md",
+							// Past stamp inside the TTL window — the exact cache the
+							// review planted and had served with zero fetches.
+							lastChecked: Date.now() - 60 * 1000,
+						}));
+					}
+					return Promise.resolve(padPrompt("planted instructions body"));
+				});
+				stubOkFetch({
+					tag: "rust-v0.43.0",
+					prompt: padPrompt("verified upstream body"),
+					etag: '"real-etag"',
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				// The plant fails the conditional handshake: its forged etag gets
+				// a 200 (not a confirming 304) and real bytes replace it.
+				expect(mockFetch).toHaveBeenCalled();
+				expect(result).toContain("verified upstream body");
+				expect(result).not.toContain("planted instructions body");
+			});
+
+			it("never serves a planted cache — not even inside a genuine offline window", async () => {
+				// The plant pairs plausible bytes with a forged meta. After the
+				// fetch fails the only disk bodies allowed to serve are ones the
+				// recorded etag hash-binds, and this etag binds nothing.
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"planted-etag"',
+							tag: "rust-v0.43.0",
+							url: "https://example.com/prompt.md",
+							lastChecked: Date.now() - 60 * 1000,
+						}));
+					}
+					return Promise.resolve(padPrompt("offline planted body"));
+				});
+				mockFetch.mockRejectedValue(new Error("offline"));
+
+				const first = await getCodexInstructions("gpt-5-codex");
+				expect(first).not.toContain("offline planted body");
+				expect(first).toContain("apply_patch"); // bundled fallback
+
+				// A recent failure suppresses retry for the TTL window — the
+				// second call must not pay another doomed fetch, and still
+				// must not reach for the planted file.
+				const callsAfterFirst = mockFetch.mock.calls.length;
+				const second = await getCodexInstructions("gpt-5-codex");
+				expect(second).not.toContain("offline planted body");
+				expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
+			});
+
+			it("never interpolates a malformed release tag into the prompt URL", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockFetch.mockImplementation((url) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							// A tag with path separators would escape the pinned
+							// openai/codex path via WHATWG URL normalization.
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "../../evil/repo" })),
+							headers: { get: () => null },
+						});
+					}
+					if (href.includes("github.com/openai/codex/releases")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							url: "https://github.com/openai/codex/releases/tag/rust-v0.99.0",
+							text: () => Promise.resolve("<html></html>"),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						text: () => Promise.resolve(padPrompt("freshly fetched")),
+						headers: { get: () => '"etag"' },
+					});
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				const fetchedUrls = mockFetch.mock.calls.map((call) => String(call[0]));
+				expect(fetchedUrls.some((u) => u.includes("evil") || u.includes(".."))).toBe(false);
+				expect(result).toContain("freshly fetched");
+			});
+
+			it("rejects an HTML error page served as the prompt body", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				const htmlErrorPage =
+					"<!DOCTYPE html><html><body>404 Not Found" + "x".repeat(200) + "</body></html>";
+				mockFetch.mockImplementation((url) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.99.0" })),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						status: 200,
+						text: () => Promise.resolve(htmlErrorPage),
+						headers: { get: () => '"etag"' },
+					});
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				expect(result).not.toContain("404 Not Found");
+				expect(result).toContain(
+					"You are the model identified to the backend as gpt-5-codex",
+				);
+				// The rejected body must never reach the cache.
+				expect(
+					mockedWriteFileAtomic.mock.calls.some(([, contents]) =>
+						String(contents).includes("404 Not Found"),
+					),
+				).toBe(false);
+			});
+
+			it("does not serve a too-short or HTML disk cache body", async () => {
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"e"',
+							tag: "rust-v0.43.0",
+							url: "https://example.com/prompt.md",
+							lastChecked: Date.now() - 60 * 1000,
+						}));
+					}
+					// Fresh meta over a stub body: the stub would otherwise be served
+					// verbatim as a system prompt.
+					return Promise.resolve("short");
+				});
+				mockFetch.mockRejectedValue(new Error("offline"));
+
+				const result = await getCodexInstructions("gpt-5.1");
+
+				expect(result).not.toBe("short");
+				expect(result).toContain(
+					"You are the model identified to the backend as gpt-5.1",
+				);
+			});
+		});
+
 		describe("Cache size management", () => {
 			it("should handle multiple model families without exceeding cache size", async () => {
 				mockedReadFile.mockResolvedValue("instructions");
@@ -528,6 +917,9 @@ describe("Codex Prompts Module", () => {
 			});
 
 			it("should evict oldest entry when cache exceeds max size", async () => {
+				// Entries only enter the cache through a real fetch, so the
+				// flood is driven by successful upstream responses.
+				stubOkFetch({ prompt: padPrompt("cached instructions") });
 				const recentTimestamp = Date.now() - 5 * 60 * 1000;
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
@@ -538,7 +930,7 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("cached instructions");
+					return Promise.resolve(padPrompt("cached instructions"));
 				});
 
 				for (let i = 0; i < 55; i++) {
@@ -546,21 +938,16 @@ describe("Codex Prompts Module", () => {
 				}
 				
 				const result = await getCodexInstructions("gpt-5.1-codex");
-				expect(result).toBe("cached instructions");
+				expect(result).toContain("cached instructions");
 			});
 		});
 
 			describe("Model family mapping", () => {
 				it("should use correct prompt file for each model family", async () => {
 				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-				mockFetch.mockResolvedValue({
-					ok: true,
-					json: () => Promise.resolve({ tag_name: "rust-v0.43.0" }),
-					text: () => Promise.resolve("content"),
-					headers: { get: () => "etag" },
-				});
+				stubOkFetch({ tag: "rust-v0.43.0", prompt: padPrompt("content") });
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				await getCodexInstructions("gpt-5-codex");
 				
@@ -573,14 +960,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should map gpt-5.3-codex prompts to the current codex prompt file", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.98.0" }),
-						text: () => Promise.resolve("content"),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.98.0", prompt: padPrompt("content") });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.3-codex");
 					const fetchCalls = mockFetch.mock.calls;
@@ -597,22 +979,17 @@ describe("Codex Prompts Module", () => {
 				// the Codex CLI", which is not what the backend expects for 5.4/5.5.
 				const catalogPayload = JSON.stringify({
 					models: [
-						{ slug: "gpt-5.4", base_instructions: "GPT54 CATALOG PROMPT" },
-						{ slug: "gpt-5.4-mini", base_instructions: "GPT54MINI CATALOG PROMPT" },
-						{ slug: "gpt-5.5", base_instructions: "GPT55 CATALOG PROMPT" },
+						{ slug: "gpt-5.4", base_instructions: padPrompt("GPT54 CATALOG PROMPT") },
+						{ slug: "gpt-5.4-mini", base_instructions: padPrompt("GPT54MINI CATALOG PROMPT") },
+						{ slug: "gpt-5.5", base_instructions: padPrompt("GPT55 CATALOG PROMPT") },
 					],
 				});
 
 				it("should source gpt-5.4 instructions from the model catalog", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve(catalogPayload),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const result = await getCodexInstructions("gpt-5.4");
 					const fetchCalls = mockFetch.mock.calls;
@@ -634,14 +1011,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should give gpt-5.5 its own catalog text and cache file, not gpt-5.4's", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve(catalogPayload),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// gpt-5.5 and gpt-5.4 share the `gpt-5.4` model family, so a
 					// family-keyed cache would let one serve the other's prompt.
@@ -649,7 +1021,7 @@ describe("Codex Prompts Module", () => {
 					expect(result).toContain("GPT55 CATALOG PROMPT");
 					expect(result).not.toContain("GPT54 CATALOG PROMPT");
 
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) =>
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) =>
 						String(target),
 					);
 					expect(
@@ -664,6 +1036,54 @@ describe("Codex Prompts Module", () => {
 					).toBe(false);
 				});
 
+				it("serves a catalog-derived disk cache offline via its recorded contentSha", async () => {
+					// Catalog instructions persist with `etag: null` — there is no
+					// upstream validator for catalog-derived content. Without a
+					// recorded content hash the offline disk-serve gate could never
+					// accept that cache, so a restart + outage served bundled
+					// instructions instead of the cached model text (greptile P1
+					// on PR #281). Persisting `contentSha` on every write gives
+					// the gate something to hash-bind regardless of etag presence.
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+
+					const first = await getCodexInstructions("gpt-5.4");
+					expect(first).toContain("GPT54 CATALOG PROMPT");
+
+					const metaWrite = mockedWriteFileAtomic.mock.calls.find(([target]) =>
+						String(target).includes("catalog-gpt-5.4-instructions-meta.json"),
+					);
+					const bodyWrite = mockedWriteFileAtomic.mock.calls.find(
+						([target]) =>
+							String(target).includes("catalog-gpt-5.4-instructions.md") &&
+							!String(target).includes("meta"),
+					);
+					expect(metaWrite).toBeDefined();
+					expect(bodyWrite).toBeDefined();
+					const metaJson = String(metaWrite![1]);
+					const bodyContent = String(bodyWrite![1]);
+					const persisted = JSON.parse(metaJson) as {
+						etag: string | null;
+						contentSha?: string;
+					};
+					expect(persisted.etag).toBeNull();
+					expect(persisted.contentSha).toBe(gitBlobSha1(bodyContent));
+
+					// Simulate a restart: process caches cleared, upstream dead.
+					__clearCacheForTesting();
+					mockFetch.mockRejectedValue(new Error("offline"));
+					mockedReadFile.mockImplementation((filePath) =>
+						String(filePath).includes("meta")
+							? Promise.resolve(metaJson)
+							: Promise.resolve(bodyContent),
+					);
+
+					const second = await getCodexInstructions("gpt-5.4");
+					expect(second).toContain("GPT54 CATALOG PROMPT");
+				});
+
 				// Regression: slug-space and family-space overlap. gpt-5.4-nano has no
 				// catalog entry and lives in the `gpt-5.4` family, which IS a catalog
 				// slug. An un-namespaced cache key let them serve each other's
@@ -672,18 +1092,26 @@ describe("Codex Prompts Module", () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 					mockFetch.mockImplementation((url: unknown) => {
 						const href = String(url);
+						if (href.includes("api.github.com")) {
+							return Promise.resolve({
+								ok: true,
+								status: 200,
+								text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.111.0" })),
+								headers: { get: () => null },
+							});
+						}
 						const body = href.includes("models.json")
 							? catalogPayload
-							: "PROMPT FILE CONTENT";
+							: padPrompt("PROMPT FILE CONTENT");
 						return Promise.resolve({
 							ok: true,
-							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
+							status: 200,
 							text: () => Promise.resolve(body),
 							headers: { get: () => "etag" },
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// Warm the catalog entry first, exactly as prewarmCodexInstructions does.
 					const catalogResult = await getCodexInstructions("gpt-5.4");
@@ -691,7 +1119,7 @@ describe("Codex Prompts Module", () => {
 
 					// nano must NOT pick up the memory-cached catalog text.
 					const nanoResult = await getCodexInstructions("gpt-5.4-nano");
-					expect(nanoResult).toContain("PROMPT FILE CONTENT");
+					expect(nanoResult).toContain(padPrompt("PROMPT FILE CONTENT"));
 					expect(nanoResult).not.toContain("GPT54 CATALOG PROMPT");
 				});
 
@@ -699,26 +1127,34 @@ describe("Codex Prompts Module", () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 					mockFetch.mockImplementation((url: unknown) => {
 						const href = String(url);
+						if (href.includes("api.github.com")) {
+							return Promise.resolve({
+								ok: true,
+								status: 200,
+								text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.111.0" })),
+								headers: { get: () => null },
+							});
+						}
 						const body = href.includes("models.json")
 							? catalogPayload
-							: "PROMPT FILE CONTENT";
+							: padPrompt("PROMPT FILE CONTENT");
 						return Promise.resolve({
 							ok: true,
-							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
+							status: 200,
 							text: () => Promise.resolve(body),
 							headers: { get: () => "etag" },
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// Reverse order: nano first, then gpt-5.4.
 					const nanoResult = await getCodexInstructions("gpt-5.4-nano");
-					expect(nanoResult).toContain("PROMPT FILE CONTENT");
+					expect(nanoResult).toContain(padPrompt("PROMPT FILE CONTENT"));
 
 					const catalogResult = await getCodexInstructions("gpt-5.4");
 					expect(catalogResult).toContain("GPT54 CATALOG PROMPT");
-					expect(catalogResult).not.toContain("PROMPT FILE CONTENT");
+					expect(catalogResult).not.toContain(padPrompt("PROMPT FILE CONTENT"));
 				});
 
 				// prewarmCodexInstructions fires every catalog model concurrently, so a
@@ -737,20 +1173,28 @@ describe("Codex Prompts Module", () => {
 							// Hold the fetch open so every caller arrives before it resolves.
 							return catalogGate.then(() => ({
 								ok: true,
-								json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
+								status: 200,
 								text: () => Promise.resolve(catalogPayload),
 								headers: { get: () => "etag" },
 							}));
 						}
+						if (href.includes("api.github.com")) {
+							return Promise.resolve({
+								ok: true,
+								status: 200,
+								text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.111.0" })),
+								headers: { get: () => null },
+							});
+						}
 						return Promise.resolve({
 							ok: true,
-							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-							text: () => Promise.resolve("PROMPT FILE CONTENT"),
+							status: 200,
+							text: () => Promise.resolve(padPrompt("PROMPT FILE CONTENT")),
 							headers: { get: () => "etag" },
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const pending = Promise.all([
 						getCodexInstructions("gpt-5.4"),
@@ -775,14 +1219,9 @@ describe("Codex Prompts Module", () => {
 				it("should fall back to the prompt file when the tag has no catalog entry", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
 					// Catalog without gpt-5.4 — simulates a release predating the slug.
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve(JSON.stringify({ models: [] })),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: JSON.stringify({ models: [] }) });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.4");
 					const fetchCalls = mockFetch.mock.calls;
@@ -796,14 +1235,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should still use the prompt file for models absent from the catalog", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve("content"),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", prompt: padPrompt("content") });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// gpt-5.1 has no catalog entry; it must not fetch models.json at all.
 					await getCodexInstructions("gpt-5.1");
@@ -824,14 +1258,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should map gpt-5.4-pro prompts to gpt_5_2 prompt file with isolated cache key", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve("content"),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", prompt: padPrompt("content") });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.4-pro");
 					const fetchCalls = mockFetch.mock.calls;
@@ -840,7 +1269,7 @@ describe("Codex Prompts Module", () => {
 							typeof call[0] === "string" &&
 							call[0].includes("raw.githubusercontent.com"),
 					);
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) => String(target));
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) => String(target));
 					expect(rawGitHubCall?.[0]).toContain("gpt_5_2_prompt.md");
 					expect(writeTargets.some((target) => target.includes("gpt-5.4-pro-instructions.md"))).toBe(true);
 					expect(
@@ -850,14 +1279,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should source gpt-5.4-mini from the catalog with an isolated cache key", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve(catalogPayload),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const result = await getCodexInstructions("gpt-5.4-mini");
 					const fetchCalls = mockFetch.mock.calls;
@@ -866,7 +1290,7 @@ describe("Codex Prompts Module", () => {
 							typeof call[0] === "string" &&
 							call[0].includes("raw.githubusercontent.com"),
 					);
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) => String(target));
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) => String(target));
 					expect(rawGitHubCall?.[0]).toContain("models-manager/models.json");
 					expect(result).toContain("GPT54MINI CATALOG PROMPT");
 					expect(
@@ -884,14 +1308,9 @@ describe("Codex Prompts Module", () => {
 
 				it("should map gpt-5.3-codex-spark prompts to the current codex prompt file", async () => {
 					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
-					mockFetch.mockResolvedValue({
-						ok: true,
-						json: () => Promise.resolve({ tag_name: "rust-v0.101.0" }),
-						text: () => Promise.resolve("content"),
-						headers: { get: () => "etag" },
-					});
+					stubOkFetch({ tag: "rust-v0.101.0", prompt: padPrompt("content") });
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.3-codex-spark");
 					const fetchCalls = mockFetch.mock.calls;

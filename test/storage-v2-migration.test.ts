@@ -57,7 +57,11 @@ describe("V2 storage detection (normalizeAccountStorage)", () => {
 			expect(error).toBeInstanceOf(StorageError);
 			const storageError = error as StorageError;
 			expect(storageError.code).toBe(UNKNOWN_V2_FORMAT_CODE);
-			expect(storageError.message).toBe(buildV2RejectionMessage());
+			// StorageError folds its hint into `message`; the rejection sentence
+			// still leads it byte-for-byte.
+			expect(storageError.message.startsWith(buildV2RejectionMessage())).toBe(true);
+			expect(storageError.message).toContain("(hint:");
+			expect(storageError.message).toContain(storageError.hint);
 		}
 	});
 
@@ -83,7 +87,11 @@ describe("V2 storage detection (normalizeAccountStorage)", () => {
 			expect(error).toBeInstanceOf(StorageError);
 			const storageError = error as StorageError;
 			expect(storageError.code).toBe(UNKNOWN_V2_FORMAT_CODE);
-			expect(storageError.message).toBe(buildV2RejectionMessage());
+			// StorageError folds its hint into `message`; the rejection sentence
+			// still leads it byte-for-byte.
+			expect(storageError.message.startsWith(buildV2RejectionMessage())).toBe(true);
+			expect(storageError.message).toContain("(hint:");
+			expect(storageError.message).toContain(storageError.hint);
 		}
 	});
 

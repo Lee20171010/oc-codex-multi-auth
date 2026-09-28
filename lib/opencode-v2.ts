@@ -105,7 +105,13 @@ export function missingV2SdkSurface(context: Plugin.Context): string[] {
 	const member = (path: string): unknown => {
 		let value: unknown = context;
 		for (const key of path.split(".")) {
-			if (typeof value !== "object" || value === null) return undefined;
+			// Callable namespaces are legal: an SDK member can be a function
+			// carrying properties (e.g. `event` with `event.subscribe`), and a
+			// `typeof === "function"` node must still be walked, not reported
+			// missing.
+			if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+				return undefined;
+			}
 			value = (value as Record<string, unknown>)[key];
 		}
 		return value;

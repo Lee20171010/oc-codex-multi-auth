@@ -142,6 +142,10 @@ export interface CodexNetworkErrorOptions extends CodexErrorOptions {
 
 /**
  * Error for network/connection failures.
+ *
+ * Wired into real throw sites via `lib/prompts/codex.ts` (prompt fetch
+ * transport failures) — kept distinct from {@link CodexApiError} (an HTTP
+ * response that arrived) so callers can tell "no response" from "bad response".
  */
 export class CodexNetworkError extends CodexError {
 	override readonly name = "CodexNetworkError";
@@ -152,6 +156,38 @@ export class CodexNetworkError extends CodexError {
 			...options,
 			code: options?.code ?? ErrorCode.NETWORK_ERROR,
 		});
+		this.retryable = options?.retryable ?? true;
+	}
+}
+
+/**
+ * Options for creating a CodexTimeoutError.
+ */
+export interface CodexTimeoutErrorOptions extends CodexErrorOptions {
+	/** The timeout budget that elapsed, in milliseconds, when known. */
+	timeoutMs?: number;
+	/** Timeouts are transient by default; pass false for a hard deadline. */
+	retryable?: boolean;
+}
+
+/**
+ * Error for deadline-elapsed failures.
+ *
+ * Wired into real throw sites: `createUsageRequestTimeoutError` in
+ * `error-sentinels.ts` (the usage-probe sentinel consumed by the orchestrator)
+ * and the prompt-fetch timeout helpers in `lib/prompts/`.
+ */
+export class CodexTimeoutError extends CodexError {
+	override readonly name = "CodexTimeoutError";
+	readonly timeoutMs?: number;
+	readonly retryable: boolean;
+
+	constructor(message: string, options?: CodexTimeoutErrorOptions) {
+		super(message, {
+			...options,
+			code: options?.code ?? ErrorCode.TIMEOUT,
+		});
+		this.timeoutMs = options?.timeoutMs;
 		this.retryable = options?.retryable ?? true;
 	}
 }
@@ -211,6 +247,12 @@ export class CodexRateLimitError extends CodexError {
  * Positional constructor kept for backward compatibility with existing call
  * sites and test assertions (the class was previously defined in
  * `lib/storage/errors.ts` with this exact signature).
+ *
+ * The `hint` is folded into `.message` because most error surfaces render only
+ * `err.message` — a bare "Failed to write file" with the remediation stranded
+ * in `.hint` leaves users without the one piece of text that tells them what
+ * to do. `hint` remains a structured field for callers that format it
+ * separately; they should render `hint` OR `message`, not both.
  */
 export class StorageError extends CodexError {
 	override readonly name = "StorageError";
@@ -218,7 +260,7 @@ export class StorageError extends CodexError {
 	readonly hint: string;
 
 	constructor(message: string, code: string, path: string, hint: string, cause?: Error) {
-		super(message, { code, cause });
+		super(hint ? `${message} (hint: ${hint})` : message, { code, cause });
 		this.path = path;
 		this.hint = hint;
 	}
