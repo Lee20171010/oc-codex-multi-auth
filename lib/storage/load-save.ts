@@ -874,10 +874,22 @@ export async function syncKeychainMigrationMarkers(
       await fs.unlink(marker);
       await fsyncParentDirectory(marker);
     } catch (error) {
-      log.warn("keychain: failed to retire a stale migration marker", {
+      // The survivor stays servable through the corrupt-newest-marker
+      // recovery path — refresh its bytes to the blob just written so it
+      // mirrors the current pool rather than a pre-rotation one (greptile
+      // P1 on PR #280). If the refresh fails too, the error stays loud.
+      log.warn("keychain: failed to retire a stale migration marker; refreshing it to the current pool instead", {
         marker,
         error: String(error),
       });
+      try {
+        await writeFileAtomic(marker, blob);
+      } catch (refreshError) {
+        log.error(
+          "keychain: a stale migration marker survived both removal and refresh; the corrupt-marker recovery path may restore consumed credentials",
+          { marker, error: String(refreshError) },
+        );
+      }
     }
   }
 }
