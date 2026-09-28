@@ -105,6 +105,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("runs status as JSON without installer writes", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(
@@ -142,6 +144,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("status: the masked id suffix reveals no more than the masked accountId beside it", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "user@example.com",
@@ -167,6 +171,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("status: --include-sensitive keeps the six-character id suffix the other surfaces print", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "user@example.com",
@@ -195,6 +201,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// all these two rows read identically.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "dup@example.com",
@@ -239,6 +247,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("list: keeps the seat short for member ids that differ only at the head", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const workspaceUuid = "05cd9f04-d56a-4256-9934-9cb827989a40";
 		await seedPool(
 			tempHome,
@@ -280,6 +290,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("list: keeps the seat distinct and bounded on the measured real-pool id shape", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const workspaces = [
 			"05cd9f04-d56a-4256-9934-9cb827989a40",
 			"0ce0db3a-1111-2222-3333-444444ff8839",
@@ -348,6 +360,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("list: excerpts clustered divergences rather than giving up on them", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const base = "user_0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnop";
 		const memberIds = [
 			base,
@@ -395,6 +409,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// organization beside the very account id that label was misnaming.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "personal@example.com",
@@ -439,6 +455,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// characters, and padding must not clear the cutoff on its own.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "me@x.io",
@@ -480,6 +498,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// characters of a short id can be the entire id.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				email: "user@example.com",
@@ -540,6 +560,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		vi.resetModules();
 		vi.stubEnv("CODEX_KEYCHAIN", "1");
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [freshAccount({ refreshToken: "home-secret" })]);
 		const homePath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		const homeBefore = await readFile(homePath, "utf-8");
@@ -579,6 +601,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		vi.resetModules();
 		vi.stubEnv("CODEX_KEYCHAIN", "1");
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const keychainRouting: (string | undefined)[] = [];
@@ -622,6 +646,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		vi.resetModules();
 		vi.stubEnv("CODEX_KEYCHAIN", "1");
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected OAuth request"));
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -655,6 +681,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given an explicitly selected file that cannot be parsed as JSON.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const poolPath = join(tempHome, "malformed-pool.json");
 		await writeFile(poolPath, "{", "utf-8");
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -685,6 +713,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// parse failure (loadAccounts returns null instead of throwing).
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const accountsPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		await mkdir(join(tempHome, ".opencode"), { recursive: true });
 		await writeFile(accountsPath, "{", "utf-8");
@@ -715,6 +745,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given a file that parses as JSON but is not an accounts object.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const accountsPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		await mkdir(join(tempHome, ".opencode"), { recursive: true });
 		const contents =
@@ -742,6 +774,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given a file written by a newer plugin build (schema v4).
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const accountsPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		await mkdir(join(tempHome, ".opencode"), { recursive: true });
 		await writeFile(accountsPath, JSON.stringify({ version: 4, activeIndex: 0, accounts: [] }), "utf-8");
@@ -764,6 +798,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// forward-compat StorageError is thrown by real loadAccounts code.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const accountsPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		await mkdir(join(tempHome, ".opencode"), { recursive: true });
 		await writeFile(accountsPath, JSON.stringify({ version: 4, activeIndex: 0, accounts: [] }), "utf-8");
@@ -793,6 +829,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given a corrupt default file that the runtime load swallows to null.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const accountsPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		await mkdir(join(tempHome, ".opencode"), { recursive: true });
 		await writeFile(accountsPath, "{", "utf-8");
@@ -817,6 +855,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		vi.resetModules();
 		vi.stubEnv("CODEX_KEYCHAIN", "1");
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const failure = new Error("upstream-private-token-text");
@@ -847,6 +887,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given one recoverable, one failing, and one intentionally disabled account.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const poolPath = join(tempHome, "selected-pool.json");
 		const stale = { coolingDownUntil: Date.now() + 86_400_000, cooldownReason: "auth-failure", rateLimitResetTimes: { codex: Date.now() + 86_400_000 } };
 		const failed = freshAccount({ ...stale, accountId: "acct_failed", refreshToken: "failed-refresh-secret" });
@@ -882,6 +924,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Given a stale pool that would require verification to repair.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [freshAccount({ rateLimitResetTimes: { codex: Date.now() + 86_400_000 } })]);
 		const poolPath = join(tempHome, ".opencode", "oc-codex-multi-auth-accounts.json");
 		const before = await readFile(poolPath, "utf-8");
@@ -900,6 +944,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("warm: empty pool reports 0/0/0 and exits 0 (no network)", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, []);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -917,6 +963,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it.each(["warm", "limits"])("%s clears proven recovered blocks on disk", async (command) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount({ quotaExhaustedUntil: 1234, rateLimitResetTimes: { codex: 5678 } })]);
 		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ rate_limit: {
 			primary_window: { used_percent: 10, limit_window_seconds: 18_000 },
@@ -948,6 +996,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("warm: opens the window for an enabled account when upstream returns 200", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		const fetchSpy = vi
 			.spyOn(globalThis, "fetch")
@@ -977,6 +1027,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("warm: a quota-429 account is reported failed (NOT warmed) and exits 1", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: false,
@@ -1001,6 +1053,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("warm: skips a disabled account without any upstream call", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount({ enabled: false })]);
 		const fetchSpy = vi.spyOn(globalThis, "fetch");
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1020,6 +1074,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("warm: masks emails by default in output", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount({ enabled: false })]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -1052,6 +1108,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: empty pool reports no accounts and exits 0 (#209)", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, []);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -1076,6 +1134,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: reports live 5h and weekly windows per account (#209)", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: true,
@@ -1105,6 +1165,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: persists a spent weekly quota so rotation skips its Credits", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		const weeklyResetAt = Math.floor(Date.now() / 1000) + 86_400;
 		const spentUsagePayload = {
@@ -1152,6 +1214,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: renders the windows in text output rather than a bare account list (#209)", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: true,
@@ -1218,6 +1282,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: prints each renewal as a timestamp with a countdown on its own line", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		mockUsageSequence([weeklyPayload("self_serve_business_prolite", 65, 5 * 86_400 + 3 * 3_600 + 600)]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1271,6 +1337,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: reports the plugin's last readings without asking upstream", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts();
 		await writeAccounts(tempHome, pool);
 		const fetchedAt = Date.now() - 14 * 60_000;
@@ -1299,6 +1367,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: says where the readings came from and when", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts().slice(0, 2);
 		await writeAccounts(tempHome, pool);
 		await writePluginSnapshot(tempHome, Date.now() - 14 * 60_000, [
@@ -1324,6 +1394,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: dates each reading by when that account was read", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts().slice(0, 2);
 		await writeAccounts(tempHome, pool);
 		const fresh = Date.now() - 5 * 60_000;
@@ -1351,6 +1423,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: never refreshes a token just to name an account it reports from cache", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = [freshAccount({ refreshToken: "rt-a", accountId: "acct_a", expiresAt: Date.now() - 60_000 })];
 		await writeAccounts(tempHome, pool);
 		await writePluginSnapshot(tempHome, Date.now() - 60_000, [
@@ -1371,6 +1445,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: --refresh reads live and hands the reading back to the plugin", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts().slice(0, 1);
 		await writeAccounts(tempHome, pool);
 		const stale = Date.now() - 3 * 3_600_000;
@@ -1399,6 +1475,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: reads live when the plugin has no readings, then serves the next run from them", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts().slice(0, 2));
 		const fetchSpy = mockUsageSequence([weeklyPayload("plus", 20, 86_400)]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1424,6 +1502,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: does not write a snapshot that would leave out an account it failed to read", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts().slice(0, 2));
 		let call = 0;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -1445,6 +1525,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: never reports one account's cached quota for another with the same email", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = [freshAccount({ refreshToken: "rt-seat", accountId: "acct_seat" })];
 		await writeAccounts(tempHome, pool);
 		// Same email, same pool position, different credential: another seat.
@@ -1468,6 +1550,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: leaves alone a snapshot another process wrote during the run", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts().slice(0, 1);
 		await writeAccounts(tempHome, pool);
 		await writePluginSnapshot(tempHome, Date.now() - 3_600_000, [
@@ -1497,6 +1581,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: never writes an alternate --config-path pool into the plugin's snapshot", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const alternate = join(tempHome, "alternate-accounts.json");
 		await writeFile(
 			alternate,
@@ -1518,6 +1604,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: does not overwrite a snapshot of a different pool", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const pool = threeAccounts();
 		await writeAccounts(tempHome, pool.slice(0, 1));
 		const foreign = freshAccount({ email: "other@example.com", refreshToken: "rt-other", accountId: "acct_other" });
@@ -1542,6 +1630,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: remembers workspace names instead of asking on every run", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount({ refreshToken: "rt-a", accountId: "acct_a" })]);
 		const fetchSpy = mockUsageSequence(
 			[weeklyPayload("self_serve_business_prolite", 10, 86_400)],
@@ -1562,6 +1652,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: lines every value in an account up in one column", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount({ refreshToken: "rt-a", accountId: "acct_a" })]);
 		mockUsageSequence(
 			[weeklyPayload("self_serve_business_prolite", 100, 86_400)],
@@ -1590,6 +1682,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: ranks an account with both windows spent by its later reset", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts().slice(0, 2));
 		const now = Math.floor(Date.now() / 1000);
 		const bothSpent = {
@@ -1614,6 +1708,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: an unreadable plan type does not fail the account", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		mockUsageSequence([{ ...weeklyPayload("plus", 10, 86_400), plan_type: 42 }]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1632,6 +1728,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: names the Business workspace below the account line", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [
 			freshAccount({ refreshToken: "rt-a", accountId: "acct_a" }),
 			freshAccount({ refreshToken: "rt-b", accountId: "acct_b" }),
@@ -1666,6 +1764,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: says an untouched window has not started instead of inventing a renewal", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		mockUsageSequence([weeklyPayload("pro", 0, 604_800)]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1684,6 +1784,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: keeps a window used below one percent as started", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		mockUsageSequence([weeklyPayload("pro", 0, 604_000)]);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -1700,6 +1802,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: sorts by account number by default", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts());
 		mockUsageSequence([
 			weeklyPayload("plus", 90, 3 * 86_400),
@@ -1726,6 +1830,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	])("limits: %j orders the accounts %j", async (flags, expected) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts());
 		mockUsageSequence([
 			weeklyPayload("plus", 90, 3 * 86_400),
@@ -1746,6 +1852,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: sorts a window that has not started after every real renewal", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, threeAccounts());
 		mockUsageSequence([
 			weeklyPayload("plus", 0, 604_800),
@@ -1772,6 +1880,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: colours the percentage by how much of the window is used", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [
 			freshAccount({ refreshToken: "rt-a", accountId: "acct_a" }),
 			freshAccount({ refreshToken: "rt-b", accountId: "acct_b" }),
@@ -1801,6 +1911,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: names what a seat is worth and what the pool adds up to", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: true,
@@ -1824,6 +1936,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: weighs the pool total by plan rather than averaging seats", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [
 			freshAccount({ refreshToken: "rt-pro", accountId: "acct_pro" }),
 			freshAccount({ refreshToken: "rt-plus", accountId: "acct_plus" }),
@@ -1867,6 +1981,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: --json carries the pool figures and each seat's ratio", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: true,
@@ -1896,6 +2012,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: a plan with no published ratio carries no badge", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		const freePayload = {
 			plan_type: "free",
@@ -1931,6 +2049,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		process.env[QUOTA_DISPLAY_ENV] = "used";
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: true,
@@ -1954,6 +2074,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: --tag only contacts matching accounts", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [
 			freshAccount({ email: "tagged@example.com", accountTags: ["work"] }),
 			freshAccount({
@@ -1986,6 +2108,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: --tag matches a workspace tagged on a deduplicated-away record", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		// Both records are the same workspace (same accountId), so dedupe keeps
 		// only the later one — but the tag lives on the earlier record.
 		await writeAccounts(tempHome, [
@@ -2013,6 +2137,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: redacts token material leaked by a failing refresh", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		// Expired, so ensureCodexUsageAccessToken actually performs the OAuth
 		// refresh — a future expiry would skip it and only exercise /wham/usage.
 		await writeAccounts(tempHome, [freshAccount({ expiresAt: Date.now() - 60_000 })]);
@@ -2040,6 +2166,8 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 	it("limits: an account whose usage fetch fails is reported and exits 1 (#209)", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await writeAccounts(tempHome, [freshAccount()]);
 		vi.spyOn(globalThis, "fetch").mockResolvedValue({
 			ok: false,
@@ -2057,5 +2185,116 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 
 		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
 		expect(output.accounts[0].error).toContain("500");
+	});
+
+	it("resolves the pool under os.homedir() even when env.HOME points elsewhere", async () => {
+		// The plugin runtime derives the pool via `os.homedir()` — which on
+		// Windows ignores a redirected HOME entirely. A CLI resolving the pool
+		// from `env.HOME` would then report a different file than warm/limits
+		// actually read (greptile P1 on PR #275). This test keeps process.env
+		// and the injected env deliberately divergent.
+		vi.resetModules();
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		const decoyHome = join(tempHome, "decoy-home");
+		const resolved = __test.resolveStandaloneStorage(
+			{},
+			{ HOME: decoyHome, USERPROFILE: decoyHome, [PER_PROJECT_ENV]: "0" },
+		);
+
+		const { homedir } = await import("node:os");
+		expect(resolved.storagePath).toBe(
+			join(homedir(), ".opencode", "oc-codex-multi-auth-accounts.json"),
+		);
+		expect(resolved.storagePath).not.toContain("decoy-home");
+	});
+
+	it("doctor: summarizes the keychain-held flagged pool, not just the sibling file", async () => {
+		// With CODEX_KEYCHAIN=1 a flagged save migrates the sibling file away,
+		// so a file-only probe reports zero flagged accounts while the
+		// quarantine still holds records (greptile P1 on PR #275). The probe
+		// must load through the keychain-aware storage layer instead.
+		vi.resetModules();
+		vi.stubEnv("CODEX_KEYCHAIN", "1");
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		await seedPool(tempHome, [freshAccount()]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const setStoragePathDirect = vi.fn();
+		const loadFlaggedAccounts = vi.fn(async () => ({
+			version: 1,
+			accounts: [
+				{
+					refreshToken: "flagged-rt",
+					accountId: "flagged-acct",
+					organizationId: "org-1",
+					addedAt: 1,
+					lastUsed: 1,
+					flaggedAt: 1,
+				},
+			],
+		}));
+		const loadFlaggedRuntime = vi.fn(async () => [
+			{ setStoragePathDirect, loadFlaggedAccounts },
+		]);
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["doctor", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			loadFlaggedRuntime,
+		});
+
+		expect(loadFlaggedRuntime).toHaveBeenCalled();
+		expect(loadFlaggedAccounts).toHaveBeenCalled();
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.flagged.totalAccounts).toBe(1);
+	});
+
+	it("doctor: an explicit --config selection keeps the flagged probe on the file", async () => {
+		vi.resetModules();
+		vi.stubEnv("CODEX_KEYCHAIN", "1");
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const poolPath = join(tempHome, "selected-pool.json");
+		await writeFile(
+			poolPath,
+			JSON.stringify({ version: 3, activeIndex: 0, accounts: [freshAccount()] }),
+			"utf-8",
+		);
+		// The flagged sibling beside the selected file is what a file-scoped
+		// doctor must read — never the global keychain pool.
+		await writeFile(
+			join(tempHome, "oc-codex-multi-auth-flagged-accounts.json"),
+			JSON.stringify({
+				version: 1,
+				accounts: [
+					{
+						refreshToken: "file-flagged-rt",
+						accountId: "file-flagged",
+						addedAt: 1,
+						lastUsed: 1,
+						flaggedAt: 1,
+					},
+				],
+			}),
+			"utf-8",
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const loadFlaggedRuntime = vi.fn();
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		await runInstaller(["doctor", "--json", "--config-path", poolPath], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			loadFlaggedRuntime,
+		});
+
+		expect(loadFlaggedRuntime).not.toHaveBeenCalled();
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.flagged.totalAccounts).toBe(1);
 	});
 });
