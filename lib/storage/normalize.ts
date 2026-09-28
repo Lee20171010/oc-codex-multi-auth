@@ -135,15 +135,21 @@ function sanitizeAccountNumericState(account: AccountMetadataV3): AccountMetadat
     }
   }
 
+  // The spread above is shallow, so `next.rateLimitResetTimes` still aliases
+  // the caller's map. Rebuild it instead of deleting keys on the shared
+  // object — pruning the caller's copy in place would leak "sanitized" state
+  // back through the original reference while other poisoned fields on the
+  // input keep their raw values.
   if (next.rateLimitResetTimes) {
-    let dropped = false;
+    const cleaned: Record<string, number | undefined> = {};
     for (const [key, value] of Object.entries(next.rateLimitResetTimes)) {
-      if (typeof value !== "number" || !Number.isFinite(value) || value > horizon) {
-        delete next.rateLimitResetTimes[key];
-        dropped = true;
+      if (typeof value === "number" && Number.isFinite(value) && value <= horizon) {
+        cleaned[key] = value;
       }
     }
-    if (dropped && Object.keys(next.rateLimitResetTimes).length === 0) {
+    if (Object.keys(cleaned).length > 0) {
+      next.rateLimitResetTimes = cleaned;
+    } else {
       delete next.rateLimitResetTimes;
     }
   }

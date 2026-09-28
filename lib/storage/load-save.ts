@@ -22,7 +22,7 @@ import { dirname, join } from "node:path";
 import { ACCOUNTS_FILE_NAME, LEGACY_ACCOUNTS_FILE_NAME } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { AnyAccountStorageSchema, getValidationErrors } from "../schemas.js";
-import { renameWithWindowsRetry } from "./atomic-write.js";
+import { fsyncParentDirectory, writeFileAtomic } from "./atomic-write.js";
 import { formatStorageErrorHint, StorageError } from "./errors.js";
 import { normalizeAccountStorage } from "./normalize.js";
 import { getConfigDir } from "./paths.js";
@@ -226,13 +226,15 @@ async function migrateStorageFileIfNeeded(
 
   try {
     const legacyContent = await fs.readFile(legacyPath, "utf-8");
-    const legacyData = JSON.parse(legacyContent) as unknown;
+    // A UTF-8 BOM is legal on disk but not to JSON.parse — strip before parse.
+    const legacyData = JSON.parse(legacyContent.replace(/^\uFEFF/, "")) as unknown;
     const normalized = normalizeAccountStorage(legacyData, legacyPath);
     if (!normalized) return null;
 
     await persist(normalized);
     try {
       await fs.unlink(legacyPath);
+      await fsyncParentDirectory(legacyPath);
       log.info(`Removed legacy ${label} after migration`, { path: legacyPath });
     } catch (unlinkError) {
       const code = (unlinkError as NodeJS.ErrnoException).code;
@@ -334,7 +336,7 @@ async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
 
   try {
     const content = await fs.readFile(globalStoragePath, "utf-8");
-    const data = JSON.parse(content) as unknown;
+    const data = JSON.parse(content.replace(/^\uFEFF/, "")) as unknown;
 
     const schemaErrors = getValidationErrors(AnyAccountStorageSchema, data);
     if (schemaErrors.length > 0) {
@@ -407,7 +409,7 @@ async function loadAccountsInternal(
       if (blob !== null) {
         let parsed: unknown;
         try {
-          parsed = JSON.parse(blob) as unknown;
+          parsed = JSON.parse(blob.replace(/^\uFEFF/, "")) as unknown;
         } catch (parseErr) {
           // Corrupt keychain entry: log but fall through to JSON so the
           // user can recover from their on-disk backup.
@@ -449,7 +451,7 @@ async function loadAccountsInternal(
   try {
     const path = getStoragePath();
     const content = await fs.readFile(path, "utf-8");
-    const data = JSON.parse(content) as unknown;
+    const data = JSON.parse(content.replace(/^\uFEFF/, "")) as unknown;
 
     const schemaErrors = getValidationErrors(AnyAccountStorageSchema, data);
     if (schemaErrors.length > 0) {
@@ -580,11 +582,9 @@ async function loadAccountsInternal(
  */
 async function writeAccountsToPathUnlocked(path: string, storage: AccountStorageV3): Promise<void> {
   assertTestRunNeverTouchesRealHome(path);
-  const uniqueSuffix = `${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
-  const tempPath = `${path}.${uniqueSuffix}.tmp`;
 
   try {
-    await fs.mkdir(dirname(path), { recursive: true });
+    await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await ensureGitignore(path);
 
     // Normalize before persisting so every write path enforces dedup semantics
@@ -597,24 +597,17 @@ async function writeAccountsToPathUnlocked(path: string, storage: AccountStorage
     // supersedes.
     await trySnapshotCredentialStoreBeforeWrite(path, normalizedStorage);
     const content = JSON.stringify(normalizedStorage, null, 2);
-    await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
-
-    const stats = await fs.stat(tempPath);
-    if (stats.size === 0) {
+    // The EEMPTY guard predates the temp+rename swap: a zero-byte payload must
+    // never be published under the canonical name. Checking the serialized
+    // bytes is equivalent to statting the temp file, minus the I/O.
+    if (Buffer.byteLength(content, "utf-8") === 0) {
       const emptyError = Object.assign(new Error("File written but size is 0"), { code: "EEMPTY" });
       throw emptyError;
     }
-
-    await renameWithWindowsRetry(tempPath, path);
+    await writeFileAtomic(path, content);
     // Only a published write may suppress this process's live-reload watcher.
     lastWrittenAccounts = { path, digest: createHash("sha256").update(content).digest("hex") };
   } catch (error) {
-    try {
-      await fs.unlink(tempPath);
-    } catch {
-      // Ignore cleanup failure.
-    }
-
     const err = error as NodeJS.ErrnoException;
     const code = err?.code || "UNKNOWN";
     const hint = formatStorageErrorHint(error, path);
@@ -638,26 +631,30 @@ async function writeAccountsToPathUnlocked(path: string, storage: AccountStorage
 
 /**
  * Post-keychain-write migration helper: if a legacy on-disk JSON file still
- * exists for the current storage path, rename it with a timestamped
- * `.migrated-to-keychain.<ts>` suffix instead of deleting it. Preserving the
- * original file as a rollback artefact is load-bearing: it is the user's
- * explicit escape hatch if the keychain backend turns out to be unreliable
- * on their platform.
+ * exists at `path`, rename it with a timestamped `.migrated-to-keychain.<ts>`
+ * suffix instead of deleting it. Preserving the original file as a rollback
+ * artefact is load-bearing: it is the user's explicit escape hatch if the
+ * keychain backend turns out to be unreliable on their platform.
+ *
+ * Shared by the main account store and the flagged sibling store, which gets
+ * the same marker via `rewriteOnDisk` — the caller supplies the "refresh the
+ * on-disk copy" half of the contract because each store serializes its own
+ * document shape.
  *
  * Atomicity across a partial migration window (F1 post-merge HIGH finding):
  * if the rename fails (EACCES, EBUSY on Windows, disk full, parent dir
  * permission drift) the file at `path` would otherwise hold a stale-but-valid
- * V3 blob while the keychain holds the authoritative fresh blob. This is
+ * blob while the keychain holds the authoritative fresh blob. This is
  * safe while the opt-in is on (keychain wins at load time) but silently
  * resurrects stale credentials if the user later unsets `CODEX_KEYCHAIN`.
- * We resolve this by overwriting the file with the fresh normalized blob
- * when the rename fails so both sides agree, at the cost of losing that
- * one rollback artefact. This matches the "rollback invariant" documented
- * in the F1 post-merge review (option (a)).
+ * We resolve this by letting `rewriteOnDisk` overwrite the file with the
+ * fresh normalized blob when the rename fails so both sides agree, at the
+ * cost of losing that one rollback artefact. This matches the "rollback
+ * invariant" documented in the F1 post-merge review (option (a)).
  */
-async function migrateOnDiskJsonToKeychainBackup(
+export async function migrateOnDiskJsonToKeychainBackup(
   path: string,
-  freshStorage: AccountStorageV3,
+  rewriteOnDisk: () => Promise<void>,
 ): Promise<void> {
   try {
     await fs.access(path);
@@ -668,6 +665,7 @@ async function migrateOnDiskJsonToKeychainBackup(
   const backup = `${path}.migrated-to-keychain.${timestamp}`;
   try {
     await fs.rename(path, backup);
+    await fsyncParentDirectory(backup);
     // Re-apply 0o600 after rename (F1 post-merge LOW finding). POSIX
     // preserves mode across a rename in-place, but if the filesystem layer
     // or a prior process ever changed the mode (cp from a world-readable
@@ -697,7 +695,7 @@ async function migrateOnDiskJsonToKeychainBackup(
       },
     );
     try {
-      await writeAccountsToPathUnlocked(path, freshStorage);
+      await rewriteOnDisk();
     } catch (writeErr) {
       // Last-resort: on-disk refresh also failed. The keychain still
       // holds the authoritative blob so current operation succeeds, but
@@ -737,7 +735,10 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
     const projectKey = getCurrentProjectStorageKey();
     const result = await writeToKeychain(projectKey, blob);
     if (result.ok) {
-      await migrateOnDiskJsonToKeychainBackup(getStoragePath(), normalizedStorage);
+      const path = getStoragePath();
+      await migrateOnDiskJsonToKeychainBackup(path, () =>
+        writeAccountsToPathUnlocked(path, normalizedStorage),
+      );
       return;
     }
     log.warn("keychain: write failed; falling back to JSON for this save", {
@@ -825,6 +826,9 @@ export async function clearAccounts(): Promise<void> {
       // still applies its own config and keychain gates.
       await trySnapshotCredentialStoreBeforeWrite(path, null);
       await fs.unlink(path);
+      // Flush the directory so the deletion itself is crash-durable: without
+      // it a power loss could resurrect the unlinked credential file.
+      await fsyncParentDirectory(path);
     } catch (error) {
       // The test-home guard is not a storage failure to absorb. It fires only
       // under vitest, and it exists to fail a run that escaped its sandbox; it
