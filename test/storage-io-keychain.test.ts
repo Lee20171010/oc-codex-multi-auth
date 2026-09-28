@@ -184,7 +184,10 @@ describe("storage I/O: keychain migration lifecycle", () => {
 			setSpy.mockRestore();
 		}
 
-		expect(order).toEqual(["rename->marker", "keychain:set"]);
+		// The trailing rename is the post-save marker sync: the newest marker
+		// is rewritten to the fresh blob so a later opt-out or keychain loss
+		// restores the current pool rather than the pre-save one.
+		expect(order).toEqual(["rename->marker", "keychain:set", "rename->marker"]);
 		// Canonical JSON is retired; the keychain holds the authoritative blob.
 		expect(existsSync(storagePath)).toBe(false);
 		expect(await markerFiles()).toHaveLength(1);
@@ -242,7 +245,12 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		expect(loaded?.accounts[0]?.accountId).toBe("acct-off");
 	});
 
-	it("skips a corrupt newest marker and falls through to an older valid one", async () => {
+	it("does not serve an older marker when the newest one is corrupt", async () => {
+		// The fallback only ever trusts the NEWEST marker: an older marker is
+		// an earlier pool state, and serving it after a corrupt freshest would
+		// resurrect consumed refresh tokens and deleted accounts (greptile P1
+		// on PR #280 — the "stale marker restores old credentials" finding).
+		// A corrupt freshest means an honest empty pool, not stale data.
 		delete process.env.CODEX_KEYCHAIN;
 		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-old-good")), "utf-8");
 		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
@@ -251,7 +259,82 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		await fs.writeFile(corruptName, "{ not valid json", "utf-8");
 
 		const loaded = await loadAccounts();
-		expect(loaded?.accounts[0]?.accountId).toBe("acct-old-good");
+		expect(loaded).toBeNull();
+	});
+
+	it("keeps the newest marker in sync with every subsequent keychain save", async () => {
+		// The marker is the load fallback when the canonical file is missing —
+		// if it stayed at the pre-save blob, a later opt-out or keychain loss
+		// would resurrect the OLD pool (stale-marker resurrection, greptile
+		// P1 on PR #280).
+		process.env.CODEX_KEYCHAIN = "1";
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-a")), "utf-8");
+
+		await saveAccounts(makeStorage("acct-b"));
+		let markers = await markerFiles();
+		expect(markers).toHaveLength(1);
+		const mirrored = await fs.readFile(join(dir, markers[0]!), "utf-8");
+		expect(mirrored).toContain("acct-b");
+		expect(mirrored).not.toContain("acct-a");
+
+		// A later save with no canonical file still refreshes the marker.
+		await saveAccounts(makeStorage("acct-c"));
+		markers = await markerFiles();
+		expect(markers).toHaveLength(1);
+		expect(await fs.readFile(join(dir, markers[0]!), "utf-8")).toContain("acct-c");
+	});
+
+	it("retires older markers so only the synced newest can be served on fallback", async () => {
+		process.env.CODEX_KEYCHAIN = "1";
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-a")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		// An older marker left by a previous migration cycle — by definition
+		// staler than the newest one, so it must never survive as a fallback.
+		const olderName = `${storagePath}.migrated-to-keychain.2020-01-01T00-00-00-000Z-aaaaaa`;
+		await fs.writeFile(olderName, JSON.stringify(makeStorage("acct-prehistoric")), "utf-8");
+		expect(await markerFiles()).toHaveLength(2);
+
+		await saveAccounts(makeStorage("acct-fresh"));
+
+		// One marker survives — the freshest one by the loader's ordering —
+		// and it now mirrors the just-saved blob rather than the older pool.
+		const markers = await markerFiles();
+		expect(markers).toHaveLength(1);
+		const mirrored = await fs.readFile(join(dir, markers[0]!), "utf-8");
+		expect(mirrored).toContain("acct-fresh");
+		expect(mirrored).not.toContain("acct-prehistoric");
+	});
+
+	it("fails loudly when a migration marker cannot be unlinked during clear", async () => {
+		// A credential-bearing marker that survives a "delete everything"
+		// request is a resurrection source — the clear must surface the
+		// stranded file, not report success (greptile P1 on PR #280).
+		process.env.CODEX_KEYCHAIN = "1";
+		await saveAccounts(makeStorage("acct-a"));
+		const strandedName = `${storagePath}.migrated-to-keychain.2026-01-01T00-00-00-000Z-aaaaaa`;
+		await fs.writeFile(strandedName, JSON.stringify(makeStorage("acct-stranded")), "utf-8");
+
+		const realUnlink = fs.unlink.bind(fs);
+		const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation(async (target) => {
+			if (String(target).includes(".migrated-to-keychain.")) {
+				throw Object.assign(new Error("simulated EBUSY on marker unlink"), {
+					code: "EBUSY",
+				});
+			}
+			return realUnlink(target as string);
+		});
+		try {
+			await expect(clearAccounts()).rejects.toThrow(/migration artefact|leftover/i);
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		// The marker is still on disk — reporting success here would lie.
+		expect(existsSync(strandedName)).toBe(true);
+		// With the unlink unblocked, a retry finishes the clear.
+		await clearAccounts();
+		expect(existsSync(strandedName)).toBe(false);
+		expect(existsSync(storagePath)).toBe(false);
 	});
 
 	it("clearAccounts retires migrated-to-keychain markers along with the store", async () => {

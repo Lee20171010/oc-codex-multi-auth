@@ -13,7 +13,8 @@
  *     process could recover from.
  *
  * `coordinated-refresh.ts` now journals the consumed→rotated mapping to
- * `<accounts>.refresh.pending` right after the exchange, replays it at the
+ * `<accounts>.refresh.pending.<hash>` (one file per consumed token) right
+ * after the exchange, replays it at the
  * head of the next refresh lease, and — when the commit cannot land — salvages
  * the rotated token onto every record still holding the consumed one in BOTH
  * stores instead of throwing the credential away.
@@ -25,7 +26,7 @@
  * the member guard, and the `updated > 0` no-op persist check.
  */
 
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -304,8 +305,12 @@ describe("exchange→commit gap recovery", () => {
 		const flagged = await loadFlaggedAccounts();
 		expect(flagged.accounts[0]?.refreshToken).toBe("r1");
 		expect((await loadAccounts())?.accounts).toHaveLength(0);
-		// and the journal is left for the next refresh to confirm the heal
-		await access(journalPath);
+		// and the journal is left for the next refresh to confirm the heal —
+		// keyed by the consumed token (refresh.pending.<sha256-16>)
+		const pending = (await readdir(storageDir)).filter((n) =>
+			n.startsWith("accounts.json.refresh.pending"),
+		);
+		expect(pending).toHaveLength(1);
 
 		// a follow-up flagged refresh sees the healed copy and works normally
 		vi.mocked(queuedRefresh).mockImplementation(async (token: string) =>
@@ -320,7 +325,13 @@ describe("exchange→commit gap recovery", () => {
 			"r1",
 		]);
 		expect((await loadFlaggedAccounts()).accounts[0]?.refreshToken).toBe("r2");
-		await expect(access(journalPath)).rejects.toMatchObject({ code: "ENOENT" });
+		// Both journals are gone: the healed one was consumed by the follow-up
+		// replay and the follow-up's own journal was deleted after its commit.
+		expect(
+			(await readdir(storageDir)).filter((n) =>
+				n.startsWith("accounts.json.refresh.pending"),
+			),
+		).toHaveLength(0);
 	});
 
 	it("salvages the rotated token when the record moved to the main store mid-exchange", async () => {
