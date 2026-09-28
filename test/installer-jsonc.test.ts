@@ -166,6 +166,40 @@ describe("installer JSONC support and config safety", () => {
 		expect(stdout).toMatch(/not preserve|does not preserve/i);
 	});
 
+	it("dry-run warning says the backup only exists after a real install", async () => {
+		// A dry run writes nothing — telling the operator their comments
+		// "remain only in the backup" would point at a backup that was never
+		// created (greptile P2 on PR #275).
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const { runInstaller } = await importCore();
+		const configDir = join(tempHome, ".config", "opencode");
+		const tuiPath = join(configDir, "tui.json");
+		await mkdir(configDir, { recursive: true });
+		await writeFile(
+			tuiPath,
+			`{
+				// operator note
+				"theme": "custom"
+			}`,
+			"utf-8",
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await expect(
+			runInstaller(["--modern", "--no-cache-clear", "--dry-run"], {
+				env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			}),
+		).resolves.toMatchObject({ action: "install", exitCode: 0 });
+
+		const stdout = gatherStdout(logSpy);
+		expect(stdout).toMatch(/actual install would not preserve/i);
+		expect(stdout).toMatch(/would create a backup containing them/i);
+		expect(stdout).not.toMatch(/comments that a rewrite would not preserve/i);
+		expect(stdout).not.toMatch(/they remain only in the backup/i);
+	});
+
 	it("merges a real-world JSONC opencode.json instead of failing the parse", async () => {
 		tempHome = await createTempHome();
 		vi.stubEnv("HOME", tempHome);
