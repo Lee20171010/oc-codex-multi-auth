@@ -533,4 +533,197 @@ describe("opencode-codex", () => {
       expect(result).toBe("A".repeat(50));
     });
   });
+
+  describe("stale memory + scheduled refresh", () => {
+    // The fire-and-forget refresh resolves on the microtask queue (fetch and
+    // fs are mocked) — a bounded await loop drains it deterministically
+    // without depending on fake timers.
+    const flush = async () => {
+      for (let i = 0; i < 40; i++) await Promise.resolve();
+    };
+
+    it("serves stale verified content while a background refresh revalidates", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(1_000_000));
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Verified content")));
+
+      await getOpenCodeCodexPrompt();
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      expect(callsAfterFirst).toBeGreaterThan(0);
+
+      // Age the memory snapshot past the 15-minute TTL: the next call still
+      // returns it instantly, but scheduleRefresh fires a revalidation.
+      vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+      const stale = await getOpenCodeCodexPrompt();
+      expect(stale).toContain("Verified content");
+      await flush();
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    });
+
+    it("dedups concurrent scheduled refreshes into one upstream fetch", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(1_000_000));
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Verified content")));
+
+      await getOpenCodeCodexPrompt();
+      const callsAfterFirst = mockFetch.mock.calls.length;
+      vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+
+      // Two stale calls in flight: refreshPromise dedups the second.
+      const [a, b] = await Promise.all([
+        getOpenCodeCodexPrompt(),
+        getOpenCodeCodexPrompt(),
+      ]);
+      expect(a).toContain("Verified content");
+      expect(b).toContain("Verified content");
+      await flush();
+      const refetches = mockFetch.mock.calls.length - callsAfterFirst;
+      expect(refetches).toBeGreaterThan(0);
+      expect(refetches).toBeLessThanOrEqual(2); // one per source at most, not two full chains
+    });
+
+    it("does not schedule another doomed refresh inside the recent-failure window", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(1_000_000));
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Verified content")));
+
+      await getOpenCodeCodexPrompt();
+      vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+
+      // First stale call schedules a refresh that fails — lastFetchFailedAt
+      // is stamped so the NEXT stale call serves without paying another stall.
+      mockFetch.mockRejectedValue(new Error("offline"));
+      await getOpenCodeCodexPrompt();
+      await flush();
+      const callsAfterFailure = mockFetch.mock.calls.length;
+
+      const again = await getOpenCodeCodexPrompt();
+      expect(again).toContain("Verified content");
+      await flush();
+      expect(mockFetch.mock.calls.length).toBe(callsAfterFailure);
+    });
+  });
+
+  describe("prompt source validation", () => {
+    it("ignores a non-http(s) OPENCODE_CODEX_PROMPT_URL override", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.stubEnv("OPENCODE_CODEX_PROMPT_URL", "ftp://attacker.example/prompt.txt");
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Default source content")));
+
+      await getOpenCodeCodexPrompt();
+
+      const urls = mockFetch.mock.calls.map((c) => String(c[0]));
+      expect(urls.some((u) => u.startsWith("ftp:"))).toBe(false);
+      expect(urls[0]).toBe(FIRST_SOURCE);
+    });
+
+    it("ignores an unparseable OPENCODE_CODEX_PROMPT_URL override", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.stubEnv("OPENCODE_CODEX_PROMPT_URL", "not a url at all");
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Default source content")));
+
+      await getOpenCodeCodexPrompt();
+
+      const urls = mockFetch.mock.calls.map((c) => String(c[0]));
+      expect(urls[0]).toBe(FIRST_SOURCE);
+    });
+  });
+
+  describe("offline gate etag shapes", () => {
+    it("refuses a disk body whose meta has no usable digest (etag null)", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(padPrompt("Planted offline content"))
+        .mockResolvedValueOnce(JSON.stringify({
+          etag: null,
+          lastChecked: Date.now() - 1000,
+        }));
+      mockFetch.mockRejectedValue(new Error("offline"));
+
+      await expect(getOpenCodeCodexPrompt()).rejects.toThrow(/no verifiable cache/i);
+    });
+
+    it("refuses a disk body whose meta etag cannot hash-bind (non-sha shape)", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(padPrompt("Planted offline content"))
+        .mockResolvedValueOnce(JSON.stringify({
+          etag: '"plain-string-not-a-sha"',
+          lastChecked: Date.now() - 1000,
+        }));
+      mockFetch.mockRejectedValue(new Error("offline"));
+
+      await expect(getOpenCodeCodexPrompt()).rejects.toThrow(/no verifiable cache/i);
+    });
+  });
+
+  describe("refreshPrompt failure paths", () => {
+    it("continues to the next source when the 304 revalidation refetch fails", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      // Disk meta acknowledges an etag the body does NOT hash to — the 304
+      // path then refetches unconditionally; when that refetch also fails the
+      // loop must continue to the remaining sources rather than aborting.
+      vi.mocked(readFile)
+        .mockResolvedValueOnce(padPrompt("Unbound disk body"))
+        .mockResolvedValueOnce(JSON.stringify({
+          etag: '"some-etag"',
+          lastChecked: Date.now() - 1000,
+        }));
+      let calls = 0;
+      mockFetch.mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) return Promise.resolve(statusResponse(304));
+        return Promise.reject(new Error("refetch offline"));
+      });
+
+      await expect(getOpenCodeCodexPrompt()).rejects.toThrow(/all sources|no verifiable/i);
+      expect(calls).toBeGreaterThanOrEqual(2);
+    });
+
+    it("skips a source that returns unusable content and fails all sources", async () => {
+      const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse("tiny"));
+
+      await expect(getOpenCodeCodexPrompt()).rejects.toThrow(/all sources|no verifiable/i);
+      // Every source was tried and rejected, not short-circuited.
+      const urls = mockFetch.mock.calls.map((c) => String(c[0]));
+      expect(urls).toContain(FIRST_SOURCE);
+      expect(urls).toContain(SECOND_SOURCE);
+    });
+  });
+
+  describe("prewarmOpenCodeCodexPrompt", () => {
+    it("triggers a background fetch without blocking", async () => {
+      const { prewarmOpenCodeCodexPrompt } = await import(
+        "../lib/prompts/opencode-codex.js"
+      );
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockResolvedValue(okResponse(padPrompt("Prewarmed content")));
+
+      expect(() => prewarmOpenCodeCodexPrompt()).not.toThrow();
+      for (let i = 0; i < 40; i++) await Promise.resolve();
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
+    it("swallows a prewarm failure into a debug log", async () => {
+      const { prewarmOpenCodeCodexPrompt } = await import(
+        "../lib/prompts/opencode-codex.js"
+      );
+      vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
+      mockFetch.mockRejectedValue(new Error("offline"));
+
+      expect(() => prewarmOpenCodeCodexPrompt()).not.toThrow();
+      for (let i = 0; i < 40; i++) await Promise.resolve();
+      // Rejects internally; no unhandled rejection escapes.
+    });
+  });
 });

@@ -1323,4 +1323,227 @@ describe("Codex Prompts Module", () => {
 				});
 			});
 		});
+
+		describe("stale memory + background refresh", () => {
+			// The fire-and-forget refresh resolves on the microtask queue (fetch
+			// and fs are mocked) — a bounded await loop drains it
+			// deterministically without depending on fake timers.
+			const flush = async () => {
+				for (let i = 0; i < 40; i++) await Promise.resolve();
+			};
+
+			it("serves stale verified content while refreshInstructionsInBackground revalidates", async () => {
+				vi.useFakeTimers();
+				try {
+					vi.setSystemTime(new Date(1_000_000));
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+					stubOkFetch({ prompt: padPrompt("verified instructions") });
+
+					const first = await getCodexInstructions("gpt-5.2");
+					expect(first).toContain("verified instructions");
+					const callsAfterFirst = mockFetch.mock.calls.length;
+
+					vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+					const stale = await getCodexInstructions("gpt-5.2");
+					expect(stale).toContain("verified instructions");
+					await flush();
+					expect(mockFetch.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+
+			it("dedups concurrent background refreshes on the same source key", async () => {
+				vi.useFakeTimers();
+				try {
+					vi.setSystemTime(new Date(1_000_000));
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+					stubOkFetch({ prompt: padPrompt("verified instructions") });
+
+					await getCodexInstructions("gpt-5.2");
+					mockFetch.mockClear();
+					vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+
+					const [a, b] = await Promise.all([
+						getCodexInstructions("gpt-5.2"),
+						getCodexInstructions("gpt-5.2"),
+					]);
+					expect(a).toBe(b);
+					await flush();
+					// refreshPromises.get(key) dedups: two stale callers share one
+					// refresh chain instead of spending two upstream fetches.
+					const promptFetches = mockFetch.mock.calls.filter(
+						(c) => typeof c[0] === "string" && c[0].includes("raw.githubusercontent.com") && !c[0].includes("models.json"),
+					);
+					expect(promptFetches.length).toBeLessThanOrEqual(1);
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+
+			it("does not reschedule a refresh inside the recent-failure window", async () => {
+				vi.useFakeTimers();
+				try {
+					vi.setSystemTime(new Date(1_000_000));
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+					stubOkFetch({ prompt: padPrompt("verified instructions") });
+
+					await getCodexInstructions("gpt-5.2");
+					vi.setSystemTime(new Date(1_000_000 + 16 * 60 * 1000));
+
+					mockFetch.mockRejectedValue(new Error("offline"));
+					await getCodexInstructions("gpt-5.2");
+					await flush();
+					const callsAfterFailure = mockFetch.mock.calls.length;
+
+					const again = await getCodexInstructions("gpt-5.2");
+					expect(again).toContain("verified instructions");
+					await flush();
+					expect(mockFetch.mock.calls.length).toBe(callsAfterFailure);
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+		});
+
+		describe("cache metadata validation", () => {
+			it.each([
+				["non-JSON meta", "not json at all"],
+				["non-object meta", "[1,2,3]"],
+				["meta missing tag/url", JSON.stringify({ lastChecked: Date.now() - 1000 })],
+				["meta with non-string etag", JSON.stringify({ etag: 42, tag: "t", url: "https://x", lastChecked: Date.now() - 1000 })],
+				["meta with non-string contentSha", JSON.stringify({ etag: "e", tag: "t", url: "https://x", lastChecked: Date.now() - 1000, contentSha: 42 })],
+				["meta with future lastChecked", JSON.stringify({ etag: "e", tag: "t", url: "https://x", lastChecked: Date.now() + 60_000 })],
+			])("treats %s as absent and fetches upstream", async (_name, metaContent) => {
+				mockedReadFile.mockImplementation((filePath) =>
+					String(filePath).includes("-meta.json")
+						? Promise.resolve(metaContent)
+						: Promise.resolve(padPrompt("planted body")),
+				);
+				stubOkFetch({ prompt: padPrompt("upstream instructions") });
+				mockedMkdir.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5.2");
+				expect(result).toContain("upstream instructions");
+				expect(mockFetch).toHaveBeenCalled();
+			});
+		});
+
+		describe("fetch timeout classification", () => {
+			it("classifies an aborted fetch as a timeout and falls back to bundled instructions", async () => {
+				vi.useFakeTimers();
+				try {
+					mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+					mockedMkdir.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
+					// The production timeout relies on fetch rejecting on signal
+					// abort — a mock that never resolves AND never listens to the
+					// signal would hang forever.
+					mockFetch.mockImplementation((_url: unknown, init: unknown) =>
+						new Promise((_resolve, reject) => {
+							const signal = (init as { signal?: AbortSignal }).signal;
+							if (signal?.aborted) {
+								reject(new DOMException("The operation was aborted", "AbortError"));
+								return;
+							}
+							signal?.addEventListener("abort", () =>
+								reject(new DOMException("The operation was aborted", "AbortError")),
+							);
+						}),
+					);
+
+					const pending = getCodexInstructions("gpt-5.2");
+					// Each hop — release-tag API, HTML fallback, prompt body — gets
+					// its own 10s fetchTextWithTimeout timer; step the clock past
+					// every stage rather than relying on one big advance.
+					for (let i = 0; i < 8; i++) {
+						await vi.advanceTimersByTimeAsync(10_001);
+					}
+					const result = await pending;
+					// The timed-out fetch lands in bundled instructions (identity
+					// line rewritten for the model) — never the disk file and
+					// never an unhandled rejection.
+					expect(result).toContain("## Editing constraints");
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+		});
+
+		describe("catalog fetch dedup + fallback", () => {
+			const catalogPayload = JSON.stringify({
+				models: [
+					{ slug: "gpt-5.4", base_instructions: padPrompt("GPT54 CATALOG PROMPT") },
+					{ slug: "gpt-5.5", base_instructions: padPrompt("GPT55 CATALOG PROMPT") },
+				],
+			});
+
+			it("shares one in-flight models.json fetch across concurrent catalog models", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockedMkdir.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
+				stubOkFetch({ tag: "rust-v0.111.0", catalog: catalogPayload });
+
+				const [a, b] = await Promise.all([
+					getCodexInstructions("gpt-5.4"),
+					getCodexInstructions("gpt-5.5"),
+				]);
+				expect(a).toContain("GPT54 CATALOG PROMPT");
+				expect(b).toContain("GPT55 CATALOG PROMPT");
+
+				const catalogFetches = mockFetch.mock.calls.filter(
+					(c) => typeof c[0] === "string" && c[0].includes("models.json"),
+				);
+				expect(catalogFetches).toHaveLength(1);
+			});
+
+			it("falls back to the prompt file when catalog instructions fail sanity checks", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockedMkdir.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
+				stubOkFetch({
+					tag: "rust-v0.111.0",
+					catalog: JSON.stringify({ models: [{ slug: "gpt-5.4", base_instructions: "tiny" }] }),
+					prompt: padPrompt("prompt-file instructions"),
+				});
+
+				const result = await getCodexInstructions("gpt-5.4");
+				expect(result).toContain("prompt-file instructions");
+				expect(result).not.toContain("tiny");
+				const promptFetches = mockFetch.mock.calls.filter(
+					(c) => typeof c[0] === "string" && c[0].includes("prompt.md"),
+				);
+				expect(promptFetches.length).toBeGreaterThan(0);
+			});
+		});
+
+		describe("prewarmCodexInstructions", () => {
+			it("warms the requested models without blocking", async () => {
+				const { prewarmCodexInstructions } = await import("../lib/prompts/codex.js");
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockedMkdir.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
+				stubOkFetch({ prompt: padPrompt("prewarmed instructions") });
+
+				expect(() => prewarmCodexInstructions(["gpt-5.2"])).not.toThrow();
+				for (let i = 0; i < 40; i++) await Promise.resolve();
+				expect(mockFetch).toHaveBeenCalled();
+			});
+
+			it("swallows per-model prewarm failures", async () => {
+				const { prewarmCodexInstructions } = await import("../lib/prompts/codex.js");
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockFetch.mockRejectedValue(new Error("offline"));
+
+				expect(() => prewarmCodexInstructions(["gpt-5.2"])).not.toThrow();
+				for (let i = 0; i < 40; i++) await Promise.resolve();
+			});
+		});
 	});
