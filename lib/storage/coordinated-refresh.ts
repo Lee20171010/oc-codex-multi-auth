@@ -939,26 +939,40 @@ async function coordinateRefresh<T extends StorageShape>(
 		// docstring for the locking argument). Skipped when the provider did
 		// not rotate: `exchangedToken` is still the live credential there.
 		if (commit.rotatedAt !== undefined) {
-			try {
-				const propagated = await propagateRotationToSiblingStore(
-					siblingStore,
-					exchangedToken,
-					commit.memberId,
-					refreshResult.refresh,
-					commit.rotatedAt,
-				);
-				if (propagated > 0) {
-					logInfo(
-						`Propagated the rotated refresh token to ${propagated} record(s) in the ${siblingStore} store`,
+			// A failed propagation leaves the sibling holding a consumed
+			// single-use token: its next exchange gets `refresh_token_reused`
+			// and can poison the whole grant family. Retry once while the
+			// refresh lease is still held — propagation is idempotent (it
+			// matches on the consumed token), and the lease means no other
+			// process can interleave a second exchange in between.
+			let propagationError: unknown = null;
+			for (let attempt = 0; attempt < 2; attempt += 1) {
+				try {
+					const propagated = await propagateRotationToSiblingStore(
+						siblingStore,
+						exchangedToken,
+						commit.memberId,
+						refreshResult.refresh,
+						commit.rotatedAt,
 					);
+					if (propagated > 0) {
+						logInfo(
+							`Propagated the rotated refresh token to ${propagated} record(s) in the ${siblingStore} store`,
+						);
+					}
+					propagationError = null;
+					break;
+				} catch (error) {
+					propagationError = error;
 				}
-			} catch (error) {
+			}
+			if (propagationError !== null) {
 				// The journal stays on disk, so the next refresh-lease holder
 				// replays it and heals the sibling store instead of re-exchanging
 				// the consumed token.
 				logWarn(
 					`Failed to propagate a rotated refresh token to the ${siblingStore} store; the pending-rotation journal remains for recovery: ${
-						error instanceof Error ? error.message : String(error)
+						propagationError instanceof Error ? propagationError.message : String(propagationError)
 					}`,
 				);
 				return { ...refreshResult, adopted: false, rotatedAt: commit.rotatedAt };

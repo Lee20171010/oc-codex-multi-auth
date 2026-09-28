@@ -45,6 +45,7 @@ interface MockBackend extends KeychainBackend {
 	calls: Array<{ op: string; service: string; account: string }>;
 	setShouldThrow: boolean;
 	deleteShouldThrow: boolean;
+	deleteShouldKeepEntry: boolean;
 }
 
 function createMockBackend(): MockBackend {
@@ -55,6 +56,7 @@ function createMockBackend(): MockBackend {
 		calls,
 		setShouldThrow: false,
 		deleteShouldThrow: false,
+		deleteShouldKeepEntry: false,
 		async get(service, account) {
 			calls.push({ op: "get", service, account });
 			return store.get(`${service}::${account}`) ?? null;
@@ -70,6 +72,11 @@ function createMockBackend(): MockBackend {
 			calls.push({ op: "delete", service, account });
 			if (backend.deleteShouldThrow) {
 				throw new Error("simulated keychain delete failure");
+			}
+			if (backend.deleteShouldKeepEntry) {
+				// A backend that reports "not deleted" while the entry survives —
+				// indistinguishable from "entry absent" on the boolean alone.
+				return false;
 			}
 			return store.delete(`${service}::${account}`);
 		},
@@ -405,6 +412,69 @@ describe("flagged-store load/save/clear with CODEX_KEYCHAIN", () => {
 			(c) => c.op === "delete" && c.account === FLAGGED_KEYCHAIN_KEY,
 		);
 		expect(deleteCalls).toHaveLength(0);
+	});
+
+	it("clearFlaggedAccounts retires .migrated-to-keychain backups that still hold flagged tokens", async () => {
+		// A flagged save under opt-in preserves the pre-keychain JSON as a
+		// rollback artefact — plaintext flagged refresh tokens that a clear
+		// must also erase, not just the canonical file (greptile P1 on
+		// PR #275, flagged.ts:310).
+		setOptIn(true);
+		await saveFlaggedAccounts(makeFlagged());
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify(makeFlagged(), null, 2),
+			{ encoding: "utf-8", mode: 0o600 },
+		);
+		// Seed a second flagged save after the canonical file is back so the
+		// migration path produces a real `.migrated-to-keychain.<ts>` backup.
+		await saveFlaggedAccounts(makeFlagged());
+		const backupName = (
+			await fs.readdir(storageDir)
+		).find((name) =>
+			name.startsWith(
+				"oc-codex-multi-auth-flagged-accounts.json.migrated-to-keychain.",
+			),
+		);
+		expect(backupName).toBeDefined();
+		// Recreate the canonical pool so the clear has all three artefacts to retire.
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify(makeFlagged(), null, 2),
+			{ encoding: "utf-8", mode: 0o600 },
+		);
+
+		await clearFlaggedAccounts();
+
+		expect(existsSync(flaggedPath)).toBe(false);
+		expect(existsSync(join(storageDir, backupName!))).toBe(false);
+		const survivors = (await fs.readdir(storageDir)).filter((name) =>
+			name.includes(".migrated-to-keychain."),
+		);
+		expect(survivors).toHaveLength(0);
+	});
+
+	it("clearFlaggedAccounts verifies the keychain delete with a read — a surviving entry is surfaced", async () => {
+		// `delete` reporting false is ambiguous with "entry absent" — the clear
+		// must re-read the key to catch a backend that refused but left the
+		// blob in place, or the cleared pool resurrects on the next
+		// keychain-first load (greptile P1 on PR #275, flagged.ts:402).
+		setOptIn(true);
+		await saveFlaggedAccounts(makeFlagged());
+		await fs.writeFile(
+			flaggedPath,
+			JSON.stringify(makeFlagged(), null, 2),
+			{ encoding: "utf-8", mode: 0o600 },
+		);
+		mock.deleteShouldKeepEntry = true;
+
+		await expect(clearFlaggedAccounts()).resolves.toBeUndefined();
+
+		const ops = mock.calls.map((c) => `${c.op}:${c.account}`);
+		const deleteIdx = ops.indexOf(`delete:${FLAGGED_KEYCHAIN_KEY}`);
+		expect(deleteIdx).toBeGreaterThanOrEqual(0);
+		// The verify-read ran AFTER the delete — the result was not trusted.
+		expect(ops.indexOf(`get:${FLAGGED_KEYCHAIN_KEY}`, deleteIdx)).toBeGreaterThan(deleteIdx);
 	});
 
 	it("a flagged keychain delete failure during clear is warned, not thrown", async () => {

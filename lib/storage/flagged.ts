@@ -549,13 +549,22 @@ export async function clearFlaggedAccounts(): Promise<void> {
         // existed": the stale copy resurrects the cleared records just the
         // same as one that was never attempted.
         if (jsonCleared && isKeychainOptInEnabled()) {
-          const result = await deleteFlaggedFromKeychain(
-            getCurrentProjectStorageKey(),
-          );
+          const projectKey = getCurrentProjectStorageKey();
+          const result = await deleteFlaggedFromKeychain(projectKey);
           if (!result.deleted && result.error) {
             log.warn(
               "keychain: flagged delete during clearFlaggedAccounts failed; a stale keychain copy may survive and resurrect the cleared records on the next opt-in load",
               { error: result.error },
+            );
+          } else if (
+            !result.deleted &&
+            (await readFlaggedFromKeychain(projectKey)) !== null
+          ) {
+            // Same ambiguity as the main store: a `false` with no error is
+            // "entry absent" or "backend refused silently" — and a survivor
+            // resurrects the cleared pool on the next keychain-first load.
+            log.error(
+              "keychain: flagged entry survived the clearFlaggedAccounts delete; the cleared credentials remain reachable. Remove the keychain entry manually.",
             );
           }
         }
