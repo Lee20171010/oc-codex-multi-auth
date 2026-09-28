@@ -4,25 +4,41 @@
  * Split out of `lib/storage.ts` in RC-2. This module owns:
  *   - the `.gitignore` side-effect when writing into a project repo,
  *   - the legacy project + global storage migrations triggered on ENOENT,
- *   - the project-global fallback seed flow,
  *   - the atomic write (temp file + rename + EEMPTY guard),
  *   - and the `withAccountStorageTransaction` read-modify-write primitive
  *     that every mutating caller above the storage layer uses.
  *
+ * Scope pinning: `loadAccounts`/`saveAccounts`/`clearAccounts`/
+ * `withAccountStorageTransaction` all run under `withPinnedStorageScope`, so
+ * the location resolved at entry — including the path the filesystem
+ * transaction lease is taken on — is the location every read, write, and
+ * keychain key inside the call resolves. A `setStoragePath` scope flip that
+ * lands mid-transaction can no longer redirect a persist to a different
+ * project store while the lease still names the old one.
+ *
  * The error-handling contract is subtle and load-bearing: forward-compat
- * (`UNSUPPORTED_SCHEMA_VERSION`) and unknown-V2 failures MUST reach the
- * caller. Swallowing either would overwrite future-schema credentials or
- * silently discard a user's V2 file, which is exactly the class of bug the
- * audit flagged.
+ * (`UNSUPPORTED_SCHEMA_VERSION`), unknown-V2 (`UNKNOWN_V2_FORMAT`), and
+ * invalid/unreadable existing files (`INVALID_STORAGE`) MUST reach the
+ * caller. Swallowing any of them would overwrite future-schema credentials,
+ * silently discard a user's V2 file, or replace an unreadable store with an
+ * empty pool — exactly the class of bug the audit flagged. For the same
+ * reason a project-scoped ENOENT NEVER falls back to the live global file:
+ * reading the global pool and writing a copy into the project store
+ * duplicated single-use refresh tokens across scopes, so the first rotation
+ * in either pool stranded the other copy.
  */
 
 import { promises as fs, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { basename, dirname, join } from "node:path";
 import { ACCOUNTS_FILE_NAME, LEGACY_ACCOUNTS_FILE_NAME } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { AnyAccountStorageSchema, getValidationErrors } from "../schemas.js";
-import { fsyncParentDirectory, writeFileAtomic } from "./atomic-write.js";
+import {
+  fsyncParentDirectory,
+  renameWithWindowsRetry,
+  writeFileAtomic,
+} from "./atomic-write.js";
 import { formatStorageErrorHint, StorageError } from "./errors.js";
 import { normalizeAccountStorage } from "./normalize.js";
 import { getConfigDir } from "./paths.js";
@@ -30,13 +46,18 @@ import {
   assertTestRunNeverTouchesRealHome,
   TEST_HOME_ESCAPE_CODE,
 } from "./test-home-guard.js";
-import { trySnapshotCredentialStoreBeforeWrite } from "./credential-snapshots.js";
+import {
+  getCredentialArtifactRetentionLimit,
+  pruneStorageArtifacts,
+  trySnapshotCredentialStoreBeforeWrite,
+} from "./credential-snapshots.js";
 import {
   getCurrentLegacyProjectStoragePath,
   getCurrentProjectRoot,
   getCurrentProjectStorageKey,
   getCurrentStoragePath,
   getStoragePath,
+  withPinnedStorageScope,
   withStorageLock,
 } from "./state.js";
 import {
@@ -216,57 +237,97 @@ async function migrateStorageFileIfNeeded(
   persist: (storage: AccountStorageV3) => Promise<void>,
   label: string,
 ): Promise<AccountStorageV3 | null> {
-  // Before the existsSync, and outside the try: this reads the legacy file and
-  // the catch below swallows everything except a forward-compat reject, so a
-  // guard placed any later would be silently discarded.
+  // The test-home guard runs before any read of the legacy path so a leaked
+  // HOME can never be probed by a test that escaped its sandbox.
   if (legacyPath) assertTestRunNeverTouchesRealHome(legacyPath);
   if (!legacyPath || legacyPath === nextPath || !existsSync(legacyPath)) {
     return null;
   }
 
+  let legacyContent: string;
   try {
-    const legacyContent = await fs.readFile(legacyPath, "utf-8");
-    // A UTF-8 BOM is legal on disk but not to JSON.parse — strip before parse.
-    const legacyData = JSON.parse(legacyContent.replace(/^\uFEFF/, "")) as unknown;
-    const normalized = normalizeAccountStorage(legacyData, legacyPath);
-    if (!normalized) return null;
+    legacyContent = await fs.readFile(legacyPath, "utf-8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Vanished between existsSync and readFile — genuinely absent.
+    if (code === "ENOENT") return null;
+    // A legacy file that exists but cannot be read must NOT look like "no
+    // legacy file": the caller would proceed as though the pool were empty
+    // and a later save would overwrite credentials it never saw.
+    throw new StorageError(
+      `Failed to read legacy ${label} at ${legacyPath}: ${error instanceof Error ? error.message : String(error)}`,
+      code ?? "INVALID_STORAGE",
+      legacyPath,
+      "The existing legacy account file is unreadable. Repair it, restore it from a credential snapshot, or remove it to start fresh.",
+      error instanceof Error ? error : undefined,
+    );
+  }
 
+  // A UTF-8 BOM is legal on disk but not to JSON.parse — strip before parse.
+  let legacyData: unknown;
+  try {
+    legacyData = JSON.parse(legacyContent.replace(/^\uFEFF/, "")) as unknown;
+  } catch (error) {
+    throw new StorageError(
+      `Failed to parse legacy ${label} at ${legacyPath}: ${error instanceof Error ? error.message : String(error)}`,
+      "INVALID_STORAGE",
+      legacyPath,
+      "The legacy account file is corrupt and was left in place untouched. Restore it from a credential snapshot in the backups directory, or remove it to start fresh.",
+      error instanceof Error ? error : undefined,
+    );
+  }
+
+  // normalizeAccountStorage throws typed StorageErrors for forward-compat
+  // (UNSUPPORTED_SCHEMA_VERSION) and quarantined V2 payloads — let them reach
+  // the caller verbatim so a future-schema or V2 file is never mistaken for
+  // "nothing to migrate" and then silently stranded by an empty pool.
+  const normalized = normalizeAccountStorage(legacyData, legacyPath);
+  if (!normalized) {
+    throw new StorageError(
+      `Legacy ${label} at ${legacyPath} has an invalid format; refusing to replace it.`,
+      "INVALID_STORAGE",
+      legacyPath,
+      "The legacy account file was left in place untouched. Restore the accounts from a credential snapshot in the backups directory, or remove the file to start fresh.",
+    );
+  }
+
+  try {
     await persist(normalized);
-    try {
-      await fs.unlink(legacyPath);
-      await fsyncParentDirectory(legacyPath);
-      log.info(`Removed legacy ${label} after migration`, { path: legacyPath });
-    } catch (unlinkError) {
-      const code = (unlinkError as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        log.warn(`Failed to remove legacy ${label} after migration`, {
-          path: legacyPath,
-          error: String(unlinkError),
-        });
-      }
-    }
-    log.info(`Migrated legacy ${label}`, {
+  } catch (persistError) {
+    // A failed persist leaves the legacy file in place, so nothing is lost:
+    // return the migrated document anyway so the caller sees the real pool,
+    // and the next load retries the write.
+    log.warn(`Failed to persist migrated ${label}; legacy file kept`, {
       from: legacyPath,
       to: nextPath,
-      accounts: normalized.accounts.length,
+      error: String(persistError),
     });
     return normalized;
-  } catch (error) {
-    // Forward-compat failures should not be masked as migration warnings.
-    if (error instanceof StorageError && error.code === "UNSUPPORTED_SCHEMA_VERSION") {
-      throw error;
-    }
-    log.warn(`Failed to migrate legacy ${label}`, {
-      from: legacyPath,
-      to: nextPath,
-      error: String(error),
-    });
-    return null;
   }
+
+  try {
+    await fs.unlink(legacyPath);
+    await fsyncParentDirectory(legacyPath);
+    log.info(`Removed legacy ${label} after migration`, { path: legacyPath });
+  } catch (unlinkError) {
+    const code = (unlinkError as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      log.warn(`Failed to remove legacy ${label} after migration`, {
+        path: legacyPath,
+        error: String(unlinkError),
+      });
+    }
+  }
+  log.info(`Migrated legacy ${label}`, {
+    from: legacyPath,
+    to: nextPath,
+    accounts: normalized.accounts.length,
+  });
+  return normalized;
 }
 
 async function migrateLegacyProjectStorageIfNeeded(
-  persist: (storage: AccountStorageV3) => Promise<void> = saveAccounts,
+  persist: (storage: AccountStorageV3) => Promise<void>,
 ): Promise<AccountStorageV3 | null> {
   return migrateStorageFileIfNeeded(
     getCurrentLegacyProjectStoragePath(),
@@ -301,87 +362,6 @@ async function migrateLegacyGlobalStorageIfNeeded(): Promise<AccountStorageV3 | 
   );
 }
 
-/**
- * Returns true when project-scoped storage is active and a global fallback is meaningful.
- */
-function shouldUseProjectGlobalFallback(): boolean {
-  return Boolean(getCurrentStoragePath() && getCurrentProjectRoot());
-}
-
-/**
- * Loads account data from global storage as a fallback when project storage is missing.
- * Returns null for missing/unusable global storage and never throws to callers.
- */
-async function loadGlobalAccountsFallback(): Promise<AccountStorageV3 | null> {
-  const currentStoragePath = getCurrentStoragePath();
-  if (!shouldUseProjectGlobalFallback() || !currentStoragePath) {
-    return null;
-  }
-
-  // The project store is missing, so this reaches for the GLOBAL one, which
-  // resolves against `homedir()` and is the real pool whenever HOME has been
-  // restored. Guarded here rather than at the read below, because the catch
-  // there returns null for everything and would hide the escape.
-  assertTestRunNeverTouchesRealHome(getGlobalAccountsStoragePath());
-
-  const migrated = await migrateLegacyGlobalStorageIfNeeded();
-  if (migrated) {
-    return migrated;
-  }
-
-  const globalStoragePath = getGlobalAccountsStoragePath();
-  if (globalStoragePath === currentStoragePath) {
-    return null;
-  }
-
-  try {
-    const content = await fs.readFile(globalStoragePath, "utf-8");
-    const data = JSON.parse(content.replace(/^\uFEFF/, "")) as unknown;
-
-    const schemaErrors = getValidationErrors(AnyAccountStorageSchema, data);
-    if (schemaErrors.length > 0) {
-      log.warn("Global account storage schema validation warnings", {
-        path: globalStoragePath,
-        errors: schemaErrors.slice(0, 5),
-      });
-    }
-
-    const normalized = normalizeAccountStorage(data, globalStoragePath);
-    if (!normalized) {
-      throw new StorageError(
-        "Global account storage has an invalid format; refusing to seed a project pool from it.",
-        "INVALID_STORAGE",
-        globalStoragePath,
-        "Restore the accounts from a credential snapshot in the backups directory.",
-      );
-    }
-
-    log.info("Loaded global account storage as project fallback", {
-      from: globalStoragePath,
-      to: currentStoragePath,
-      accounts: normalized.accounts.length,
-    });
-    return normalized;
-  } catch (error) {
-    // An existing but unreadable global store must never look like "no global
-    // pool": the transaction caller would then seed a project pool without
-    // those accounts. Forward-compat and quarantined-V2 rejects already throw
-    // from normalizeAccountStorage; every other non-ENOENT failure wraps the
-    // same way the primary load path does.
-    if (error instanceof StorageError) throw error;
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return null;
-    }
-    throw new StorageError(
-      `Failed to load global account storage: ${error instanceof Error ? error.message : String(error)}`,
-      code ?? "INVALID_STORAGE",
-      globalStoragePath,
-      "The existing global account file is unreadable. Restore it from a credential snapshot in the backups directory.",
-      error instanceof Error ? error : undefined,
-    );
-  }
-}
 
 /**
  * Core account-loading routine shared by normal reads and transactional storage handlers.
@@ -516,52 +496,23 @@ async function loadAccountsInternal(
     if (error instanceof StorageError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
+      // Same-scope legacy migration only. A project-scoped ENOENT must NOT
+      // fall back to the live global file: copying the global pool into the
+      // project store duplicated single-use refresh tokens across scopes, so
+      // the first rotation in either pool left the sibling copy holding a
+      // consumed token (refresh_token_reused on its next refresh).
       const migrated = persistMigration
         ? await migrateLegacyProjectStorageIfNeeded(persistMigration)
         : null;
       if (migrated) return migrated;
-      if (!shouldUseProjectGlobalFallback()) {
-        const migratedGlobal = persistMigration
-          ? await migrateLegacyGlobalStorageIfNeeded()
-          : null;
+      // The legacy global file only migrates when the caller is actually on
+      // the global scope — a project-scoped or direct-override load must not
+      // rewrite files belonging to another storage location.
+      if (!getCurrentStoragePath() && persistMigration) {
+        const migratedGlobal = await migrateLegacyGlobalStorageIfNeeded();
         if (migratedGlobal) return migratedGlobal;
-        return null;
       }
-      const globalFallback = await loadGlobalAccountsFallback();
-      if (!globalFallback) return null;
-
-      if (persistMigration) {
-        const seedPath = getStoragePath();
-        try {
-          await fs.access(seedPath);
-          return globalFallback;
-        } catch (accessError) {
-          const accessCode = (accessError as NodeJS.ErrnoException).code;
-          if (accessCode !== "ENOENT") {
-            log.warn("Failed to inspect project seed path before fallback seeding", {
-              path: seedPath,
-              error: String(accessError),
-            });
-            return globalFallback;
-          }
-          // File is missing; proceed with seed write.
-        }
-
-        try {
-          await persistMigration(globalFallback);
-          log.info("Seeded project account storage from global fallback", {
-            path: seedPath,
-            accounts: globalFallback.accounts.length,
-          });
-        } catch (persistError) {
-          log.warn("Failed to seed project storage from global fallback", {
-            path: seedPath,
-            error: String(persistError),
-          });
-        }
-      }
-
-      return globalFallback;
+      return null;
     }
     const path = getStoragePath();
     const storageError = new StorageError(
@@ -630,27 +581,34 @@ async function writeAccountsToPathUnlocked(path: string, storage: AccountStorage
 }
 
 /**
- * Post-keychain-write migration helper: if a legacy on-disk JSON file still
+ * Pre-keychain-write retirement helper: if a legacy on-disk JSON file still
  * exists at `path`, rename it with a timestamped `.migrated-to-keychain.<ts>`
  * suffix instead of deleting it. Preserving the original file as a rollback
  * artefact is load-bearing: it is the user's explicit escape hatch if the
  * keychain backend turns out to be unreliable on their platform.
+ *
+ * Callers invoke this BEFORE the keychain write, not after it. Ordering the
+ * rename first removes the crash window where the keychain already held the
+ * new blob while the canonical JSON still held the old one: a kill between
+ * the two steps now leaves marker + keychain at the same (old) state rather
+ * than diverged, so a later `CODEX_KEYCHAIN` unset can never resurrect a
+ * stale canonical file beside a fresh keychain entry.
  *
  * Shared by the main account store and the flagged sibling store, which gets
  * the same marker via `rewriteOnDisk` — the caller supplies the "refresh the
  * on-disk copy" half of the contract because each store serializes its own
  * document shape.
  *
- * Atomicity across a partial migration window (F1 post-merge HIGH finding):
- * if the rename fails (EACCES, EBUSY on Windows, disk full, parent dir
- * permission drift) the file at `path` would otherwise hold a stale-but-valid
- * blob while the keychain holds the authoritative fresh blob. This is
- * safe while the opt-in is on (keychain wins at load time) but silently
- * resurrects stale credentials if the user later unsets `CODEX_KEYCHAIN`.
- * We resolve this by letting `rewriteOnDisk` overwrite the file with the
- * fresh normalized blob when the rename fails so both sides agree, at the
- * cost of losing that one rollback artefact. This matches the "rollback
- * invariant" documented in the F1 post-merge review (option (a)).
+ * Partial-failure handling (F1 post-merge HIGH finding): if the rename fails
+ * (EACCES, EBUSY on Windows, disk full, parent dir permission drift) the file
+ * at `path` would otherwise hold a stale-but-valid blob while the keychain
+ * holds the authoritative fresh blob. This is safe while the opt-in is on
+ * (keychain wins at load time) but silently resurrects stale credentials if
+ * the user later unsets `CODEX_KEYCHAIN`. We resolve this by letting
+ * `rewriteOnDisk` overwrite the file with the fresh normalized blob when the
+ * rename fails so both sides agree, at the cost of losing that one rollback
+ * artefact. This matches the "rollback invariant" documented in the F1
+ * post-merge review (option (a)).
  */
 export async function migrateOnDiskJsonToKeychainBackup(
   path: string,
@@ -661,10 +619,14 @@ export async function migrateOnDiskJsonToKeychainBackup(
   } catch {
     return; // No legacy file to migrate.
   }
+  // The random nonce keeps marker names unique even when two migrations land
+  // in the same millisecond (the previous timestamp-only suffix let a second
+  // marker rename overwrite the first, destroying a rollback artefact).
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${path}.migrated-to-keychain.${timestamp}`;
+  const nonce = randomBytes(3).toString("hex");
+  const backup = `${path}.migrated-to-keychain.${timestamp}-${nonce}`;
   try {
-    await fs.rename(path, backup);
+    await renameWithWindowsRetry(path, backup);
     await fsyncParentDirectory(backup);
     // Re-apply 0o600 after rename (F1 post-merge LOW finding). POSIX
     // preserves mode across a rename in-place, but if the filesystem layer
@@ -686,6 +648,15 @@ export async function migrateOnDiskJsonToKeychainBackup(
       from: path,
       backup,
     });
+    // Bound the marker ring: every keychain save while a canonical JSON
+    // exists leaves one behind, and each holds a full plaintext token set.
+    // Prefix-scoped pruning keeps the newest few for rollback without
+    // touching any other backup family in the same directory.
+    await pruneStorageArtifacts(
+      dirname(path),
+      (name) => name.startsWith(`${basename(path)}.migrated-to-keychain.`),
+      getCredentialArtifactRetentionLimit(),
+    );
   } catch (err) {
     log.warn(
       "keychain: failed to rename on-disk JSON after successful keychain write; overwriting on-disk copy with fresh blob to prevent stale-rollback-on-opt-out",
@@ -733,12 +704,18 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
     const normalizedStorage = normalizeAccountStorage(storage) ?? storage;
     const blob = JSON.stringify(normalizedStorage, null, 2);
     const projectKey = getCurrentProjectStorageKey();
+    const path = getStoragePath();
+    // Retire the on-disk JSON BEFORE writing the keychain: the crash window
+    // between the two operations then leaves both sides at the OLD state
+    // (marker holds the pre-save bytes, keychain keeps the pre-save blob),
+    // never a fresh keychain entry beside a stale canonical file. If the
+    // rename fails the helper overwrites the file in place so the sides
+    // still agree once the keychain write lands.
+    await migrateOnDiskJsonToKeychainBackup(path, () =>
+      writeAccountsToPathUnlocked(path, normalizedStorage),
+    );
     const result = await writeToKeychain(projectKey, blob);
     if (result.ok) {
-      const path = getStoragePath();
-      await migrateOnDiskJsonToKeychainBackup(path, () =>
-        writeAccountsToPathUnlocked(path, normalizedStorage),
-      );
       return;
     }
     log.warn("keychain: write failed; falling back to JSON for this save", {
@@ -759,12 +736,21 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
  *   future-schema credentials with a stale or empty payload.
  */
 export async function loadAccounts(): Promise<AccountStorageV3 | null> {
-  return withStorageLock(async () => loadAccountsInternal(saveAccountsUnlocked));
+  return withPinnedStorageScope(() =>
+    withStorageLock(async () => loadAccountsInternal(saveAccountsUnlocked)),
+  );
 }
 
 /**
  * Executes a read-modify-write transaction under the storage lock and exposes
  * an unlocked persist callback so nested save operations do not deadlock.
+ *
+ * The whole transaction — lease acquisition, load, handler, and every persist
+ * callback the handler invokes — runs under `withPinnedStorageScope`, so the
+ * location captured at entry (which is also the path the filesystem lease is
+ * taken on) is the only location the transaction can touch. A `setStoragePath`
+ * scope flip issued mid-transaction applies to the real scope but cannot
+ * redirect this transaction's writes: they stay on the file the lease covers.
  */
 export async function withAccountStorageTransaction<T>(
   handler: (
@@ -772,12 +758,14 @@ export async function withAccountStorageTransaction<T>(
     persist: (storage: AccountStorageV3) => Promise<void>,
   ) => Promise<T>,
 ): Promise<T> {
-	return withStorageTransaction({
-		storagePath: getStoragePath(),
-		load: () => loadAccountsInternal(saveAccountsUnlocked),
-		persist: saveAccountsUnlocked,
-		handler,
-	});
+  return withPinnedStorageScope(() =>
+    withStorageTransaction({
+      storagePath: getStoragePath(),
+      load: () => loadAccountsInternal(saveAccountsUnlocked),
+      persist: saveAccountsUnlocked,
+      handler,
+    }),
+  );
 }
 
 /**
@@ -788,9 +776,11 @@ export async function withAccountStorageTransaction<T>(
  * @throws StorageError with platform-aware hints on failure
  */
 export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
-  return withStorageLock(async () => {
-    await saveAccountsUnlocked(storage);
-  });
+  return withPinnedStorageScope(() =>
+    withStorageLock(async () => {
+      await saveAccountsUnlocked(storage);
+    }),
+  );
 }
 
 /**
@@ -816,54 +806,65 @@ export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
  *   absorbing it would return success for a clear that never happened.
  */
 export async function clearAccounts(): Promise<void> {
-  return withStorageLock(async () => {
-    let jsonCleared = true;
-    try {
-      const path = getStoragePath();
-      assertTestRunNeverTouchesRealHome(path);
-      // Deleting the store outright needs no significance test - `null` says
-      // there is no successor document to compare against. The snapshotter
-      // still applies its own config and keychain gates.
-      await trySnapshotCredentialStoreBeforeWrite(path, null);
-      await fs.unlink(path);
-      // Flush the directory so the deletion itself is crash-durable: without
-      // it a power loss could resurrect the unlinked credential file.
-      await fsyncParentDirectory(path);
-    } catch (error) {
-      // The test-home guard is not a storage failure to absorb. It fires only
-      // under vitest, and it exists to fail a run that escaped its sandbox; it
-      // throws before the unlink, so swallowing it here would report a
-      // successful clear for a deletion that deliberately did not happen -
-      // fail-closed downgraded to fail-open on the one path that destroys the
-      // store. The same re-throw covers the snapshotter, which surfaces this
-      // code through `trySnapshotCredentialStoreBeforeWrite` for the same
-      // reason.
-      if (error instanceof StorageError && error.code === TEST_HOME_ESCAPE_CODE) {
-        throw error;
-      }
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        jsonCleared = false;
-        log.error(
-          "Failed to clear account storage; skipping keychain delete to keep storage sides in sync. Caller should retry.",
-          { error: String(error) },
-        );
-      }
-    }
+  return withPinnedStorageScope(() =>
+    withStorageTransaction({
+      // The filesystem lease must name the same file the handler unlinks —
+      // resolved under the pin so a mid-clear scope flip cannot make the
+      // unlink hit a different location than the lease covers.
+      storagePath: getStoragePath(),
+      load: () => Promise.resolve<AccountStorageV3 | null>(null),
+      persist: () => Promise.resolve(),
+      handler: async () => {
+        let jsonCleared = true;
+        try {
+          const path = getStoragePath();
+          assertTestRunNeverTouchesRealHome(path);
+          // Deleting the store outright needs no significance test - `null`
+          // says there is no successor document to compare against. The
+          // snapshotter still applies its own config and keychain gates.
+          await trySnapshotCredentialStoreBeforeWrite(path, null);
+          await fs.unlink(path);
+          // Flush the directory so the deletion itself is crash-durable:
+          // without it a power loss could resurrect the unlinked credential
+          // file.
+          await fsyncParentDirectory(path);
+        } catch (error) {
+          // The test-home guard is not a storage failure to absorb. It fires
+          // only under vitest, and it exists to fail a run that escaped its
+          // sandbox; it throws before the unlink, so swallowing it here would
+          // report a successful clear for a deletion that deliberately did not
+          // happen - fail-closed downgraded to fail-open on the one path that
+          // destroys the store. The same re-throw covers the snapshotter,
+          // which surfaces this code through
+          // `trySnapshotCredentialStoreBeforeWrite` for the same reason.
+          if (error instanceof StorageError && error.code === TEST_HOME_ESCAPE_CODE) {
+            throw error;
+          }
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") {
+            jsonCleared = false;
+            log.error(
+              "Failed to clear account storage; skipping keychain delete to keep storage sides in sync. Caller should retry.",
+              { error: String(error) },
+            );
+          }
+        }
 
-    // Only delete the keychain entry after the on-disk copy is gone (or
-    // was already absent). This preserves atomicity-enough semantics: a
-    // partial failure leaves both sides present rather than clearing
-    // one side and letting a subsequent load rehydrate from the other.
-    if (jsonCleared && isKeychainOptInEnabled()) {
-      try {
-        const projectKey = getCurrentProjectStorageKey();
-        await deleteFromKeychain(projectKey);
-      } catch (err) {
-        log.warn("keychain: delete during clearAccounts failed", {
-          error: String(err),
-        });
-      }
-    }
-  });
+        // Only delete the keychain entry after the on-disk copy is gone (or
+        // was already absent). This preserves atomicity-enough semantics: a
+        // partial failure leaves both sides present rather than clearing one
+        // side and letting a subsequent load rehydrate from the other.
+        if (jsonCleared && isKeychainOptInEnabled()) {
+          try {
+            const projectKey = getCurrentProjectStorageKey();
+            await deleteFromKeychain(projectKey);
+          } catch (err) {
+            log.warn("keychain: delete during clearAccounts failed", {
+              error: String(err),
+            });
+          }
+        }
+      },
+    }),
+  );
 }

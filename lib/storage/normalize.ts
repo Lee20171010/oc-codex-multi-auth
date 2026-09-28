@@ -279,9 +279,23 @@ export function normalizeAccountStorage(
       fromVersion === 1 ? seedV1RateLimitState(account) : account;
     const sanitized = sanitizeAccountNumericState(seeded);
     const named = dropStaleGeneratedLabel(sanitized);
-    if (named.accountUserId?.trim()) return named;
-    const accountUserId = extractAccountUserId(named.accessToken);
-    return accountUserId ? { ...named, accountUserId } : named;
+    // `accountUserId` is untrusted input here: a hand-edited or corrupted
+    // file can hold a non-string or whitespace-only value, and calling
+    // `.trim()` on a non-string would throw. Strip those and re-derive the
+    // seat id from the access token so healing preserves the identity.
+    const storedSeatId =
+      typeof named.accountUserId === "string" ? named.accountUserId.trim() : "";
+    if (storedSeatId) {
+      return storedSeatId === named.accountUserId
+        ? named
+        : { ...named, accountUserId: storedSeatId };
+    }
+    const healed = { ...named };
+    delete healed.accountUserId;
+    const accountUserId = extractAccountUserId(
+      typeof healed.accessToken === "string" ? healed.accessToken : undefined,
+    );
+    return accountUserId ? { ...healed, accountUserId } : healed;
   });
   const deduplicatedAccounts = deduplicateAccountsForStorage(accountsWithMemberIdentity);
 

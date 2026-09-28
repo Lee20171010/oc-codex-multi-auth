@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import { lock } from "proper-lockfile";
 
-import { renameWithWindowsRetry } from "./storage/atomic-write.js";
+import { writeFileAtomic } from "./storage/atomic-write.js";
 import { logDebug, logWarn } from "./logger.js";
 
 export interface QuotaWindowNotificationState {
@@ -76,13 +76,10 @@ export async function readQuotaNotificationState(
 }
 
 async function writeState(statePath: string, state: QuotaNotificationState): Promise<void> {
-	const tempPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
-	try {
-		await fs.writeFile(tempPath, JSON.stringify(state, null, 2), { mode: 0o600 });
-		await renameWithWindowsRetry(tempPath, statePath);
-	} finally {
-		await fs.rm(tempPath, { force: true }).catch(() => undefined);
-	}
+	// Temp file + fsync + Windows-aware rename + parent-dir fsync — the same
+	// durability contract every other storage write follows, so a crash cannot
+	// resurrect a stale notification state or leave a torn file behind.
+	await writeFileAtomic(statePath, JSON.stringify(state, null, 2));
 }
 
 export async function updateQuotaNotificationState<T>(

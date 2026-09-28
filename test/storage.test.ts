@@ -2379,12 +2379,18 @@ describe("storage", () => {
       expect(existsSync(getStoragePath())).toBe(true);
     });
 
-    it("loads global storage as fallback when project-scoped storage is missing", async () => {
+    it("does not read or seed from the global store when project-scoped storage is missing", async () => {
+      // Regression guard for the global->project fallback: copying the global
+      // pool into a project store duplicated single-use refresh tokens across
+      // scopes, so the first rotation in either pool stranded the other copy
+      // holding a consumed token. A project-scoped ENOENT must now mean
+      // "empty project pool", never "read the sibling scope".
       const fakeHome = join(testWorkDir, "home-fallback");
       const projectDir = join(testWorkDir, "project-fallback");
       const projectGitDir = join(projectDir, ".git");
       const globalConfigDir = join(fakeHome, ".opencode");
-      const globalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
+      const globalStoragePath = join(globalConfigDir, "oc-codex-multi-auth-accounts.json");
+      const legacyGlobalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
 
       await fs.mkdir(fakeHome, { recursive: true });
       await fs.mkdir(projectGitDir, { recursive: true });
@@ -2405,30 +2411,29 @@ describe("storage", () => {
           },
         ],
       };
-      await fs.writeFile(globalStoragePath, JSON.stringify(globalStorage), "utf-8");
+      const globalBytes = JSON.stringify(globalStorage);
+      await fs.writeFile(globalStoragePath, globalBytes, "utf-8");
+      await fs.writeFile(legacyGlobalStoragePath, globalBytes, "utf-8");
 
       const loaded = await loadAccounts();
 
-      expect(loaded).not.toBeNull();
-      expect(loaded?.accounts).toHaveLength(1);
-      expect(loaded?.accounts[0]?.accountId).toBe("global-account");
+      expect(loaded).toBeNull();
 
       const projectScopedPath = getStoragePath();
       expect(projectScopedPath).toContain(join(fakeHome, ".opencode", "projects"));
-      expect(existsSync(projectScopedPath)).toBe(true);
-
-      const seeded = JSON.parse(await fs.readFile(projectScopedPath, "utf-8")) as {
-        accounts?: Array<{ accountId?: string }>;
-      };
-      expect(seeded.accounts?.[0]?.accountId).toBe("global-account");
+      // No seed copy may appear in the project scope ...
+      expect(existsSync(projectScopedPath)).toBe(false);
+      // ... and neither global-scope file may be touched.
+      expect(await fs.readFile(globalStoragePath, "utf-8")).toBe(globalBytes);
+      expect(await fs.readFile(legacyGlobalStoragePath, "utf-8")).toBe(globalBytes);
     });
 
-    it("seeds project storage only once across serialized global-fallback loads", async () => {
+    it("never writes the project file on concurrent project-scoped loads", async () => {
       const fakeHome = join(testWorkDir, "home-fallback-concurrent");
       const projectDir = join(testWorkDir, "project-fallback-concurrent");
       const projectGitDir = join(projectDir, ".git");
       const globalConfigDir = join(fakeHome, ".opencode");
-      const globalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
+      const globalStoragePath = join(globalConfigDir, "oc-codex-multi-auth-accounts.json");
 
       await fs.mkdir(fakeHome, { recursive: true });
       await fs.mkdir(projectGitDir, { recursive: true });
@@ -2463,20 +2468,26 @@ describe("storage", () => {
 
       try {
         const [first, second] = await Promise.all([loadAccounts(), loadAccounts()]);
-        expect(first?.accounts[0]?.accountId).toBe("global-account-concurrent");
-        expect(second?.accounts[0]?.accountId).toBe("global-account-concurrent");
-        expect(projectSeedWriteCount).toBe(1);
+        expect(first).toBeNull();
+        expect(second).toBeNull();
+        // Not even once: duplicating the global refresh token into the
+        // project scope is the failure this guards against.
+        expect(projectSeedWriteCount).toBe(0);
       } finally {
         renameSpy.mockRestore();
       }
     });
 
-    it("returns global fallback when project seed write fails", async () => {
+    it("keeps the two scopes' refresh tokens isolated across a project save", async () => {
+      // The strongest form of the no-duplication contract: with the global
+      // pool populated, a project-scoped load must not see it, and a
+      // project-scoped save must write only the project file — the global
+      // copy's bytes stay untouched so its refresh tokens are never cloned.
       const fakeHome = join(testWorkDir, "home-fallback-seed-fail");
       const projectDir = join(testWorkDir, "project-fallback-seed-fail");
       const projectGitDir = join(projectDir, ".git");
       const globalConfigDir = join(fakeHome, ".opencode");
-      const globalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
+      const globalStoragePath = join(globalConfigDir, "oc-codex-multi-auth-accounts.json");
 
       await fs.mkdir(fakeHome, { recursive: true });
       await fs.mkdir(projectGitDir, { recursive: true });
@@ -2497,34 +2508,43 @@ describe("storage", () => {
           },
         ],
       };
-      await fs.writeFile(globalStoragePath, JSON.stringify(globalStorage), "utf-8");
+      const globalBytes = JSON.stringify(globalStorage);
+      await fs.writeFile(globalStoragePath, globalBytes, "utf-8");
+
+      const loaded = await loadAccounts();
+      expect(loaded).toBeNull();
 
       const projectScopedPath = getStoragePath();
-      const originalRename = fs.rename.bind(fs);
-      const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (sourcePath, destinationPath) => {
-        if (String(destinationPath) === projectScopedPath) {
-          const err = new Error("EPERM seed failure") as NodeJS.ErrnoException;
-          err.code = "EPERM";
-          throw err;
-        }
-        return originalRename(sourcePath, destinationPath);
-      });
+      const projectStorage = {
+        version: 3 as const,
+        activeIndex: 0,
+        accounts: [
+          {
+            refreshToken: "project-refresh",
+            accountId: "project-account",
+            addedAt: 1,
+            lastUsed: 1,
+          },
+        ],
+      };
+      await saveAccounts(projectStorage);
 
-      try {
-        const loaded = await loadAccounts();
-        expect(loaded?.accounts[0]?.accountId).toBe("global-account-fail");
-        expect(existsSync(projectScopedPath)).toBe(false);
-      } finally {
-        renameSpy.mockRestore();
-      }
+      expect(existsSync(projectScopedPath)).toBe(true);
+      const projectWritten = JSON.parse(await fs.readFile(projectScopedPath, "utf-8")) as {
+        accounts?: Array<{ accountId?: string; refreshToken?: string }>;
+      };
+      expect(projectWritten.accounts?.[0]?.accountId).toBe("project-account");
+      expect(projectWritten.accounts?.[0]?.refreshToken).toBe("project-refresh");
+      // The global file must be byte-identical: nothing flowed across scopes.
+      expect(await fs.readFile(globalStoragePath, "utf-8")).toBe(globalBytes);
     });
 
-    it("skips seed write when project path access fails with non-ENOENT error", async () => {
+    it("surfaces a non-ENOENT project-store read failure instead of consulting the global store", async () => {
       const fakeHome = join(testWorkDir, "home-fallback-access-error");
       const projectDir = join(testWorkDir, "project-fallback-access-error");
       const projectGitDir = join(projectDir, ".git");
       const globalConfigDir = join(fakeHome, ".opencode");
-      const globalStoragePath = join(globalConfigDir, "openai-codex-accounts.json");
+      const globalStoragePath = join(globalConfigDir, "oc-codex-multi-auth-accounts.json");
 
       await fs.mkdir(fakeHome, { recursive: true });
       await fs.mkdir(projectGitDir, { recursive: true });
@@ -2548,38 +2568,30 @@ describe("storage", () => {
       await fs.writeFile(globalStoragePath, JSON.stringify(globalStorage), "utf-8");
 
       const projectScopedPath = getStoragePath();
-      const originalAccess = fs.access.bind(fs);
-      const originalRename = fs.rename.bind(fs);
-      let projectSeedWriteCount = 0;
+      await fs.mkdir(dirname(projectScopedPath), { recursive: true });
+      await fs.writeFile(projectScopedPath, JSON.stringify(globalStorage), "utf-8");
 
-      const accessSpy = vi.spyOn(fs, "access").mockImplementation(async (path, mode) => {
+      const originalReadFile = fs.readFile.bind(fs);
+      const readSpy = vi.spyOn(fs, "readFile").mockImplementation(async (path, options) => {
         if (String(path) === projectScopedPath) {
-          const err = new Error("EACCES access failure") as NodeJS.ErrnoException;
+          const err = new Error("EACCES read failure") as NodeJS.ErrnoException;
           err.code = "EACCES";
           throw err;
         }
-        return originalAccess(path as string, mode);
-      });
-
-      const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (sourcePath, destinationPath) => {
-        if (String(destinationPath) === projectScopedPath) {
-          projectSeedWriteCount += 1;
-        }
-        return originalRename(sourcePath, destinationPath);
+        return originalReadFile(path as string, options as never);
       });
 
       try {
-        const loaded = await loadAccounts();
-        expect(loaded?.accounts[0]?.accountId).toBe("global-account-access-error");
-        expect(projectSeedWriteCount).toBe(0);
-        expect(existsSync(projectScopedPath)).toBe(false);
+        // An unreadable project store must surface loudly — not fall back to
+        // the global pool, which would let a later save destroy credentials
+        // the caller never saw.
+        await expect(loadAccounts()).rejects.toThrow(StorageError);
       } finally {
-        accessSpy.mockRestore();
-        renameSpy.mockRestore();
+        readSpy.mockRestore();
       }
     });
 
-    it("rejects corrupted global fallback storage instead of seeding an empty pool", async () => {
+    it("ignores the global store under project scope even when it is corrupted", async () => {
       const fakeHome = join(testWorkDir, "home-fallback-corrupted");
       const projectDir = join(testWorkDir, "project-fallback-corrupted");
       const projectGitDir = join(projectDir, ".git");
@@ -2595,8 +2607,14 @@ describe("storage", () => {
 
       await fs.writeFile(globalStoragePath, "{ invalid json", "utf-8");
 
-      await expect(loadAccounts()).rejects.toThrow(StorageError);
+      // Project scope must not even read the sibling scope's file.
+      await expect(loadAccounts()).resolves.toBeNull();
       expect(existsSync(getStoragePath())).toBe(false);
+      // The corrupted global file is left alone — and still fails loudly
+      // when the *global* scope loads it.
+      expect(await fs.readFile(globalStoragePath, "utf-8")).toBe("{ invalid json");
+      setStoragePath(null);
+      await expect(loadAccounts()).rejects.toThrow(StorageError);
     });
   });
 

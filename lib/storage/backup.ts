@@ -38,7 +38,13 @@ function formatBackupTimestamp(date: Date = new Date()): string {
   return `${yyyy}${mm}${dd}-${hh}${min}${ss}${mmm}`;
 }
 
-function sanitizeBackupPrefix(prefix: string): string {
+/**
+ * The filename prefix every backup written under `prefix` will share.
+ * Exported so retention pruning can scope its deletes to exactly the family
+ * a caller created — the sanitization must match what
+ * {@link createTimestampedBackupPathFor} applies, byte for byte.
+ */
+export function sanitizeBackupPrefix(prefix: string): string {
   const trimmed = prefix.trim();
   const safe = trimmed
     .replace(/[^a-zA-Z0-9_-]+/g, "-")

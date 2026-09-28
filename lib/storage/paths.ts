@@ -23,7 +23,18 @@ export function getProjectConfigDir(projectPath: string): string {
 
 function normalizeProjectPath(projectPath: string): string {
 	const resolvedPath = resolve(projectPath);
-	const normalizedSeparators = resolvedPath.replace(/\\/g, "/");
+	// Collapse symlinks so a project reached through a symlinked parent and
+	// the same project reached directly share one storage key — without this,
+	// `/link/repo` and `/real/repo` would each get their own account pool for
+	// one physical repository. Best effort: realpath fails for not-yet-
+	// existing paths, so fall back to the lexical resolution.
+	let canonical = resolvedPath;
+	try {
+		canonical = realpathSync(resolvedPath);
+	} catch {
+		// Keep the lexical resolution.
+	}
+	const normalizedSeparators = canonical.replace(/\\/g, "/");
 	return process.platform === "win32"
 		? normalizedSeparators.toLowerCase()
 		: normalizedSeparators;
@@ -57,23 +68,59 @@ export function isProjectDirectory(dir: string): boolean {
 	return PROJECT_MARKERS.some((marker) => existsSync(join(dir, marker)));
 }
 
+/**
+ * True when `dir` is the user's home directory, compared by canonical path so
+ * a symlinked HOME still matches.
+ */
+function isHomeDirectory(dir: string): boolean {
+	try {
+		return realpathSync(dir) === realpathSync(homedir());
+	} catch {
+		return resolve(dir) === resolve(homedir());
+	}
+}
+
+/**
+ * `~/.opencode` is this plugin's own state directory, so it exists in every
+ * home directory that has ever run the plugin. Letting it count as a project
+ * marker for $HOME would scope a whole home directory as one "project" the
+ * first time the CLI ran from it — pooling every invocation's accounts under
+ * one accidental key. Other markers (`.git`, `package.json`, …) still make
+ * $HOME a legitimate project root (dotfiles repos, home-as-package).
+ */
+function isProjectRootCandidate(dir: string): boolean {
+	if (!isProjectDirectory(dir)) return false;
+	if (!isHomeDirectory(dir)) return true;
+	return PROJECT_MARKERS.some(
+		(marker) => marker !== ".opencode" && existsSync(join(dir, marker)),
+	);
+}
+
 export function findProjectRoot(startDir: string): string | null {
+	// Canonicalize the start directory so the ancestor walk follows the real
+	// filesystem hierarchy — a symlinked start would otherwise walk the link's
+	// lexical parents and silently miss (or mislabel) the real project root.
 	let current = startDir;
+	try {
+		current = realpathSync(startDir);
+	} catch {
+		current = resolve(startDir);
+	}
 	const root = dirname(current) === current ? current : null;
-	
+
 	while (current) {
-		if (isProjectDirectory(current)) {
+		if (isProjectRootCandidate(current)) {
 			return current;
 		}
-		
+
 		const parent = dirname(current);
 		if (parent === current) {
 			break;
 		}
 		current = parent;
 	}
-	
-	return root && isProjectDirectory(root) ? root : null;
+
+	return root && isProjectRootCandidate(root) ? root : null;
 }
 
 function normalizePathForComparison(filePath: string): string {
