@@ -10,8 +10,8 @@ Run all of these before opening a PR — the same six commands run in CI (`.gith
 npm ci
 npm run typecheck
 npm run lint
-npm test
 npm run build
+npm test
 npm run audit:ci
 ```
 

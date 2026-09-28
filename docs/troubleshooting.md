@@ -141,8 +141,10 @@ merged result.
 **"Model is not supported when using Codex with a ChatGPT account".**
 Entitlement failure — re-login, add an entitled account, or let the default
 fallback chain downgrade. Escape hatches and the full chain list are in
-[Configuration](configuration.md); `CODEX_AUTH_UNSUPPORTED_MODEL_POLICY=strict`
-turns substitution off.
+[Configuration](configuration.md). `CODEX_AUTH_UNSUPPORTED_MODEL_POLICY=strict`
+stops substitution for explicitly selected models; the always-on auto-fallbacks
+for default selector ids need the matching `CODEX_AUTH_DISABLE_*_AUTO_FALLBACK`
+opt-out instead.
 
 **Retired model IDs** (`gpt-5.4-mini`, the `gpt-5.x-codex` family) still
 resolve through fallback chains when typed by hand.

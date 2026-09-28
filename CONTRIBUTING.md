@@ -28,8 +28,8 @@ Quality gates (the same commands CI runs):
 ```bash
 npm run typecheck    # strict tsc --noEmit
 npm run lint         # eslint, no warnings allowed (lint-staged uses --max-warnings=0)
+npm run build        # compile to dist/ — standalone CLI tests need it
 npm test             # full vitest suite
-npm run build        # compile to dist/
 npm run audit:ci     # prod audit + dev allowlist
 ```
 
