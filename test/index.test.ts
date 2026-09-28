@@ -192,6 +192,7 @@ vi.mock("../lib/config.js", () => ({
 	getCodexTuiMaskEmail: vi.fn(() => false),
 	getQuotaDisplay: vi.fn(() => "free"),
 	getBeginnerSafeMode: () => false,
+	resolveAccountIdOverride: () => undefined,
 	loadPluginConfig: vi.fn((): import("../lib/types.js").PluginConfig => ({})),
 }));
 
