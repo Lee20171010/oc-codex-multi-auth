@@ -16,7 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promises as fs, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
@@ -316,6 +316,54 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		const mirrored = await fs.readFile(join(dir, markers[0]!), "utf-8");
 		expect(mirrored).toContain("acct-fresh");
 		expect(mirrored).not.toContain("acct-prehistoric");
+	});
+
+	it("refreshes an unlink-surviving marker to the current pool so corrupt-newest fallback never serves stale tokens", async () => {
+		// Sequence from greptile P1 on PR #280: an older marker survives a
+		// failed unlink during keychain sync (Windows EBUSY), and the newest
+		// marker later becomes unreadable. Without the refresh-on-survivor
+		// step the fallback would serve the older marker's pre-rotation pool —
+		// consumed refresh tokens and removed accounts resurrected. The sync
+		// must instead rewrite any marker it cannot delete to the blob it
+		// just wrote, so every surviving marker mirrors current state.
+		process.env.CODEX_KEYCHAIN = "1";
+		// A staler marker left by an earlier migration cycle — created before
+		// the current one so its mtime sorts it as the older marker.
+		const olderName = `${storagePath}.migrated-to-keychain.2020-01-01T00-00-00-000Z-aaaaaa`;
+		await fs.writeFile(olderName, JSON.stringify(makeStorage("acct-consumed")), "utf-8");
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-stale")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+
+		// The save-time sync retires older markers; force that unlink to fail
+		// the way a Windows EBUSY/EPERM would.
+		const realUnlink = fs.unlink.bind(fs);
+		const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation(async (target) => {
+			if (String(target) === olderName) {
+				throw Object.assign(new Error("simulated EBUSY on marker unlink"), {
+					code: "EBUSY",
+				});
+			}
+			return realUnlink(target as string);
+		});
+		try {
+			await saveAccounts(makeStorage("acct-fresh"));
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+
+		// The survivor could not be deleted — but it was refreshed to the
+		// just-saved pool instead of being left at acct-consumed.
+		expect(await fs.readFile(olderName, "utf-8")).toContain("acct-fresh");
+
+		// Now the newest marker becomes unreadable. The fallback iterates to
+		// the survivor and must serve acct-fresh, never acct-consumed.
+		const markers = await markerFiles();
+		const newestName = markers.find((n) => n !== basename(olderName));
+		expect(newestName).toBeDefined();
+		await fs.writeFile(join(dir, newestName!), "{ not valid json", "utf-8");
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-fresh");
 	});
 
 	it("fails loudly when a migration marker cannot be unlinked during clear", async () => {
