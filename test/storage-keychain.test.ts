@@ -118,6 +118,16 @@ function restoreOptIn(): void {
 	}
 }
 
+const ORIGINAL_PLATFORM = process.platform;
+
+function asWindows(): void {
+	Object.defineProperty(process, "platform", { value: "win32" });
+}
+
+function restorePlatform(): void {
+	Object.defineProperty(process, "platform", { value: ORIGINAL_PLATFORM });
+}
+
 function makeStorage(): AccountStorageV3 {
 	return {
 		version: 3,
@@ -261,7 +271,10 @@ describe("lib/storage/keychain: low-level backend", () => {
 		// can never be written back — but if a smaller blob was saved earlier,
 		// leaving it in place makes every keychain-first load serve the stale
 		// pool over the newer JSON file (greptile P1 on PR #282). The refusal
-		// path must delete the stranded entry so JSON stays authoritative.
+		// path does NOT delete the entry itself: that stale entry is also the
+		// only surviving copy until the caller's JSON fallback lands, so the
+		// wrapper marks the result `refused` and the caller retires the entry
+		// after the fallback write is durable.
 		const originalPlatform = process.platform;
 
 		function asWindows(): void {
@@ -274,7 +287,7 @@ describe("lib/storage/keychain: low-level backend", () => {
 			});
 		});
 
-		it("writeToKeychain refusal deletes the older entry", async () => {
+		it("writeToKeychain refusal marks the result and keeps the older entry", async () => {
 			asWindows();
 			const mock = createMockBackend();
 			_setBackendForTests(mock);
@@ -289,14 +302,16 @@ describe("lib/storage/keychain: low-level backend", () => {
 			const refused = await writeToKeychain("proj-key", oversized);
 			expect(refused.ok).toBe(false);
 			expect(refused.error).toContain(`${WIN32_KEYCHAIN_MAX_BLOB_BYTES}`);
-			// The stale entry is gone: a keychain-first load now reads null and
-			// falls through to the JSON file instead of serving the older pool.
-			expect(mock.store.has(key)).toBe(false);
-			const read = await readFromKeychain("proj-key");
-			expect(read).toBeNull();
+			expect(refused.refused).toBe(true);
+			// The entry survives: it is the only copy of the pool until the
+			// caller's JSON fallback write lands. The caller retires it after
+			// the fallback is durable — deleting it here would strand a
+			// keychain-native pool if the fallback write then failed.
+			expect(mock.store.has(key)).toBe(true);
+			expect(mock.calls.some((c) => c.op === "delete")).toBe(false);
 		});
 
-		it("writeFlaggedToKeychain refusal deletes the older flagged entry", async () => {
+		it("writeFlaggedToKeychain refusal marks the result and keeps the older flagged entry", async () => {
 			asWindows();
 			const mock = createMockBackend();
 			_setBackendForTests(mock);
@@ -312,7 +327,8 @@ describe("lib/storage/keychain: low-level backend", () => {
 			const oversized = "x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES + 1);
 			const refused = await writeFlaggedToKeychain("proj-key", oversized);
 			expect(refused.ok).toBe(false);
-			expect(mock.store.has(key)).toBe(false);
+			expect(refused.refused).toBe(true);
+			expect(mock.store.has(key)).toBe(true);
 		});
 
 		it("writeToKeychain refusal resolves when there is nothing to clear", async () => {
@@ -323,9 +339,10 @@ describe("lib/storage/keychain: low-level backend", () => {
 			const refused = await writeToKeychain("proj-key", oversized);
 			expect(refused.ok).toBe(false);
 			expect(refused.error).toContain(`${WIN32_KEYCHAIN_MAX_BLOB_BYTES}`);
-			// The delete still ran — an absent entry is not an error, but the
-			// attempt must happen so a racing writer's entry cannot survive.
-			expect(mock.calls.some((c) => c.op === "delete")).toBe(true);
+			expect(refused.refused).toBe(true);
+			// No delete attempt — retire ownership moved to the caller, which
+			// runs it only after the JSON fallback write is durable.
+			expect(mock.calls.some((c) => c.op === "delete")).toBe(false);
 		});
 	});
 
@@ -389,6 +406,7 @@ describe("load-save integration with CODEX_KEYCHAIN", () => {
 		setStoragePathDirect(null);
 		_resetBackendForTests();
 		restoreOptIn();
+		restorePlatform();
 		try {
 			await fs.rm(storageDir, { recursive: true, force: true });
 		} catch {
@@ -465,6 +483,77 @@ describe("load-save integration with CODEX_KEYCHAIN", () => {
 		expect(existsSync(storagePath)).toBe(true);
 		const onDisk = JSON.parse(await fs.readFile(storagePath, "utf-8"));
 		expect(onDisk.accounts[0].accountId).toBe("acct-1");
+	});
+
+	it("[P1] oversized save retires the stale keychain entry only after the JSON fallback is durable", async () => {
+		asWindows();
+		setOptIn(true);
+		// Seed a small keychain-native entry — the "pool grew beyond the
+		// Windows blob limit" precondition. No canonical file exists, so the
+		// keychain entry is the ONLY copy of the pool.
+		await saveAccounts(makeStorage());
+		const key = `${KEYCHAIN_SERVICE_NAME}::${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`;
+		expect(mock.store.has(key)).toBe(true);
+		expect(existsSync(storagePath)).toBe(false);
+
+		const oversized = makeStorage();
+		oversized.accounts[0]!.refreshToken = `rt-${"x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES)}`;
+
+		// Observe whether the JSON fallback had already landed when the
+		// deferred stale-entry delete ran.
+		let jsonExistedAtDelete = false;
+		const origDelete = mock.delete.bind(mock);
+		mock.delete = async (service: string, account: string) => {
+			jsonExistedAtDelete = existsSync(storagePath);
+			return origDelete(service, account);
+		};
+
+		await saveAccounts(oversized);
+
+		expect(existsSync(storagePath)).toBe(true);
+		expect(jsonExistedAtDelete).toBe(true);
+		expect(mock.store.has(key)).toBe(false);
+		const onDisk = JSON.parse(
+			await fs.readFile(storagePath, "utf-8"),
+		) as AccountStorageV3;
+		expect(onDisk.accounts[0]!.refreshToken).toBe(
+			oversized.accounts[0]!.refreshToken,
+		);
+	});
+
+	it("[P1] failed JSON fallback keeps the stale keychain entry — never the last copy", async () => {
+		asWindows();
+		setOptIn(true);
+		await saveAccounts(makeStorage());
+		const key = `${KEYCHAIN_SERVICE_NAME}::${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`;
+		expect(mock.store.has(key)).toBe(true);
+
+		const oversized = makeStorage();
+		oversized.accounts[0]!.refreshToken = `rt-${"x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES)}`;
+
+		// Fail the fallback's temp-file open so no JSON ever lands.
+		const origOpen = fs.open.bind(fs);
+		const openSpy = vi
+			.spyOn(fs, "open")
+			.mockImplementation(async (path, flags, mode) => {
+				if (flags === "w" && String(path).includes("accounts.json")) {
+					throw Object.assign(
+						new Error("simulated EACCES on fallback temp open"),
+						{ code: "EACCES" },
+					);
+				}
+				return origOpen(path, flags, mode);
+			});
+		try {
+			await expect(saveAccounts(oversized)).rejects.toThrow();
+		} finally {
+			openSpy.mockRestore();
+		}
+
+		// The entry survives — deleting it before the fallback landed would
+		// have destroyed the only pool copy. No delete was even attempted.
+		expect(mock.store.has(key)).toBe(true);
+		expect(mock.calls.some((c) => c.op === "delete")).toBe(false);
 	});
 
 	it("clearAccounts removes both the keychain entry and the JSON file when opt-in is on", async () => {

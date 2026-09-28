@@ -439,6 +439,8 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						return renderJsonOutput({
 							...emptyConsumeJsonPayload(),
 							...identity,
+							ok: envelope.ok,
+							tool: envelope.tool,
 							action: "consume",
 							redeemed: null,
 							reason: "consume-failed",
@@ -447,6 +449,8 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 							credits: summary.credits,
 							error: envelope.error,
 							retryable: envelope.retryable,
+							nextAction: envelope.nextAction,
+							path: envelope.path,
 							message: `${consumeError} — the consume request failed but may have reached the backend. Run codex-reset (status) and check whether ${credit.id} is still available before redeeming another credit.`,
 						});
 					}
@@ -511,7 +515,10 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					const remainingCredits = summary.credits.filter(
 						(entry) => entry.id !== credit.id,
 					);
-					const consumedCount = summary.credits.length - remainingCredits.length;
+					// Exactly one credit was redeemed — subtract one, not the number
+					// of rows removed: a malformed upstream payload can carry the
+					// same id twice, and subtracting the row count would
+					// under-report what remains.
 					return renderJsonOutput({
 						...emptyConsumeJsonPayload(),
 						...identity,
@@ -521,10 +528,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						blocksCleared,
 						blocksClearError: blocksClearError ?? null,
 						credit,
-						availableCount: Math.max(
-							0,
-							summary.availableCount - consumedCount,
-						),
+						availableCount: Math.max(0, summary.availableCount - 1),
 						credits: remainingCredits,
 						result: {
 							code: result.code ?? null,

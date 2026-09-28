@@ -258,6 +258,14 @@ export interface KeychainWriteResult {
 	ok: boolean;
 	/** Populated on failure. Never contains secret material. */
 	error?: string;
+	/**
+	 * True only when the write was refused outright (blob too large for the
+	 * backend) rather than failing transiently. Callers whose JSON fallback
+	 * has become durable may use this to decide whether a stale keychain
+	 * entry must be retired — retiring it earlier would delete the only
+	 * surviving copy when the fallback write then fails.
+	 */
+	refused?: boolean;
 }
 
 /**
@@ -271,17 +279,14 @@ export async function writeToKeychain(
 	const refusal = keychainBlobRefusal(jsonBlob);
 	if (refusal) {
 		// A refused write can never reach the keychain, so an entry already
-		// there can only ever serve stale data: loads read the keychain first,
-		// and a smaller older blob would shadow every newer JSON save. Retire
-		// it best-effort — a delete failure is logged, never thrown, because
-		// the JSON file remains authoritative either way.
-		const cleared = await deleteFromKeychain(projectStorageKey);
-		log.warn("keychain: write refused", {
-			reason: refusal,
-			staleEntryCleared: cleared.deleted,
-			...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
-		});
-		return { ok: false, error: refusal };
+		// there can only ever serve stale data — but it is ALSO the only
+		// surviving copy until the caller's JSON fallback lands. Deleting it
+		// here and failing the fallback write would strand a keychain-native
+		// pool entirely (greptile P1 on PR #282). The caller retires the
+		// entry once the fallback is durable; `refused` tells it this is the
+		// permanent-failure case, not a transient one.
+		log.warn("keychain: write refused", { reason: refusal });
+		return { ok: false, error: refusal, refused: true };
 	}
 	const backend = await getBackend();
 	if (!backend) {
@@ -360,15 +365,11 @@ export async function writeFlaggedToKeychain(
 ): Promise<KeychainWriteResult> {
 	const refusal = keychainBlobRefusal(jsonBlob);
 	if (refusal) {
-		// Same stale-shadow hazard as writeToKeychain: a flagged entry that
-		// can never be updated must not outlive the JSON fallback.
-		const cleared = await deleteFlaggedFromKeychain(projectStorageKey);
-		log.warn("keychain: flagged write refused", {
-			reason: refusal,
-			staleEntryCleared: cleared.deleted,
-			...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
-		});
-		return { ok: false, error: refusal };
+		// Same deferred-retire contract as writeToKeychain: the stale entry
+		// is the only surviving copy until the caller's JSON fallback lands,
+		// so it is deleted after — never before — the fallback is durable.
+		log.warn("keychain: flagged write refused", { reason: refusal });
+		return { ok: false, error: refusal, refused: true };
 	}
 	const backend = await getBackend();
 	if (!backend) {
