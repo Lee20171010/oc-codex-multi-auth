@@ -18,7 +18,7 @@
 
 import { promises as fs, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ACCOUNTS_FILE_NAME, LEGACY_ACCOUNTS_FILE_NAME } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { AnyAccountStorageSchema, getValidationErrors } from "../schemas.js";
@@ -629,6 +629,61 @@ async function writeAccountsToPathUnlocked(path: string, storage: AccountStorage
   }
 }
 
+/** Suffix marker for the rollback artefact `migrateOnDiskJsonToKeychainBackup`
+ * leaves behind; the clear paths retire every file under it. */
+const KEYCHAIN_MIGRATION_BACKUP_MARK = ".migrated-to-keychain.";
+
+/**
+ * Remove every `<store>.migrated-to-keychain.<ts>` rollback artefact beside a
+ * pool being cleared. Each artefact still holds the refresh tokens the clear
+ * exists to erase — a surviving one keeps plaintext credentials on disk (and,
+ * on loaders that consult markers for opt-out recovery, can resurrect the
+ * cleared pool outright).
+ *
+ * Best-effort per artefact like the rest of the clear contract: a failed
+ * unlink is logged, never thrown. Shared by `clearAccounts` and
+ * `clearFlaggedAccounts`.
+ */
+export async function retireKeychainMigrationBackups(
+  storePath: string,
+): Promise<void> {
+  const dir = dirname(storePath);
+  const prefix = `${basename(storePath)}${KEYCHAIN_MIGRATION_BACKUP_MARK}`;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return; // No store directory — nothing to retire.
+  }
+  let removed = false;
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const target = join(dir, entry);
+    try {
+      await fs.unlink(target);
+      removed = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        log.warn("keychain: failed to retire a migration backup during storage clear", {
+          target,
+          error: String(error),
+        });
+      }
+    }
+  }
+  if (removed) {
+    // Flush the removals alongside the canonical unlink's own fsync so a
+    // crash cannot bring a retired backup back.
+    try {
+      await fsyncParentDirectory(storePath);
+    } catch (error) {
+      log.warn("keychain: failed to fsync the store directory after retiring migration backups", {
+        error: String(error),
+      });
+    }
+  }
+}
+
 /**
  * Post-keychain-write migration helper: if a legacy on-disk JSON file still
  * exists at `path`, rename it with a timestamped `.migrated-to-keychain.<ts>`
@@ -662,7 +717,7 @@ export async function migrateOnDiskJsonToKeychainBackup(
     return; // No legacy file to migrate.
   }
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${path}.migrated-to-keychain.${timestamp}`;
+  const backup = `${path}${KEYCHAIN_MIGRATION_BACKUP_MARK}${timestamp}`;
   try {
     await fs.rename(path, backup);
     await fsyncParentDirectory(backup);
@@ -859,11 +914,27 @@ export async function clearAccounts(): Promise<void> {
       try {
         const projectKey = getCurrentProjectStorageKey();
         await deleteFromKeychain(projectKey);
+        // The delete result is ambiguous — `false` covers "entry absent" as
+        // well as "backend refused". A surviving entry is servable on the
+        // next keychain-first load and would resurrect the cleared pool, so
+        // verify with a read rather than trusting the boolean.
+        if ((await readFromKeychain(projectKey)) !== null) {
+          log.error(
+            "keychain: account entry survived the clearAccounts delete; the cleared credentials remain reachable. Remove the keychain entry manually.",
+          );
+        }
       } catch (err) {
         log.warn("keychain: delete during clearAccounts failed", {
           error: String(err),
         });
       }
+    }
+
+    // The migration rollback artefacts beside the pool hold the same refresh
+    // tokens the clear exists to erase — a clear that only unlinks the
+    // canonical file leaves them recoverable on disk.
+    if (jsonCleared) {
+      await retireKeychainMigrationBackups(getStoragePath());
     }
   });
 }

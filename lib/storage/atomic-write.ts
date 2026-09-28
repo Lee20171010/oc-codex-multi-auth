@@ -161,6 +161,11 @@ export async function writeFileWithTimeout(
   // caller's temp-file unlink fail outright on Windows — and the file it
   // pins can contain refresh tokens.
   let flushHandle: FileHandle | undefined;
+  // Tracks an already-started close() separately from the handle: sync() can
+  // resolve before the deadline while close() is still pending, and that
+  // pending fd pins the temp file exactly like a wedged fsync does. The
+  // timeout path hands whichever promise is in flight to the caller.
+  let flushClose: Promise<void> | undefined;
   try {
     await fs.writeFile(filePath, content, {
       encoding: "utf-8",
@@ -174,18 +179,21 @@ export async function writeFileWithTimeout(
     // abort signal and surfaces as ETIMEDOUT instead of outliving the
     // caller's deadline.
     const flushExisting = (async () => {
+      const handle = await fs.open(filePath, "r+");
+      flushHandle = handle;
       try {
-        flushHandle = await fs.open(filePath, "r+");
-        await flushHandle.sync();
+        await handle.sync();
       } finally {
-        if (flushHandle) {
-          const handle = flushHandle;
-          flushHandle = undefined;
-          try {
-            await handle.close();
-          } catch {
+        flushClose = handle.close().then(
+          () => {},
+          () => {
             // Close failure is secondary to the write outcome.
-          }
+          },
+        );
+        try {
+          await flushClose;
+        } finally {
+          flushHandle = undefined;
         }
       }
     })();
@@ -210,22 +218,31 @@ export async function writeFileWithTimeout(
       // blocks the caller's temp-file cleanup. Close it ourselves under a
       // short bound; if even close() hangs we must not wait on it.
       if (flushHandle) {
-        const handle = flushHandle;
-        flushHandle = undefined;
-        const closed = handle.close().then(
-          () => {},
-          () => {},
-        );
-        const closedInTime = await Promise.race([
-          closed.then(() => true),
-          new Promise<boolean>((resolve) => setTimeout(resolve, 250, false)),
-        ]);
-        if (!closedInTime) {
-          // close() is still pending on the wedged fsync — the temp file may
-          // stay undeletable until the fd actually releases (Windows). Hand
-          // the eventual close to the caller so its cleanup can retry then;
-          // we do not wait on it, so the caller's timeout bound is unchanged.
-          onHandleAbandoned?.(closed);
+        if (flushClose) {
+          // sync() resolved before the deadline but close() is still in
+          // flight — the pending fd pins the temp file on Windows exactly
+          // like a wedged fsync. Hand the caller the close already running
+          // so its cleanup retries the moment the fd releases; starting a
+          // second close() on the same handle would throw.
+          onHandleAbandoned?.(flushClose);
+        } else {
+          const handle = flushHandle;
+          flushHandle = undefined;
+          const closed = handle.close().then(
+            () => {},
+            () => {},
+          );
+          const closedInTime = await Promise.race([
+            closed.then(() => true),
+            new Promise<boolean>((resolve) => setTimeout(resolve, 250, false)),
+          ]);
+          if (!closedInTime) {
+            // close() is still pending on the wedged fsync — the temp file may
+            // stay undeletable until the fd actually releases (Windows). Hand
+            // the eventual close to the caller so its cleanup can retry then;
+            // we do not wait on it, so the caller's timeout bound is unchanged.
+            onHandleAbandoned?.(closed);
+          }
         }
       }
       const timeoutError = Object.assign(
