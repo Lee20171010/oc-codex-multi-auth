@@ -22,6 +22,7 @@ import {
 	DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN,
 } from "../request/fetch-helpers.js";
 import { getReasoningConfig } from "../request/request-transformer.js";
+import { readBoundedResponseText } from "../request/response-handler.js";
 import { shapeBodyForModel } from "../request/helpers/responses-lite.js";
 import { GPT_6_LUNA_MODEL_ID } from "../request/helpers/model-map.js";
 import { sanitizeCodexApiErrorMessage } from "../codex-usage.js";
@@ -215,10 +216,15 @@ async function attemptWarm(
 		}
 
 		// Read the error body (small) BEFORE classifying so a 429 quota-exhausted
-		// account is not mis-reported as warmed.
+		// account is not mis-reported as warmed. Bounded + timed: `text()` used
+		// to pull the whole body before slicing — a hostile multi-MB error body
+		// (or a drip the outer abort ignores) had no bound.
 		let bodyText = "";
 		try {
-			bodyText = (await response.text()).slice(0, 2048);
+			bodyText = (await readBoundedResponseText(response, {
+				maxBytes: 2048,
+				timeoutMs: params.timeoutMs ?? WARM_TIMEOUT_MS,
+			})).slice(0, 2048);
 		} catch {
 			// Ignore body-read failures; fall back to status-only classification.
 		}

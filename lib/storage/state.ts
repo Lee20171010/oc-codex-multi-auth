@@ -54,8 +54,21 @@ function newStorageState() {
 }
 const defaultState = newStorageState();
 const storageScope = new AsyncLocalStorage<ReturnType<typeof newStorageState>>();
-/** Read the active location's state, falling back to the original V1 singleton. */
-const state = () => storageScope.getStore() ?? defaultState;
+/**
+ * A pinned read-view of the storage location. While a transaction pin is
+ * active, path getters resolve the location that existed when the pin was
+ * taken, so a `setStoragePath` scope flip mid-transaction cannot redirect a
+ * load or persist to a file the filesystem lease does not cover. Mutations
+ * (setStoragePath/setStoragePathDirect) deliberately bypass the pin and land
+ * on the real location state — the flip is deferred inside the transaction,
+ * then takes effect the moment the pin drops rather than being silently
+ * discarded.
+ */
+const pinnedScope = new AsyncLocalStorage<ReturnType<typeof newStorageState>>();
+/** Read the active location's state, honoring a transaction pin first. */
+const state = () => pinnedScope.getStore() ?? storageScope.getStore() ?? defaultState;
+/** Read the location state mutations target — intentionally pin-blind. */
+const mutableState = () => storageScope.getStore() ?? defaultState;
 
 /** V2 hosts multiple locations in one process. Timers inherit their owner's scope. */
 export function createStorageScope() {
@@ -63,21 +76,46 @@ export function createStorageScope() {
   return <T>(operation: () => T): T => storageScope.run(scoped, operation);
 }
 
+/**
+ * Pin the current storage location for the duration of `operation`.
+ *
+ * Every path getter (`getStoragePath`, `getCurrentStoragePath`,
+ * `getCurrentProjectRoot`, `getCurrentLegacyProjectStoragePath`,
+ * `getCurrentProjectStorageKey`, and anything derived from them such as
+ * `getFlaggedAccountsPath`) resolves the location captured at entry, so all
+ * reads, writes, keychain keys, snapshot paths, and transaction leases inside
+ * the operation agree on one concrete file. A `setStoragePath` call made
+ * inside the pin still applies — but to the real scope, where it takes effect
+ * only after the pin is released.
+ */
+export function withPinnedStorageScope<T>(operation: () => T): T {
+  const current = state();
+  const snapshot: ReturnType<typeof newStorageState> = {
+    currentStoragePath: current.currentStoragePath,
+    currentLegacyProjectStoragePath: current.currentLegacyProjectStoragePath,
+    currentProjectRoot: current.currentProjectRoot,
+    // The pin is a read-view: listener registration/notification always
+    // targets the real scope, so this set is never populated.
+    storagePathListeners: new Set<() => void>(),
+  };
+  return pinnedScope.run(snapshot, operation);
+}
+
 /** Listen only for path changes in the current storage scope. */
 export function subscribeToStoragePathChanges(listener: () => void): () => void {
-  const { storagePathListeners } = state();
+  const { storagePathListeners } = mutableState();
   storagePathListeners.add(listener);
   return () => { storagePathListeners.delete(listener); };
 }
 
 /** Notify listeners belonging to the current location, not other V2 sessions. */
 function notifyStoragePathChanged(): void {
-  for (const listener of state().storagePathListeners) listener();
+  for (const listener of mutableState().storagePathListeners) listener();
 }
 
 /** Select project-scoped account files, or clear the selection for global storage. */
 export function setStoragePath(projectPath: string | null): void {
-  const current = state();
+  const current = mutableState();
   if (!projectPath) {
     current.currentStoragePath = null;
     current.currentLegacyProjectStoragePath = null;
@@ -101,7 +139,7 @@ export function setStoragePath(projectPath: string | null): void {
 
 /** Override the active file without assigning a project identity (e.g. CLI/tests). */
 export function setStoragePathDirect(path: string | null): void {
-  const current = state();
+  const current = mutableState();
   current.currentStoragePath = path;
   current.currentLegacyProjectStoragePath = null;
   current.currentProjectRoot = null;

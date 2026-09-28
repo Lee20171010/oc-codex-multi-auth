@@ -13,8 +13,16 @@ import { ACCOUNT_LIMITS } from "../constants.js";
 import { createLogger } from "../logger.js";
 import { MODEL_FAMILIES, type ModelFamily } from "../prompts/codex.js";
 import { writeFileAtomic } from "./atomic-write.js";
-import { createTimestampedBackupPath, writePreImportBackupFile } from "./backup.js";
-import { isCredentialSnapshotFileName } from "./credential-snapshots.js";
+import {
+  createTimestampedBackupPath,
+  sanitizeBackupPrefix,
+  writePreImportBackupFile,
+} from "./backup.js";
+import {
+  getCredentialArtifactRetentionLimit,
+  isCredentialSnapshotFileName,
+  pruneStorageArtifacts,
+} from "./credential-snapshots.js";
 import { StorageError } from "./errors.js";
 import {
   clampIndex,
@@ -267,6 +275,21 @@ export async function importAccounts(
         try {
           await writePreImportBackupFile(backupPath, existingStorage);
           backupStatus = "created";
+          // Bound the pre-import backup family: each holds a full plaintext
+          // token set, so imports cannot leave an ever-growing trail behind.
+          // Scoped by the same sanitized prefix the writer applied, which
+          // keeps credential snapshots and other backup families untouched.
+          try {
+            await pruneStorageArtifacts(
+              dirname(backupPath),
+              `${sanitizeBackupPrefix(backupPrefix)}-`,
+              getCredentialArtifactRetentionLimit(),
+            );
+          } catch (pruneError) {
+            log.warn("Failed to prune pre-import backups", {
+              error: String(pruneError),
+            });
+          }
         } catch (error) {
           backupStatus = "failed";
           backupError = error instanceof Error ? error.message : String(error);

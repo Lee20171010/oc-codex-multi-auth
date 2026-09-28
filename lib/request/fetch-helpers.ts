@@ -8,7 +8,7 @@ import {
 	coordinatePersistedRefresh,
 	type PersistedRefreshIdentity,
 } from "../storage/coordinated-refresh.js";
-import { logRequest, logError, logWarn } from "../logger.js";
+import { logRequest, logError, logWarn, maskString } from "../logger.js";
 import {
 	ensureInstructionIdentity,
 	getCodexInstructions,
@@ -39,7 +39,7 @@ import {
 	usesResponsesLite,
 } from "./helpers/responses-lite.js";
 import { resolveClientIdentity } from "./helpers/client-identity.js";
-import { convertSseToJson, ensureContentType } from "./response-handler.js";
+import { convertSseToJson, ensureContentType, readBoundedResponseText } from "./response-handler.js";
 import type { OAuthAuthDetails, UserConfig, RequestBody } from "../types.js";
 import {
 	CodexAuthError,
@@ -52,6 +52,7 @@ import {
 import {
 	getQuotaExhaustedResetAtMs,
 	isQuotaWindowDisabled,
+	MAX_QUOTA_RESET_HORIZON_MS,
 	parseCodexQuotaWindows,
 } from "../quota-windows.js";
 import { isRecord } from "../utils.js";
@@ -804,7 +805,15 @@ export function shouldRefreshToken(auth: Auth, skewMs = 0): boolean {
 	if (auth.type !== "oauth") return true;
 	if (!auth.access) return true;
 
-	const safeSkewMs = Math.max(0, Math.floor(skewMs));
+	// Non-finite input is corrupt state, not a policy decision. NaN skew made
+	// `expires <= now + NaN` permanently false (an expired token was used
+	// forever); Infinity skew made it permanently true (a refresh on every
+	// request). A non-finite expiry means the stored credential is unreadable
+	// — refreshing is the repair path.
+	if (!Number.isFinite(auth.expires)) return true;
+	const safeSkewMs = Number.isFinite(skewMs)
+		? Math.max(0, Math.floor(skewMs))
+		: 0;
 	return auth.expires <= Date.now() + safeSkewMs;
 }
 
@@ -1234,13 +1243,14 @@ export async function handleErrorResponse(
  * Passes through SSE for streaming requests (streamText)
  * @param response - Success response from API
  * @param isStreaming - Whether this is a streaming request (stream=true in body)
- * @param options - Optional `streamStallTimeoutMs` override for stall detection
+ * @param options - Optional `streamStallTimeoutMs` (inter-chunk gap) and
+ *   `maxStreamDurationMs` (total post-headers deadline) overrides
  * @returns Processed response (SSE→JSON for non-streaming, stream for streaming)
  */
 export async function handleSuccessResponse(
     response: Response,
     isStreaming: boolean,
-    options?: { streamStallTimeoutMs?: number },
+    options?: { streamStallTimeoutMs?: number; maxStreamDurationMs?: number },
 ): Promise<Response> {
     // Check for deprecation headers (RFC 8594)
     const deprecation = response.headers.get("Deprecation");
@@ -1264,9 +1274,22 @@ export async function handleSuccessResponse(
 	});
 }
 
+/**
+ * Read an error/diagnostic body under a hard byte cap and a total timeout,
+ * then run it through the logger's secret masking.
+ *
+ * The old `clone().text()` was unbounded (a 150MB error body spiked the heap
+ * by ~300MB) and had no deadline (a body that dripped forever hung the whole
+ * error path — the stall machinery only exists on the SSE path). And the raw
+ * text flowed into `error.message` verbatim, so a reverse-proxy HTML page
+ * with internal IPs or an echoed `Bearer`/`sk-*` token leaked to the client.
+ * The bounded reader cancels the stream at the cap so backpressure reaches
+ * the socket, and maskString is the same redaction the request logger uses.
+ */
 async function safeReadBody(response: Response): Promise<string> {
         try {
-                return await response.clone().text();
+                const text = await readBoundedResponseText(response.clone());
+                return maskString(text);
         } catch {
                 return "";
         }
@@ -1424,6 +1447,25 @@ type ErrorPayload = {
         };
 };
 
+/**
+ * Upper bound for text that lands in `error.message`. The raw-body fallback
+ * below used to echo the whole upstream body verbatim — a multi-hundred-KB
+ * HTML error page, truncated mid-string or not, is not a message.
+ */
+const MAX_ERROR_MESSAGE_CHARS = 2_000;
+
+/**
+ * Flatten and bound text destined for `error.message`: upstream bodies are
+ * multi-line and arbitrarily large, and neither property belongs in a field
+ * that callers render and log verbatim. The bounded read upstream caps the
+ * source; this caps what survives normalization.
+ */
+function toErrorMessageText(text: string): string {
+        const normalized = text.replace(/\s+/g, " ").trim();
+        if (normalized.length <= MAX_ERROR_MESSAGE_CHARS) return normalized;
+        return `${normalized.slice(0, MAX_ERROR_MESSAGE_CHARS)}…[truncated]`;
+}
+
 function normalizeErrorPayload(
         errorBody: unknown,
         bodyText: string,
@@ -1475,7 +1517,7 @@ function normalizeErrorPayload(
                 if (isRecord(maybeError) && typeof maybeError.message === "string") {
                         const payload: ErrorPayload = {
                                 error: {
-                                        message: maybeError.message,
+                                        message: toErrorMessageText(maybeError.message),
                                 },
                         };
                         if (typeof maybeError.type === "string") {
@@ -1500,7 +1542,7 @@ function normalizeErrorPayload(
                 }
 
                 if (typeof errorBody.message === "string") {
-                        const payload: ErrorPayload = { error: { message: errorBody.message } };
+                        const payload: ErrorPayload = { error: { message: toErrorMessageText(errorBody.message) } };
                         if (diagnostics && Object.keys(diagnostics).length > 0) {
                                 payload.error.diagnostics = diagnostics;
                         }
@@ -1523,7 +1565,7 @@ function normalizeErrorPayload(
                                         : undefined;
                 if (typeof detailMessage === "string" && detailMessage.trim()) {
                         const payload: ErrorPayload = {
-                                error: { message: detailMessage },
+                                error: { message: toErrorMessageText(detailMessage) },
                         };
                         if (isRecord(detail)) {
                                 if (typeof detail.type === "string") {
@@ -1548,7 +1590,7 @@ function normalizeErrorPayload(
 
         const trimmed = bodyText.trim();
         if (trimmed) {
-                const payload: ErrorPayload = { error: { message: trimmed } };
+                const payload: ErrorPayload = { error: { message: toErrorMessageText(trimmed) } };
                 if (diagnostics && Object.keys(diagnostics).length > 0) {
                         payload.error.diagnostics = diagnostics;
                 }
@@ -1559,7 +1601,7 @@ function normalizeErrorPayload(
         }
 
         if (statusText) {
-                const payload: ErrorPayload = { error: { message: statusText } };
+                const payload: ErrorPayload = { error: { message: toErrorMessageText(statusText) } };
                 if (diagnostics && Object.keys(diagnostics).length > 0) {
                         payload.error.diagnostics = diagnostics;
                 }
@@ -1615,7 +1657,12 @@ function parseRetryAfterMs(
                 // mis-scale a genuine sub-second value into minutes. Cap at 5 min.
                 const ms = parsedBody.retryAfterMs;
                 if (Number.isFinite(ms) && ms > 0) {
-                        return Math.min(Math.floor(ms), MAX_RETRY_DELAY_MS);
+                        // Floor at 1ms: a sub-ms value like retry_after_ms: 0.5
+                        // floored to 0 flowed into markRateLimitedWithReason(0),
+                        // where a zero delay means "window elapsed" and DELETES
+                        // existing rate-limit blocks — a hostile 429 could clear
+                        // every block on the account.
+                        return Math.min(Math.max(1, Math.floor(ms)), MAX_RETRY_DELAY_MS);
                 }
         }
 
@@ -1693,10 +1740,20 @@ function parseRetryAfterMs(
                         if (!value) continue;
                         const parsed = Number.parseInt(value, 10);
                         if (!Number.isNaN(parsed) && parsed > 0) {
+                                // The <10^10 discriminator keeps epoch seconds
+                                // distinct from epoch milliseconds; flipping or
+                                // dropping it mis-scales every value by 1000x.
                                 const timestamp =
                                         parsed < 10_000_000_000 ? parsed * 1000 : parsed;
                                 const delta = timestamp - now;
-                                if (delta > 0) resetCandidates.push(delta);
+                                // Same MAX_QUOTA_RESET_HORIZON_MS guard the
+                                // x-codex-* parser applies in withinResetHorizon:
+                                // without it a hostile `x-ratelimit-reset` wrote
+                                // a monotonic, effectively-forever persisted
+                                // block that no later 429 could shorten.
+                                if (delta > 0 && delta <= MAX_QUOTA_RESET_HORIZON_MS) {
+                                        resetCandidates.push(delta);
+                                }
                         }
                 }
 
@@ -1706,7 +1763,9 @@ function parseRetryAfterMs(
                                         ? parsedBody.resetsAt * 1000
                                         : parsedBody.resetsAt;
                         const delta = timestamp - now;
-                        if (delta > 0) resetCandidates.push(delta);
+                        if (delta > 0 && delta <= MAX_QUOTA_RESET_HORIZON_MS) {
+                                resetCandidates.push(delta);
+                        }
                 }
         }
 

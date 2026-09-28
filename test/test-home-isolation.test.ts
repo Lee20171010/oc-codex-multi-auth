@@ -108,23 +108,52 @@ describe("test home isolation", () => {
 		}
 	});
 
-	// Guarding writes is not sufficient. A missing project store sends the
-	// loader to the GLOBAL one, whose path is re-resolved from `homedir()` at
-	// that moment, so a test that restores the real HOME reads the live pool
-	// through a path the current-storage check already waved through.
-	it("refuses to read the global fallback out of the real home", async () => {
+	// A missing project store no longer sends the loader to the global one —
+	// global-to-project seeding was removed because it duplicated single-use
+	// refresh tokens across scopes. The escape vector this test used to
+	// exercise (a flipped HOME re-resolving the global path mid-load) is
+	// therefore gone: a project-scoped load must resolve `null` and touch
+	// nothing outside the sandbox, even with HOME pointed at the real home.
+	it("never reads global storage for a project-scoped miss, even under a leaked HOME", async () => {
 		const projectRoot = join(sandboxHome(), "fallback-probe-project");
 		mkdirSync(join(projectRoot, ".opencode"), { recursive: true });
 		setStoragePath(projectRoot);
 		expectSandboxed(getStoragePath());
 
-		// A directory that does not exist, never the real store: should this
-		// guard ever regress, the test has to fail rather than read credentials.
+		// A directory that does not exist, never the real store: should the
+		// seeding regression ever return, the read path below would resolve
+		// into the real home and the guard would (correctly) throw.
 		const restoredHome = join(realUserHome(), `.oc-codex-guard-probe-${process.pid}`);
 		const previousHome = process.env.HOME;
 		const previousProfile = process.env.USERPROFILE;
 		process.env.HOME = restoredHome;
 		process.env.USERPROFILE = restoredHome;
+		try {
+			expect(isUnder(realUserHome(), getConfigDir())).toBe(true);
+			await expect(loadAccounts()).resolves.toBeNull();
+			expect(existsSync(restoredHome)).toBe(false);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousProfile;
+			setStoragePath(null);
+			rmSync(projectRoot, { recursive: true, force: true });
+		}
+	});
+
+	// Guarding writes is not sufficient: a leaked HOME must also fail a READ
+	// whose own path escapes the sandbox. `loadAccounts` probes the worktree
+	// lock for the active path before reading, and that probe refuses
+	// real-home paths — so an escaped global-scope path (re-resolved from a
+	// restored HOME at that moment) still trips the guard.
+	it("refuses to read account storage that escapes into the real home", async () => {
+		const previousHome = process.env.HOME;
+		const previousProfile = process.env.USERPROFILE;
+		const escaped = join(realUserHome(), `.oc-codex-guard-probe-${process.pid}`);
+		process.env.HOME = escaped;
+		process.env.USERPROFILE = escaped;
+		setStoragePathDirect(null);
 		try {
 			expect(isUnder(realUserHome(), getConfigDir())).toBe(true);
 			await expect(loadAccounts()).rejects.toMatchObject({
@@ -135,8 +164,7 @@ describe("test home isolation", () => {
 			else process.env.HOME = previousHome;
 			if (previousProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = previousProfile;
-			setStoragePath(null);
-			rmSync(projectRoot, { recursive: true, force: true });
+			setStoragePathDirect(null);
 		}
 	});
 });

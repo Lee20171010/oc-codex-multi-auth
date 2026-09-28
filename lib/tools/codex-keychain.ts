@@ -28,9 +28,10 @@
  */
 
 import { promises as fs } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
-import { withAccountStorageTransaction, withStorageLock } from "../storage.js";
+import { withAccountStorageTransaction } from "../storage.js";
 import { getFlaggedAccountsPath } from "../storage/flagged.js";
 import {
 	deleteFlaggedFromKeychain,
@@ -39,7 +40,20 @@ import {
 	keychainIsAvailable,
 	readFromKeychain,
 } from "../storage/keychain.js";
-import { getCurrentProjectStorageKey, getStoragePath } from "../storage/state.js";
+import {
+	getCurrentProjectStorageKey,
+	getStoragePath,
+	withPinnedStorageScope,
+} from "../storage/state.js";
+import { withStorageTransaction } from "../storage/transaction-lock.js";
+import {
+	fsyncParentDirectory,
+	renameWithWindowsRetry,
+} from "../storage/atomic-write.js";
+import {
+	getCredentialArtifactRetentionLimit,
+	pruneStorageArtifacts,
+} from "../storage/credential-snapshots.js";
 import { normalizeAccountStorage } from "../storage/normalize.js";
 import {
 	formatUiHeader,
@@ -115,6 +129,30 @@ export async function _findMigrationBackupsForTests(
 	storagePath: string,
 ): Promise<string[]> {
 	return findMigrationBackups(storagePath);
+}
+
+/**
+ * Unique timestamped name for an archived artifact beside `path` so repeated
+ * rollbacks cannot collide or overwrite each other within the same
+ * millisecond.
+ */
+function timestampedArtifactName(path: string, suffix: string): string {
+	const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const nonce = randomBytes(3).toString("hex");
+	return `${path}${suffix}${timestamp}-${nonce}`;
+}
+
+/**
+ * Bound one archived-artifact family next to `path` so repeated
+ * migrations/rollbacks cannot grow the directory without limit. Best-effort:
+ * a pruning failure never fails the operation that produced the artifact.
+ */
+async function pruneSiblingArtifacts(path: string, suffix: string): Promise<void> {
+	await pruneStorageArtifacts(
+		dirname(path),
+		`${basename(path)}${suffix}`,
+		getCredentialArtifactRetentionLimit(),
+	);
 }
 
 export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
@@ -207,6 +245,28 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 					),
 				);
 				lines.push(formatUiKeyValue(ui, "On-disk path", storagePath));
+				// A marker file means a JSON copy was retired beside the store —
+				// after opt-out it is the only rollback path, and after opt-in
+				// each one still holds a plaintext token set. Surface the count
+				// so a stranded marker is never invisible to the operator.
+				if (storagePath !== "<unresolved>") {
+					const markers = await findMigrationBackups(storagePath);
+					lines.push(
+						formatUiKeyValue(
+							ui,
+							"Rollback markers",
+							String(markers.length),
+						),
+					);
+					if (markers.length > 0) {
+						lines.push(
+							formatUiItem(
+								ui,
+								`${markers.length} .migrated-to-keychain marker(s) sit next to the accounts file; "codex-keychain rollback" restores the newest.`,
+							),
+						);
+					}
+				}
 				if (!optIn) {
 					lines.push("");
 					lines.push(
@@ -254,6 +314,25 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 			}
 
 			// rollback
+			//
+			// Pin the storage scope for the whole probe + critical section so a
+			// concurrent perProjectAccounts scope flip cannot leave the backup
+			// scan, the filesystem lease, and the flagged-store restore pointing
+			// at sibling files in different scopes. The shadowed `storagePath`
+			// and `projectKey` below are re-resolved under the pin so they can
+			// never disagree with the paths used inside the critical section.
+			return withPinnedStorageScope(async () => {
+			const storagePath = (() => {
+				try {
+					return getStoragePath();
+				} catch {
+					return "<unresolved>";
+				}
+			})();
+			if (storagePath === "<unresolved>") {
+				return "codex-keychain rollback: could not resolve the accounts storage path for the current scope. Aborted.";
+			}
+			const projectKey = getCurrentProjectStorageKey();
 			const backups = await findMigrationBackups(storagePath);
 			const mostRecent = backups[0];
 			if (!mostRecent) {
@@ -276,21 +355,26 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 
 			// Everything below mutates the canonical storage path (JSON file +
 			// keychain entry) and must run as one critical section under the
-			// same mutex loadAccounts/saveAccounts use, so a concurrent
-			// rotation save cannot land between the existence check and the
-			// final rename below (the TOCTOU this file's docstring claimed was
-			// already impossible). withStorageLock is NOT re-entrant, so this
-			// callback uses raw fs operations + the already-unlocked
+			// same mutex loadAccounts/saveAccounts use AND the cross-process
+			// filesystem lease on `storagePath`, so neither an in-process
+			// rotation save nor a sibling process's transaction can land
+			// between the existence check and the final rename below.
+			// withStorageLock (inside withStorageTransaction) is NOT re-entrant,
+			// so this callback uses raw fs operations + the already-unlocked
 			// deleteFromKeychain instead of the locked clearAccounts/
 			// loadAccounts/saveAccounts wrappers -- calling any of those in
 			// here would deadlock against this very lock acquisition.
 			//
 			// Silent-clobber guard (F1 post-merge MEDIUM finding) is folded
-			// into the same critical section: on POSIX, `fs.rename(backup,
+			// into the same critical section: on POSIX, `rename(backup,
 			// storagePath)` silently overwrites an existing destination, so a
 			// current file is archived (with explicit confirm=true) or refused
 			// rather than deleted outright before the backup takes its place.
-			const rollbackResult = await withStorageLock(async () => {
+			const rollbackResult = await withStorageTransaction({
+				storagePath,
+				load: () => Promise.resolve<null>(null),
+				persist: () => Promise.resolve(),
+				handler: async () => {
 				const warnings: string[] = [];
 				let currentExists = false;
 				try {
@@ -323,12 +407,9 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 							].join("\n"),
 						};
 					}
-					const archiveSuffix = new Date()
-						.toISOString()
-						.replace(/[:.]/g, "-");
-					preRollbackArchive = `${storagePath}.pre-rollback.${archiveSuffix}`;
+					preRollbackArchive = timestampedArtifactName(storagePath, ".pre-rollback.");
 					try {
-						await fs.rename(storagePath, preRollbackArchive);
+						await renameWithWindowsRetry(storagePath, preRollbackArchive);
 					} catch (err) {
 						return {
 							ok: false as const,
@@ -359,7 +440,8 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 				}
 
 				try {
-					await fs.rename(mostRecent, storagePath);
+					await renameWithWindowsRetry(mostRecent, storagePath);
+					await fsyncParentDirectory(storagePath);
 				} catch (err) {
 					const renameError = (err as Error).message;
 					if (preRollbackArchive) {
@@ -367,7 +449,7 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 						// back so this failure doesn't leave the canonical path
 						// empty.
 						try {
-							await fs.rename(preRollbackArchive, storagePath);
+							await renameWithWindowsRetry(preRollbackArchive, storagePath);
 							return {
 								ok: false as const,
 								message: `codex-keychain rollback: failed to promote backup ${mostRecent} -> ${storagePath}: ${renameError}. Recovered by restoring the previously archived file from ${preRollbackArchive}.`,
@@ -384,26 +466,26 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 						message: `codex-keychain rollback: failed to rename ${mostRecent} -> ${storagePath}: ${renameError}`,
 					};
 				}
-				// Best-effort keychain delete now that the backup is active;
-				// rollback means "stop trusting the keychain copy", so this
-				// runs whenever opt-in is (still) on, mirroring clearAccounts'
-				// own opt-in-gated delete. A false/failed delete does not fail
+				// Unconditional keychain delete now that the backup is active:
+				// rollback means "stop trusting the keychain copy", and the
+				// typical flow is `unset CODEX_KEYCHAIN` BEFORE rolling back —
+				// gating the delete on opt-in would leave a stale keychain
+				// entry that silently becomes authoritative again the next
+				// time the opt-in is set. A false/failed delete does not fail
 				// the rollback (the JSON file is already authoritative again),
 				// but the operator needs to know a stale keychain copy might
 				// still be preferred on the next load.
-				if (optIn) {
-					try {
-						const deleted = await deleteFromKeychain(projectKey);
-						if (!deleted) {
-							warnings.push(
-								"codex-keychain rollback: could not confirm the OS-keychain entry was deleted. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.",
-							);
-						}
-					} catch (err) {
+				try {
+					const deleted = await deleteFromKeychain(projectKey);
+					if (!deleted && optIn) {
 						warnings.push(
-							`codex-keychain rollback: failed to delete the OS-keychain entry: ${(err as Error).message}. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
+							"codex-keychain rollback: could not confirm the OS-keychain entry was deleted. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.",
 						);
 					}
+				} catch (err) {
+					warnings.push(
+						`codex-keychain rollback: failed to delete the OS-keychain entry: ${(err as Error).message}. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
+					);
 				}
 				// Flagged-store parity: flagged entries migrate to the keychain
 				// under the same `.migrated-to-keychain.<ts>` marker scheme, so a
@@ -447,12 +529,9 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 							} else {
 								let flaggedArchive: string | null = null;
 								if (flaggedCurrentExists) {
-									const suffix = new Date()
-										.toISOString()
-										.replace(/[:.]/g, "-");
-									flaggedArchive = `${flaggedPath}.pre-rollback.${suffix}`;
+									flaggedArchive = timestampedArtifactName(flaggedPath, ".pre-rollback.");
 									try {
-										await fs.rename(flaggedPath, flaggedArchive);
+										await renameWithWindowsRetry(flaggedPath, flaggedArchive);
 									} catch (err) {
 										flaggedArchive = null;
 										warnings.push(
@@ -471,12 +550,13 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 										}
 									}
 									try {
-										await fs.rename(flaggedBackup, flaggedPath);
+										await renameWithWindowsRetry(flaggedBackup, flaggedPath);
+										await fsyncParentDirectory(flaggedPath);
 										flaggedRestored = true;
 									} catch (renameErr) {
 										if (flaggedArchive) {
 											try {
-												await fs.rename(flaggedArchive, flaggedPath);
+												await renameWithWindowsRetry(flaggedArchive, flaggedPath);
 												warnings.push(
 													`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}. Recovered the previously archived flagged file.`,
 												);
@@ -491,11 +571,16 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 											);
 										}
 									}
-									if (flaggedRestored && optIn) {
+									if (flaggedRestored) {
+										// Unconditional for the same reason as the
+										// main entry: a rollback run after CODEX_KEYCHAIN
+										// was unset must still retire the flagged keychain
+										// copy or it silently becomes authoritative on the
+										// next opt-in.
 										try {
 											const deleted =
 												await deleteFlaggedFromKeychain(projectKey);
-											if (!deleted) {
+											if (!deleted && optIn) {
 												warnings.push(
 													"codex-keychain rollback: could not confirm the flagged OS-keychain entry was deleted. The keychain copy may still be preferred on the next load -- delete it manually or disable CODEX_KEYCHAIN.",
 												);
@@ -521,11 +606,19 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 					flaggedRestored,
 					warnings,
 				};
+				},
 			});
 
 			if (!rollbackResult.ok) {
 				return rollbackResult.message;
 			}
+			// Bound the artifact families this tool creates. The marker just
+			// promoted out of `migrated-to-keychain` is already gone; pruning
+			// here keeps older markers plus the `pre-rollback` archives from
+			// accumulating without limit across repeated migrate/rollback
+			// cycles. Best-effort — a prune failure never fails the rollback.
+			await pruneSiblingArtifacts(storagePath, ".migrated-to-keychain.");
+			await pruneSiblingArtifacts(storagePath, ".pre-rollback.");
 			const preRollbackArchive = rollbackResult.preRollbackArchive;
 
 			const lines: string[] = [
@@ -564,6 +657,7 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 				),
 			);
 			return lines.join("\n");
+			});
 		},
 	});
 }

@@ -177,14 +177,26 @@ export class RefreshQueue {
     this.metrics.started += 1;
     const promise = this.executeRefreshWithRotationTracking(refreshToken);
 
-    this.pending.set(refreshToken, { promise, startedAt });
+    // The entry is captured so the finally block can delete by identity: this
+    // entry may be evicted as stale (cleanup()) and replaced by a NEWER refresh
+    // for the same token while the original exchange is still in flight. A
+    // blind keyed delete would then remove the replacement and let a third
+    // caller start a third concurrent exchange of the same single-use token.
+    const entry: RefreshEntry = { promise, startedAt };
+    this.pending.set(refreshToken, entry);
     this.metrics.pending = this.pending.size;
 
     try {
       return await promise;
     } finally {
-      this.pending.delete(refreshToken);
-      this.cleanupRotationMapping(refreshToken);
+      if (this.pending.get(refreshToken) === entry) {
+        this.pending.delete(refreshToken);
+        // The now-outbound refresh token is the one credential we know is dead;
+        // its rotation mapping is already encoded in recentRotations, so
+        // keeping the forward map entry too is only a leak. Ownership is
+        // checked first so a replacement's mapping is never cleared.
+        this.cleanupRotationMapping(refreshToken);
+      }
       this.metrics.pending = this.pending.size;
     }
   }

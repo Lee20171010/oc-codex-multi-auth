@@ -200,30 +200,53 @@ async function restrictDirectoryMode(directory: string): Promise<void> {
 }
 
 /**
- * Delete all but the newest `maxCount` snapshots.
+ * The retention limit used for every credential-adjacent artifact family —
+ * snapshots, `.migrated-to-keychain` markers, `pre-rollback` archives, and
+ * pre-import backups. One knob keeps all the lifecycles bounded by the same
+ * user-controlled budget instead of inventing a second retention surface.
  *
- * `maxCount <= 0` keeps every snapshot; turning the feature off is the
+ * `credentialSnapshots.maxCount <= 0` means "keep everything", and that
+ * choice is honoured for every family.
+ */
+export function getCredentialArtifactRetentionLimit(): number {
+  return getCredentialSnapshotsMaxCount(loadPluginConfig());
+}
+
+/**
+ * Delete all but the newest `maxCount` files in `directory` selected by
+ * `match` — the generic form of the snapshot ring, used for the other
+ * bounded artifact families (keychain-migration markers, pre-rollback
+ * archives, pre-import backups) that share `backups/` or the store
+ * directory. `match` is either a filename-prefix string or a predicate.
+ *
+ * The selector is the whole contract: it must name a single artifact family
+ * owned by a single producer, because anything else matching it is deleted.
+ *
+ * `maxCount <= 0` keeps every artifact; turning the feature off is the
  * boolean setting's job, not a magic zero.
  */
-export async function pruneCredentialSnapshots(
-  backupDirectory: string,
+export async function pruneStorageArtifacts(
+  directory: string,
+  match: string | ((name: string) => boolean),
   maxCount: number,
 ): Promise<void> {
   if (!Number.isFinite(maxCount) || maxCount <= 0) return;
 
   let entries: string[];
   try {
-    entries = await fs.readdir(backupDirectory);
+    entries = await fs.readdir(directory);
   } catch {
     return;
   }
 
-  const candidates = entries.filter(isCredentialSnapshotFileName);
+  const matches =
+    typeof match === "function" ? match : (name: string) => name.startsWith(match);
+  const candidates = entries.filter(matches);
   if (candidates.length <= maxCount) return;
 
   const dated = await Promise.all(
     candidates.map(async (name) => {
-      const full = join(backupDirectory, name);
+      const full = join(directory, name);
       let mtimeMs = Number.NEGATIVE_INFINITY;
       let isFile = false;
       try {
@@ -251,12 +274,25 @@ export async function pruneCredentialSnapshots(
     try {
       await fs.unlink(stale.full);
     } catch (error) {
-      log.warn("Failed to prune credential snapshot", {
+      log.warn("Failed to prune storage artifact", {
         path: stale.full,
         error: String(error),
       });
     }
   }
+}
+
+/**
+ * Delete all but the newest `maxCount` snapshots — the credential-snapshot
+ * specialisation of {@link pruneStorageArtifacts}. `maxCount <= 0` keeps
+ * every snapshot; turning the feature off is the boolean setting's job, not
+ * a magic zero.
+ */
+export async function pruneCredentialSnapshots(
+  backupDirectory: string,
+  maxCount: number,
+): Promise<void> {
+  await pruneStorageArtifacts(backupDirectory, isCredentialSnapshotFileName, maxCount);
 }
 
 /**
