@@ -2254,6 +2254,76 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(output.flagged.totalAccounts).toBe(1);
 	});
 
+	it("doctor: a flagged-runtime load failure falls back to the file probe only when dist is absent", async () => {
+		// The file probe is the dev-checkout path (no `npm run build` yet) —
+		// a throwing runtime loader there must not fail the command.
+		vi.resetModules();
+		vi.stubEnv("CODEX_KEYCHAIN", "1");
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		await seedPool(tempHome, [freshAccount()]);
+		await writeFile(
+			join(tempHome, ".opencode", "oc-codex-multi-auth-flagged-accounts.json"),
+			JSON.stringify({
+				version: 1,
+				accounts: [
+					{
+						refreshToken: "file-flagged-rt",
+						accountId: "file-flagged",
+						addedAt: 1,
+						lastUsed: 1,
+						flaggedAt: 1,
+					},
+				],
+			}),
+			"utf-8",
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const loadFlaggedRuntime = vi.fn(async () => {
+			throw new Error("no built dist alongside the script");
+		});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		const result = await runInstaller(["doctor", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			loadFlaggedRuntime,
+			distFlaggedRuntimePresent: () => false,
+		});
+
+		expect(result.exitCode).toBe(0);
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.flagged.totalAccounts).toBe(1);
+		expect(output.flagged.error).toBeNull();
+	});
+
+	it("doctor: a flagged-runtime load failure surfaces when dist is present", async () => {
+		// With dist built, the import should have succeeded — a throw means a
+		// real runtime failure, and silently reporting zero flagged accounts
+		// would hide quarantined records still held in the keychain.
+		vi.resetModules();
+		vi.stubEnv("CODEX_KEYCHAIN", "1");
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		await seedPool(tempHome, [freshAccount()]);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const loadFlaggedRuntime = vi.fn(async () => {
+			throw new Error("keychain binding exploded on load");
+		});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		const result = await runInstaller(["doctor", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			loadFlaggedRuntime,
+			distFlaggedRuntimePresent: () => true,
+		});
+
+		expect(result.exitCode).toBe(1);
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(output.flagged.error).toContain("keychain binding exploded on load");
+	});
+
 	it("doctor: an explicit --config selection keeps the flagged probe on the file", async () => {
 		vi.resetModules();
 		vi.stubEnv("CODEX_KEYCHAIN", "1");
