@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import {
 	CODEX_QUOTA_WINDOW_KINDS,
@@ -60,6 +60,10 @@ type RecentTuiQuotaWrite = {
 const recentTuiQuotaWrites = new Map<string, RecentTuiQuotaWrite>();
 
 function getDefaultOpenCodeStateDir(): string {
+	// Match OpenCode's xdg-basedir resolution: an absolute XDG_STATE_HOME
+	// wins; relative values are ignored per the XDG spec.
+	const xdg = process.env.XDG_STATE_HOME?.trim();
+	if (xdg && isAbsolute(xdg)) return join(xdg, "opencode");
 	return join(homedir(), ".local", "state", "opencode");
 }
 

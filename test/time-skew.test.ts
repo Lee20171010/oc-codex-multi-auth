@@ -225,72 +225,70 @@ describe("clock audit", () => {
 			expect(shouldRefreshToken(oauthAuth(T0 + 1), 0.9)).toBe(false);
 		});
 
-		it("AUDIT BUG: NaN skew silently disables refresh — Math.max(0, NaN)=NaN and expires <= NaN is false (fetch-helpers.ts:807-808)", () => {
-			// An expired token with a NaN skew never refreshes; the dead token is
-			// sent upstream until a 401 rotates the account out. Not reachable
-			// through the config schema (zod + JSON cannot express NaN), but the
-			// function is a shared primitive — the "safe" clamp is not safe.
-			expect(shouldRefreshToken(oauthAuth(T0 - 60_000), Number.NaN)).toBe(false);
+		it("FIXED: NaN skew degrades to zero skew — an expired token still refreshes", () => {
+			// Non-finite skew now folds to 0 (fetch-helpers), so the expiry
+			// comparison runs normally instead of silently disabling refresh.
+			expect(shouldRefreshToken(oauthAuth(T0 - 60_000), Number.NaN)).toBe(true);
 		});
 
-		it("AUDIT BUG: Infinity skew makes every call refresh (fetch-helpers.ts:807-808)", () => {
-			expect(shouldRefreshToken(oauthAuth(T0 + 10_000_000), Infinity)).toBe(true);
+		it("FIXED: Infinity skew degrades to zero — a live token does not refresh", () => {
+			expect(shouldRefreshToken(oauthAuth(T0 + 10_000_000), Infinity)).toBe(false);
 		});
 
-		it("AUDIT BUG: non-finite `expires` never refreshes — NaN or +Inf both compare false (fetch-helpers.ts:808)", () => {
-			// Reachable: `expires_in: 1e300` overflows `expires` to +Infinity
-			// (auth.ts:220/293). The token is then served until upstream 401s.
-			expect(shouldRefreshToken(oauthAuth(Number.POSITIVE_INFINITY))).toBe(false);
-			expect(shouldRefreshToken(oauthAuth(Number.NaN))).toBe(false);
+		it("FIXED: non-finite `expires` refreshes — NaN or +Inf can no longer pin an immortal token", () => {
+			// `expires_in: 1e300`-style overflow now trips the schema bound or
+			// the non-finite check; either way the token refreshes.
+			expect(shouldRefreshToken(oauthAuth(Number.POSITIVE_INFINITY))).toBe(true);
+			expect(shouldRefreshToken(oauthAuth(Number.NaN))).toBe(true);
 		});
 
-		it("schema accepts expires_in values that poison the expiry clock", () => {
-			// OAuthTokenResponseSchema is bare `z.number()` — no finite/range
-			// guard (schemas.ts:422-429).
-			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: 0 })?.expires_in).toBe(0);
-			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: -60 })?.expires_in).toBe(-60);
-			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: 1e300 })?.expires_in).toBe(1e300);
-			// Absent is the only bad value that is rejected.
-			expect(safeParseOAuthTokenResponse({ access_token: "a" })).toBeNull();
+		it("schema bounds expires_in — poisoned values degrade to the 3600s default", () => {
+			// OAuthTokenResponseSchema now clamps via .min(1).max(1y).catch(3600):
+			// zero, negative, oversized, non-finite AND missing all resolve to
+			// 3600 instead of reaching the expiry clock (schemas.ts).
+			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: 0 })?.expires_in).toBe(3600);
+			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: -60 })?.expires_in).toBe(3600);
+			expect(safeParseOAuthTokenResponse({ access_token: "a", expires_in: 1e300 })?.expires_in).toBe(3600);
+			expect(safeParseOAuthTokenResponse({ access_token: "a" })?.expires_in).toBe(3600);
 		});
 
-		it("PROVEN: expires_in = 0 produces an already-expired token (correctly refreshes)", async () => {
+		it("FIXED: expires_in = 0 degrades to the 1-hour default — token is not born expired", async () => {
 			vi.stubGlobal("fetch", vi.fn(async () =>
 				new Response(JSON.stringify({ access_token: "a1", refresh_token: "r1", expires_in: 0 }), { status: 200 }),
 			));
 			const result = await exchangeAuthorizationCode("code", "verifier");
 			expect(result.type).toBe("success");
 			if (result.type === "success") {
-				expect(result.expires).toBe(T0);
-				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(true);
+				expect(result.expires).toBe(T0 + 3_600_000);
+				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(false);
 			}
 		});
 
-		it("expires_in = -60 yields a token 60s in the past — refreshes on EVERY request (refresh storm)", async () => {
+		it("FIXED: expires_in = -60 degrades to the 1-hour default — no refresh storm", async () => {
 			vi.stubGlobal("fetch", vi.fn(async () =>
 				new Response(JSON.stringify({ access_token: "a1", refresh_token: "r1", expires_in: -60 }), { status: 200 }),
 			));
 			const result = await refreshAccessToken("r0");
 			expect(result.type).toBe("success");
 			if (result.type === "success") {
-				expect(result.expires).toBe(T0 - 60_000);
-				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(true);
+				expect(result.expires).toBe(T0 + 3_600_000);
+				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(false);
 			}
 		});
 
-		it("AUDIT BUG: huge expires_in produces a token that never refreshes — 1e306 overflows to +Infinity (auth.ts:293)", async () => {
+		it("FIXED: expires_in = 1e306 exceeds the schema bound — degrades to the 1-hour default", async () => {
 			vi.stubGlobal("fetch", vi.fn(async () =>
 				new Response(JSON.stringify({ access_token: "a1", refresh_token: "r1", expires_in: 1e306 }), { status: 200 }),
 			));
 			const result = await refreshAccessToken("r0");
 			expect(result.type).toBe("success");
 			if (result.type === "success") {
-				expect(result.expires).toBe(Number.POSITIVE_INFINITY);
-				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(false);
+				expect(Number.isFinite(result.expires)).toBe(true);
+				expect(result.expires).toBe(T0 + 3_600_000);
 			}
 		});
 
-		it("AUDIT BUG: expires_in = 1e290 stays finite but is ~1e285 years out — same never-refresh verdict (auth.ts:293)", async () => {
+		it("FIXED: expires_in = 1e290 exceeds the 1-year max — degrades to the 1-hour default", async () => {
 			vi.stubGlobal("fetch", vi.fn(async () =>
 				new Response(JSON.stringify({ access_token: "a1", refresh_token: "r1", expires_in: 1e290 }), { status: 200 }),
 			));
@@ -298,8 +296,7 @@ describe("clock audit", () => {
 			expect(result.type).toBe("success");
 			if (result.type === "success") {
 				expect(Number.isFinite(result.expires)).toBe(true);
-				expect(result.expires).toBeGreaterThan(1e290);
-				expect(shouldRefreshToken({ type: "oauth", access: result.access, refresh: result.refresh, expires: result.expires })).toBe(false);
+				expect(result.expires).toBe(T0 + 3_600_000);
 			}
 		});
 
@@ -545,25 +542,21 @@ describe("clock audit", () => {
 			expect(rateLimit).toBeUndefined();
 		});
 
-		it("AUDIT QUIRK: 429 + x-ratelimit-reset far-future yields an UNCAPPED multi-year retryAfterMs — produced, but every consumer clamps (fetch-helpers.ts:1690-1701)", async () => {
-			// 9999999999 epoch-seconds == year 2286. The x-codex-* headers are
-			// horizon-guarded at 30d; this generic header is not. The unbounded
-			// value is real and observable, but today every consumer clamps it:
-			// getRateLimitBackoff caps at 60s (index.ts:3644) before
-			// markRateLimitedWithReason ever sees it, and the raw-value consumer
-			// (index.ts:3602) only runs under retryAsServerError, which forces
-			// quotaHeadersAuthoritative=false — the uncapped branch can't produce
-			// a value there. Latent trap for the next consumer, not a live bug.
+		it("FIXED: 429 + x-ratelimit-reset far-future is capped at the 30d horizon (fetch-helpers)", async () => {
+			// 9999999999 epoch-seconds == year 2286. The generic header now
+			// enforces MAX_QUOTA_RESET_HORIZON_MS just like the x-codex-* headers.
 			const { rateLimit } = await handleErrorResponse(
 				rateLimited({ "x-ratelimit-reset": "9999999999" }),
 			);
-			expect(rateLimit?.retryAfterMs).toBe(9_999_999_999_000 - T0);
+			expect(rateLimit?.retryAfterMs).toBeLessThanOrEqual(MAX_QUOTA_RESET_HORIZON_MS);
+			expect(rateLimit?.retryAfterMs).toBeGreaterThan(0);
 		});
 
-		it("AUDIT QUIRK: 429 body resets_at far-future is likewise uncapped — same latent-trap status (fetch-helpers.ts:1703-1710)", async () => {
+		it("FIXED: 429 body resets_at far-future is capped at the 30d horizon", async () => {
 			const body = JSON.stringify({ error: { message: "rate limited", resets_at: 9_999_999_999 } });
 			const { rateLimit } = await handleErrorResponse(rateLimited({}, body));
-			expect(rateLimit?.retryAfterMs).toBe(9_999_999_999_000 - T0);
+			expect(rateLimit?.retryAfterMs).toBeLessThanOrEqual(MAX_QUOTA_RESET_HORIZON_MS);
+			expect(rateLimit?.retryAfterMs).toBeGreaterThan(0);
 		});
 
 		it("PROVEN: exhausted Codex window reset is authoritative and horizon-guarded", async () => {
@@ -601,35 +594,32 @@ describe("clock audit", () => {
 			expect(getRateLimitBackoff(0, "codex", 1000, () => 0.5).attempt).toBe(2);
 		});
 
-		it("AUDIT BUG: backward jump turns a new 429 into a 'duplicate' (rate-limit-backoff.ts:87)", () => {
+		it("FIXED: backward jump prunes the stale entry — a new 429 counts fresh (rate-limit-backoff)", () => {
 			vi.setSystemTime(T0);
 			getRateLimitBackoff(0, "codex", 1000, () => 0.5); // attempt 1 at T0
 			vi.setSystemTime(T0 - 1_000); // clock rolls back 1s
 			const result = getRateLimitBackoff(0, "codex", 1000, () => 0.5);
-			// now - lastAt = -1000 < 2000 -> reported as a duplicate, so the
-			// second distinct 429 never increments the counter.
-			expect(result.isDuplicate).toBe(true);
+			// now - lastAt = -1000 < 0: the entry is pruned as negatively aged
+			// instead of satisfying the `< 2000` dedup window.
+			expect(result.isDuplicate).toBe(false);
 			expect(result.attempt).toBe(1);
 		});
 
-		it("AUDIT BUG: any backward jump freezes the attempt counter — every subsequent 429 reports as a duplicate (rate-limit-backoff.ts:87)", () => {
+		it("FIXED: backward jump no longer freezes the attempt counter — distinct 429s escalate", () => {
 			vi.setSystemTime(T0);
 			getRateLimitBackoff(0, "codex", 1000, () => 0.5); // attempt 1
 			vi.setSystemTime(T0 + 3_000);
 			getRateLimitBackoff(0, "codex", 1000, () => 0.5); // attempt 2, lastAt = T0+3000
 			vi.setSystemTime(T0 - 121_000); // rollback > 120s reset window
-			// now - lastAt = -124s: negative, so the 120s staleness prune can never
-			// fire, AND any negative diff satisfies `< 2000` -> the dedup branch
-			// runs first and the distinct 429 never escalates the counter.
+			// Negative age now prunes the stamp — the next 429 restarts the
+			// counter instead of being swallowed as a duplicate forever.
 			const result = getRateLimitBackoff(0, "codex", 1000, () => 0.5);
-			expect(result.isDuplicate).toBe(true);
-			expect(result.attempt).toBe(2);
-			// Still deduped an hour deeper into the rollback — the freeze lasts
-			// until wall clock returns past the stamp.
+			expect(result.isDuplicate).toBe(false);
+			expect(result.attempt).toBe(1);
 			vi.setSystemTime(T0 - 3_600_000);
 			const deep = getRateLimitBackoff(0, "codex", 1000, () => 0.5);
-			expect(deep.isDuplicate).toBe(true);
-			expect(deep.attempt).toBe(2);
+			expect(deep.isDuplicate).toBe(false);
+			expect(deep.attempt).toBe(1);
 		});
 
 		it("PROVEN: forward jump past 120s resets backoff state", () => {
@@ -641,7 +631,9 @@ describe("clock audit", () => {
 
 		it("PROVEN: non-finite/negative server retry-after is normalized away", () => {
 			expect(getRateLimitBackoff(0, "gpt52", Number.NaN, () => 0.5).delayMs).toBe(1000);
-			expect(getRateLimitBackoff(0, "gpt52", -50, () => 0.5).delayMs).toBe(0);
+			// The 1ms floor on the delay path turns a normalized-away negative
+			// hint into a minimal positive delay rather than a bare 0.
+			expect(getRateLimitBackoff(0, "gpt52", -50, () => 0.5).delayMs).toBe(1);
 			expect(getRateLimitBackoff(0, "gpt52", Infinity, () => 0.5).delayMs).toBe(1000);
 		});
 
@@ -699,27 +691,25 @@ describe("clock audit", () => {
 			expect(manager.isAccountCoolingDown(live)).toBe(false);
 		});
 
-		it("AUDIT BUG: NaN cooldown stamps coolingDownUntil = NaN — isAccountCoolingDown() reports cooling-down forever in-memory (accounts/rotation.ts:498-499, accounts/state.ts:858)", () => {
-			// Not reachable through the request path (callers pass the 30s
-			// constant), but the write path is not finite-guarded: Math.max(0,
-			// Math.floor(NaN)) = NaN. `now >= NaN` is false, so the expired-clear
-			// never fires; the account stays cooling until process restart.
+		it("FIXED: NaN cooldown folds to a zero-length stamp — no permanent in-memory block", () => {
+			// markAccountCoolingDown now guards non-finite durations: the stamp
+			// becomes `now` (already expired) instead of an immortal NaN.
 			const manager = makeManager([{ refreshToken: "tok" }]);
 			const live = manager.getCurrentAccount()!;
 			manager.markAccountCoolingDown(live, Number.NaN, "auth-failure");
-			expect(live.coolingDownUntil).toBeNaN();
-			expect(manager.isAccountCoolingDown(live)).toBe(true);
+			expect(Number.isFinite(live.coolingDownUntil ?? Number.NaN)).toBe(true);
+			expect(manager.isAccountCoolingDown(live)).toBe(false);
 			vi.setSystemTime(T0 + 10 * 86_400_000);
-			expect(manager.isAccountCoolingDown(live)).toBe(true);
+			expect(manager.isAccountCoolingDown(live)).toBe(false);
 		});
 
-		it("AUDIT BUG: Infinity cooldown stamps coolingDownUntil = +Inf — a permanent in-memory cooldown (accounts/rotation.ts:498-499)", () => {
+		it("FIXED: Infinity cooldown folds to a zero-length stamp — no permanent in-memory cooldown", () => {
 			const manager = makeManager([{ refreshToken: "tok" }]);
 			const live = manager.getCurrentAccount()!;
 			manager.markAccountCoolingDown(live, Number.POSITIVE_INFINITY, "auth-failure");
-			expect(live.coolingDownUntil).toBe(Infinity);
+			expect(live.coolingDownUntil).not.toBe(Infinity);
 			vi.setSystemTime(T0 + 365 * 86_400_000);
-			expect(manager.isAccountCoolingDown(live)).toBe(true);
+			expect(manager.isAccountCoolingDown(live)).toBe(false);
 		});
 
 		it("PROVEN: markQuotaExhausted rejects past, >30d, and non-finite resets", () => {
@@ -763,57 +753,47 @@ describe("clock audit", () => {
 			expect(manager.getMinWaitTimeForFamily("codex")).toBe(0);
 		});
 
-		it("AUDIT BUG: markRateLimitedWithReason accepts an uncapped retryAfterMs — a 311-year in-memory block (accounts/rotation.ts:422-446)", () => {
-			// Paired with the uncapped x-ratelimit-reset/resets_at read:
-			// getMinWaitTimeForFamily then reports the same ~1.15e8-day wait and
-			// the toast format confirms it reaches users verbatim.
+		it("FIXED: markRateLimitedWithReason caps retryAfterMs at the 30d horizon — no 311-year in-memory block", () => {
+			// Paired with the capped x-ratelimit-reset/resets_at read:
+			// getMinWaitTimeForFamily now reports at most 30 days.
 			const manager = makeManager([{ refreshToken: "tok" }]);
 			const live = manager.getCurrentAccount()!;
 			const year2286Delta = 9_999_999_999_000 - T0;
 			manager.markRateLimitedWithReason(live, year2286Delta, "codex", "quota");
-			expect(manager.getMinWaitTimeForFamily("codex")).toBe(year2286Delta);
-			const days = Number(formatWaitTime(year2286Delta).split("d")[0]);
-			// ~95,241 days ≈ 261 years — the "try again in" text reaches users.
-			expect(days).toBeGreaterThan(90_000);
+			expect(manager.getMinWaitTimeForFamily("codex")).toBe(MAX_QUOTA_RESET_HORIZON_MS);
 		});
 
-		it("AUDIT BUG: markRateLimitedWithReason(NaN/Infinity) writes a non-finite reset — Infinity blocks forever in-memory and clobbers a valid shorter block (accounts/rotation.ts:429-441,404-418)", () => {
+		it("FIXED: markRateLimitedWithReason(NaN/Infinity) ignores the write — a valid existing block survives", () => {
 			const manager = makeManager([{ refreshToken: "tok" }]);
 			const live = manager.getCurrentAccount()!;
 
-			// Seed a legitimate 5s block, then overwrite it with NaN:
-			// extendRateLimitReset's only guard is `existing >= resetAt` —
-			// `finite >= NaN` is false, so the valid stamp is replaced.
+			// Non-finite retryAfterMs is ignored outright, so the legitimate
+			// 5s block can no longer be clobbered by a ghost stamp.
 			manager.markRateLimitedWithReason(live, 5_000, "codex", "quota");
-			expect(live.rateLimitResetTimes?.codex).toBeGreaterThan(T0);
+			const stamped = live.rateLimitResetTimes?.codex;
+			expect(stamped).toBeGreaterThan(T0);
 			manager.markRateLimitedWithReason(live, Number.NaN, "codex", "quota");
-			expect(live.rateLimitResetTimes?.codex).toBeNaN();
-			// NaN is a ghost: not blocked (`now < NaN` false) but never cleared
-			// (`now >= NaN` false) — survives until a storage write heals it.
+			expect(live.rateLimitResetTimes?.codex).toBe(stamped);
 			vi.setSystemTime(T0 + 86_400_000);
-			expect(live.rateLimitResetTimes?.codex).toBeNaN();
+			expect(live.rateLimitResetTimes?.codex).toBe(stamped);
 
-			// Infinity is worse: `now < Infinity` — a permanent in-memory block
-			// that also overwrites any shorter legitimate stamp.
 			live.rateLimitResetTimes = { codex: T0 + 5_000 };
 			vi.setSystemTime(T0);
 			manager.markRateLimitedWithReason(live, Number.POSITIVE_INFINITY, "codex", "quota");
-			expect(live.rateLimitResetTimes?.codex).toBe(Number.POSITIVE_INFINITY);
-			expect(manager.getMinWaitTimeForFamily("codex")).toBe(Number.POSITIVE_INFINITY);
+			expect(live.rateLimitResetTimes?.codex).toBe(T0 + 5_000);
+			expect(Number.isFinite(manager.getMinWaitTimeForFamily("codex"))).toBe(true);
 		});
 
-		it("AUDIT BUG: token-bucket refill lacks the negative-elapsed clamp — clock rollback yields negative tokens (rotation.ts:219-224)", () => {
-			// Contrast the sibling HealthScoreTracker which clamps elapsed at 0
-			// (rotation.ts:104, comment cites a measured -17440 regression).
+		it("FIXED: token-bucket refill clamps negative elapsed — clock rollback cannot drain tokens (rotation.ts)", () => {
+			// refillTokens now does Math.max(0, now - lastRefill), matching the
+			// sibling HealthScoreTracker's clamp.
 			vi.setSystemTime(T0);
 			const bucket = new TokenBucketTracker();
 			bucket.tryConsume(0, "codex"); // lastRefill = T0, tokens 49/50
 			vi.setSystemTime(T0 - 10 * 60_000);
-			// minutesSinceRefill = -10 -> tokensToAdd = -60 -> 49 - 60 = -11.
-			expect(bucket.getTokens(0, "codex")).toBe(-11);
-			expect(bucket.hasToken(0, "codex")).toBe(false);
-			expect(bucket.msUntilToken(0, "codex")).toBe(120_000);
-			expect(bucket.tryConsume(0, "codex")).toBe(false);
+			expect(bucket.getTokens(0, "codex")).toBe(49);
+			expect(bucket.hasToken(0, "codex")).toBe(true);
+			expect(bucket.tryConsume(0, "codex")).toBe(true);
 		});
 
 		it("PROVEN: health-score passive recovery clamps negative elapsed at zero", () => {
@@ -1122,12 +1102,15 @@ describe("clock audit", () => {
 			await pending;
 		});
 
-		it("AUDIT FINDING: a contender on a rolled-back clock can never see the lease as stale — retries exhaust to contention error (transaction-lock.ts:152-163)", async () => {
+		it("FIXED: a contender on a rolled-back clock refuses the steal — the future mtime is untrusted, retries exhaust to contention (transaction-lock)", async () => {
 			const storagePath = join(dir, "accounts.json");
 			const lockDir = getRefreshLeasePath(storagePath);
 			// Holder acquired 61s ago relative to T0 — stale to anyone at T0.
 			await stampLockDir(lockDir, T0 - 61_000);
-			// But this contender's clock sits 2 minutes in the past.
+			// But this contender's clock sits 2 minutes in the past, so the lock
+			// dir's mtime reads as ~59s in the FUTURE. The hardened stale-break
+			// refuses to delete a future-mtime dir — that steals from a live
+			// holder running on a different clock.
 			vi.setSystemTime(T0 - 120_000);
 
 			let settled = false;
@@ -1136,9 +1119,10 @@ describe("clock audit", () => {
 				.then((v) => { outcome = v; settled = true; })
 				.catch((e) => { outcome = e; settled = true; });
 
-			await pumpUntilSettled(() => settled);
+			// The 24-retry exponential schedule (~2min worst case) needs a
+			// larger pump window than the default 400×250ms.
+			await pumpUntilSettled(() => settled, 900);
 			expect(settled).toBe(true);
-			// mtime(T0-61000) <= (T0-120000)-60000 = T0-180000? Never -> ELOCKED.
 			expect(outcome).toBeInstanceOf(StorageTransactionContentionError);
 			await pending;
 		});
@@ -1268,7 +1252,7 @@ describe("clock audit", () => {
 				await vi.waitFor(() => expect(notifyCalls).toBe(2));
 			});
 
-			it("AUDIT BUG: clock rollback suppresses notifyEveryCheck until wall time catches up (quota-notifications.ts:430-432)", async () => {
+			it("FIXED: clock rollback no longer suppresses notifyEveryCheck — a stamp ahead of now counts as due (quota-notifications)", async () => {
 				const monitor = buildMonitor();
 				monitor.start();
 				await vi.advanceTimersByTimeAsync(150);
@@ -1279,12 +1263,10 @@ describe("clock audit", () => {
 				const monitor2 = buildMonitor();
 				monitor2.start();
 				await vi.advanceTimersByTimeAsync(150);
-				// Deterministic "check ran" witness: the poller always writes
-				// updatedAt = its injected now, even when nothing is delivered.
-				await vi.waitFor(async () =>
-					expect((await readQuotaNotificationState(statePath))?.updatedAt).toBe(T0 - 1_800_000));
-				// now - lastDeliveredAt = -30min < intervalMs -> not due -> skipped.
-				expect(notifyCalls).toBe(1);
+				// lastDeliveredAt (T0) is now in the future relative to
+				// monitorNow — and a future stamp counts as due, so the poll
+				// delivers immediately rather than suppressing for 30min.
+				await vi.waitFor(() => expect(notifyCalls).toBe(2));
 			});
 
 			it("PROVEN: forward jump past intervalMs delivers immediately on the next poll", async () => {
@@ -1300,7 +1282,7 @@ describe("clock audit", () => {
 				await vi.waitFor(() => expect(notifyCalls).toBe(2));
 			});
 
-			it("AUDIT BUG: persisted future lastDeliveredAt suppresses everyCheck delivery until the stamp arrives (quota-notifications.ts:427-434)", async () => {
+			it("FIXED: persisted future lastDeliveredAt counts as due — delivery fires and the stamp self-heals (quota-notifications)", async () => {
 				// Simulate a state file written under a clock 2h fast.
 				await fs.writeFile(statePath, JSON.stringify({
 					fiveHour: { lastPercent: 50 },
@@ -1311,10 +1293,9 @@ describe("clock audit", () => {
 				const monitor = buildMonitor();
 				monitor.start();
 				await vi.advanceTimersByTimeAsync(150);
-				await vi.waitFor(async () =>
-					expect((await readQuotaNotificationState(statePath))?.updatedAt).toBe(T0));
-				// now - lastDeliveredAt is negative -> not due -> suppressed.
-				expect(notifyCalls).toBe(0);
+				// A future stamp now counts as due instead of suppressing until
+				// wall time catches up; delivery re-dates the stamp to now.
+				await vi.waitFor(() => expect(notifyCalls).toBe(1));
 			});
 		});
 
@@ -1571,12 +1552,12 @@ describe("clock audit", () => {
 			expect(getQuotaNotifications({ quotaNotifications: { intervalMs: 10 ** 10 } } as never).intervalMs).toBe(86_400_000);
 		});
 
-		it("AUDIT QUIRK: NaN through an unvalidated config object propagates through clamping (config.ts:699-706)", () => {
-			// File input cannot express NaN and the schema rejects it, so this is
-			// only reachable by a caller that hands getQuotaNotifications an
-			// unvalidated PluginConfig. Math.max(min, NaN) = NaN -> interval NaN.
+		it("FIXED: NaN through an unvalidated config object falls back to the finite default (config.ts)", () => {
+			// resolveNumberSetting now finite-checks before clamping, so NaN
+			// yields the default interval instead of propagating.
 			const config = getQuotaNotifications({ quotaNotifications: { intervalMs: Number.NaN } } as never);
-			expect(config.intervalMs).toBeNaN();
+			expect(Number.isFinite(config.intervalMs)).toBe(true);
+			expect(config.intervalMs).toBe(1_800_000);
 		});
 	});
 });

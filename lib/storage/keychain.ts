@@ -71,6 +71,28 @@ export const GLOBAL_KEYCHAIN_ACCOUNT_KEY = "accounts:global";
 export const KEYCHAIN_PROBE_ACCOUNT_KEY = `__probe__@${KEYCHAIN_SERVICE_NAME}`;
 
 /**
+ * Windows Credential Manager rejects credential blobs larger than
+ * CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes). A multi-account pool is
+ * typically 2.5–4 KB of JSON, so on win32 most real writes would fail
+ * natively — and the availability probe cannot detect this because the
+ * "probe" payload is tiny. Preflight the byte length instead so an
+ * oversized write degrades to the JSON path (which stays authoritative)
+ * instead of erroring mid-write after work has already happened.
+ */
+export const WIN32_KEYCHAIN_MAX_BLOB_BYTES = 2560;
+
+/**
+ * Returns a refusal error string when the blob cannot fit in the target
+ * OS keychain, or null when the write may proceed.
+ */
+function keychainBlobRefusal(jsonBlob: string): string | null {
+	if (process.platform !== "win32") return null;
+	const bytes = Buffer.byteLength(jsonBlob, "utf8");
+	if (bytes <= WIN32_KEYCHAIN_MAX_BLOB_BYTES) return null;
+	return `blob is ${bytes} bytes, exceeding the Windows Credential Manager limit of ${WIN32_KEYCHAIN_MAX_BLOB_BYTES} — staying on the JSON storage path`;
+}
+
+/**
  * Minimal abstraction over the native `@napi-rs/keyring` `Entry` API.
  * Declared as an interface so tests can inject a deterministic in-memory
  * backend without touching the real OS keychain.
@@ -249,6 +271,11 @@ export async function writeToKeychain(
 	projectStorageKey: string | null,
 	jsonBlob: string,
 ): Promise<KeychainWriteResult> {
+	const refusal = keychainBlobRefusal(jsonBlob);
+	if (refusal) {
+		log.warn("keychain: write refused", { reason: refusal });
+		return { ok: false, error: refusal };
+	}
 	const backend = await getBackend();
 	if (!backend) {
 		return { ok: false, error: "backend unavailable" };
@@ -299,6 +326,11 @@ export async function writeFlaggedToKeychain(
 	projectStorageKey: string | null,
 	jsonBlob: string,
 ): Promise<KeychainWriteResult> {
+	const refusal = keychainBlobRefusal(jsonBlob);
+	if (refusal) {
+		log.warn("keychain: flagged write refused", { reason: refusal });
+		return { ok: false, error: refusal };
+	}
 	const backend = await getBackend();
 	if (!backend) {
 		return { ok: false, error: "backend unavailable" };

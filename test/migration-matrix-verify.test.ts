@@ -154,14 +154,21 @@ describe("VERIFY: 6b marker collision", () => {
 			vi.useRealTimers();
 		}
 		const markers = (await fs.readdir(d)).filter((n) => n.includes(".migrated-to-keychain."));
-		// [KNOWN-ISSUE] same-ms migrations collide on one marker name; fs.rename
-		// overwrites, so only the last write survives — earlier rollback
-		// artefacts are silently destroyed.
-		expect(markers.length).toBe(1);
-		const survivor = JSON.parse(
-			await fs.readFile(join(d, markers[0]!), "utf-8"),
-		) as { accounts: Array<{ refreshToken: string }> };
-		expect(survivor.accounts[0]?.refreshToken).toBe("rt-collision-2");
+		// [FIXED] markers now carry a timestamp+nonce so same-ms migrations
+		// cannot collide — every rollback artefact survives.
+		expect(markers.length).toBe(3);
+		const seenTokens = new Set(
+			await Promise.all(
+				markers.map(async (m) =>
+					(JSON.parse(await fs.readFile(join(d, m), "utf-8")) as {
+						accounts: Array<{ refreshToken: string }>;
+					}).accounts[0]?.refreshToken,
+				),
+			),
+		);
+		expect(seenTokens).toEqual(
+			new Set(["rt-collision-0", "rt-collision-1", "rt-collision-2"]),
+		);
 	});
 });
 
@@ -175,11 +182,13 @@ describe("VERIFY: 7c corrupt legacy global in isolation", () => {
 		try { await fs.rm(newFile, { force: true }); } catch { /* ignore */ }
 		await fs.writeFile(legacyGlobal, "{not json");
 		setStoragePathDirect(null);
-		const loaded = await loadAccounts();
-		// [KNOWN-ISSUE] with no modern file present, a corrupt legacy global
-		// yields a silent empty pool — no INVALID_STORAGE, no recovery hint;
-		// the corrupt file is kept and no new file is written.
-		expect(loaded).toBeNull();
+		// [FIXED] a corrupt legacy global now throws INVALID_STORAGE with a
+		// recovery hint instead of silently yielding an empty pool; the
+		// corrupt file is kept and no new file is written.
+		let threw: unknown = null;
+		try { await loadAccounts(); } catch (e) { threw = e; }
+		expect((threw as StorageError | null)?.code).toBe("INVALID_STORAGE");
+		expect((threw as StorageError | null)?.hint).toBeTruthy();
 		expect(existsSync(legacyGlobal)).toBe(true);
 		expect(existsSync(newFile)).toBe(false);
 		try { await fs.rm(legacyGlobal, { force: true }); } catch { /* ignore */ }
@@ -193,14 +202,13 @@ describe("VERIFY: 7c corrupt legacy global in isolation", () => {
 		try { await fs.rm(newFile, { force: true }); } catch { /* ignore */ }
 		await fs.writeFile(legacyGlobal, JSON.stringify({ version: 2, accounts: [{ refreshToken: "rt-v2" }] }));
 		setStoragePathDirect(null);
+		// [FIXED] the V2 rejection now propagates as UNKNOWN_V2_FORMAT with a
+		// recovery hint instead of being swallowed inside
+		// migrateStorageFileIfNeeded; the V2 file is left in place.
 		let threw: unknown = null;
-		let loaded: Awaited<ReturnType<typeof loadAccounts>> = null;
-		try { loaded = await loadAccounts(); } catch (e) { threw = e; }
-		// [KNOWN-ISSUE] the V2 rejection is swallowed inside
-		// migrateStorageFileIfNeeded — only UNSUPPORTED_SCHEMA_VERSION is
-		// rethrown; V2 legacy data is silently unrecovered.
-		expect(threw).toBeNull();
-		expect(loaded).toBeNull();
+		try { await loadAccounts(); } catch (e) { threw = e; }
+		expect((threw as StorageError | null)?.code).toBe("UNKNOWN_V2_FORMAT");
+		expect(existsSync(legacyGlobal)).toBe(true);
 		try { await fs.rm(legacyGlobal, { force: true }); } catch { /* ignore */ }
 	});
 });
@@ -211,19 +219,17 @@ describe("NEW CELL: flagged transaction over corrupt file", () => {
 		setStoragePathDirect(join(d, "accounts.json"));
 		const flaggedPath = getFlaggedAccountsPath();
 		await fs.writeFile(flaggedPath, "{corrupt flagged");
-		let seen = -1;
-		await withFlaggedAccountStorageTransaction(async (current, persist) => {
-			seen = current.accounts.length;
-			await persist({ version: 1, accounts: [{ refreshToken: "rt-new", addedAt: 1, lastUsed: 1, flaggedAt: 1 }] });
-		});
-		const snaps = existsSync(join(d, "backups"))
-			? (await fs.readdir(join(d, "backups"))).filter((n) => n.startsWith("codex-credential-snapshot-"))
-			: [];
-		// [KNOWN-ISSUE] the transaction sees an empty pool and persists over the
-		// corrupt file; the corrupt file's live tokens survive only inside
-		// backups/ via the pre-write credential snapshot.
-		expect(seen).toBe(0);
-		expect(snaps.length).toBeGreaterThan(0);
+		// [FIXED] the flagged read is now loud: the transaction surfaces
+		// INVALID_STORAGE instead of persisting an empty pool over the
+		// corrupt file; the corrupt bytes are left untouched on disk.
+		let threw: unknown = null;
+		try {
+			await withFlaggedAccountStorageTransaction(async (_current, persist) => {
+				await persist({ version: 1, accounts: [{ refreshToken: "rt-new", addedAt: 1, lastUsed: 1, flaggedAt: 1 }] });
+			});
+		} catch (e) { threw = e; }
+		expect((threw as StorageError | null)?.code).toBe("INVALID_STORAGE");
+		expect(await fs.readFile(flaggedPath, "utf-8")).toBe("{corrupt flagged");
 	});
 });
 

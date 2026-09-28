@@ -244,10 +244,10 @@ describe("CELL1: storage versions", () => {
 		const legacyStillThere = existsSync(legacyGlobal);
 		const newFile = join(globalDir, "oc-codex-multi-auth-accounts.json");
 		const newWritten = existsSync(newFile);
-		// [KNOWN-ISSUE] migrateStorageFileIfNeeded swallows the UNKNOWN_V2_FORMAT
-		// rejection (only UNSUPPORTED_SCHEMA_VERSION is rethrown): the pool reads
-		// empty with only a warn log, and the V2 file is left in place.
-		expect(threw).toBeNull();
+		// [FIXED] migrateStorageFileIfNeeded now propagates the
+		// UNKNOWN_V2_FORMAT rejection — the load fails loudly with a
+		// recovery hint, and the V2 file is left in place.
+		expect((threw as StorageError | null)?.code).toBe(UNKNOWN_V2_FORMAT_CODE);
 		expect(loaded).toBeNull();
 		expect(legacyStillThere).toBe(true);
 		expect(newWritten).toBe(false);
@@ -376,7 +376,7 @@ describe("CELL2: perProjectAccounts scope flips", () => {
 		// copy/remove-yourself contract (docs/configuration.md)
 	});
 
-	it("2b. missing project file is SEEDED from the global pool — credential copy sharing single-use tokens", async () => {
+	it("2b. missing project file is NOT seeded from the global pool — no cross-scope token copies", async () => {
 		const globalDir = join(homedir(), ".opencode");
 		await fs.mkdir(globalDir, { recursive: true });
 		const globalFile = join(globalDir, "oc-codex-multi-auth-accounts.json");
@@ -390,22 +390,18 @@ describe("CELL2: perProjectAccounts scope flips", () => {
 		setStoragePath(proj);
 		const projectPath = getStoragePath();
 		expect(existsSync(projectPath)).toBe(false);
+		// [FIXED] the project file is no longer seeded from the global pool:
+		// a single-use refresh token can never be duplicated across scopes,
+		// so the rotation/propagation hazard this test pinned is gone.
 		const loaded = await loadAccounts();
-		expect(loaded?.accounts.length).toBe(1);
-		// the seed write duplicated the global credentials into the project scope
-		const seeded = await readJson(projectPath);
-		const seededToken = (seeded.accounts as Array<Record<string, unknown>>)[0]?.refreshToken;
+		expect(loaded).toBeNull();
+		expect(existsSync(projectPath)).toBe(false);
 		const globalToken = ((await readJson(globalFile)).accounts as Array<Record<string, unknown>>)[0]?.refreshToken;
-		// [KNOWN-ISSUE] the project file is silently seeded from the global pool:
-		// both files now hold the same single-use refresh token, and a rotation
-		// in one scope cannot propagate to the other (stale pool then hits
-		// refresh_token_reused). Docs only say "does not migrate or delete".
-		expect(seededToken).toBe("rt-SHARED");
-		expect(seededToken).toBe(globalToken);
+		expect(globalToken).toBe("rt-SHARED");
 		try { await fs.rm(globalFile, { force: true }); } catch { /* ignore */ }
 	});
 
-	it("2c. storage transaction spanning a scope flip persists to the NEW path under the OLD lease", async () => {
+	it("2c. storage transaction spanning a scope flip persists to the PINNED path under its own lease", async () => {
 		const projA = await mkProject("projFlipA");
 		const projB = await mkProject("projFlipB");
 		setStoragePath(projA);
@@ -430,13 +426,11 @@ describe("CELL2: perProjectAccounts scope flips", () => {
 		const diskB = await readJson(pathB);
 		const aTok = (diskA.accounts as Array<Record<string, unknown>>)[0]?.refreshToken;
 		const bTok = (diskB.accounts as Array<Record<string, unknown>>)[0]?.refreshToken;
-		// [KNOWN-ISSUE] load(A)+flip+persist lands on B: the lease was taken on
-		// A's lock, but B's file is overwritten without B's lease — a
-		// cross-process torn-write window. In-process callers are drained by
-		// index.ts; storage-layer callers (tools, flagged txn, coordinated
-		// refresh) are not tracked by activeFetches.
-		expect(aTok).toBe("rt-A");
-		expect(bTok).toBe("rt-WRITTEN-ACROSS-FLIP");
+		// [FIXED] the storage scope is pinned per operation
+		// (withPinnedStorageScope): load(A)+flip+persist lands on A under
+		// A's own lease — B's file is never touched by A's transaction.
+		expect(aTok).toBe("rt-WRITTEN-ACROSS-FLIP");
+		expect(bTok).toBe("rt-BPOOL");
 		setStoragePathDirect(null);
 	});
 });
@@ -565,16 +559,14 @@ describe("CELL3: CODEX_KEYCHAIN flips", () => {
 		await tool.execute({ command: "rollback", confirm: true });
 		// post-rollback writes land on JSON
 		await saveAccounts({ version: 3, activeIndex: 0, accounts: [{ refreshToken: "rt-POST-ROLLBACK", addedAt: 9, lastUsed: 9 }] });
-		// keychain still holds the OLD migrated blob
+		// rollback deletes the keychain blob unconditionally now — even when
+		// CODEX_KEYCHAIN is already unset — so no stale credential survives.
 		const staleBlob = backend.store.get(`${KEYCHAIN_SERVICE_NAME}::${buildKeychainAccountKey(null)}`);
-		// re-opt-in: keychain wins over the post-rollback disk state
+		// re-opt-in: with the blob gone, the post-rollback JSON stays live.
 		setOptIn(true);
 		const loaded = await loadAccounts();
-		// [KNOWN-ISSUE] rollback while already opted out skips the keychain
-		// delete (the tool only deletes under optIn); the stale blob stays and a
-		// re-opt-in silently resurrects pre-rollback state.
-		expect(staleBlob).toBeTruthy();
-		expect(loaded?.accounts[0]?.refreshToken).toBe("rt-A");
+		expect(staleBlob).toBeFalsy();
+		expect(loaded?.accounts[0]?.refreshToken).toBe("rt-POST-ROLLBACK");
 	});
 
 	it("3f. keychain unavailable at flip -> JSON fallback both directions", async () => {
@@ -640,7 +632,7 @@ describe("CELL4: corruption corpus", () => {
 		{ name: "BOM-prefixed valid", content: "﻿" + JSON.stringify({ version: 3, activeIndex: 0, accounts: [{ refreshToken: "rt", addedAt: 1, lastUsed: 1 }] }) },
 		{ name: "UTF-16LE", content: Buffer.from(JSON.stringify({ version: 3, activeIndex: 0, accounts: [] }), "utf16le") },
 		{ name: "latin-1 garbage", content: Buffer.from([0xff, 0xfe, 0xfd, 0xfc, 0x80, 0x00]) },
-		{ name: "null-byte mid-file", content: '{"version":3,"activeIndex":0,"accounts":[] }' },
+		{ name: "null-byte mid-file", content: '{"version":3,"activeIndex":0,"accounts":[]\u0000}' },
 		{ name: "whitespace-only", content: "   \n\t  " },
 		{ name: "json-literal-true", content: "true" },
 		{ name: "json-literal-null", content: "null" },
@@ -673,10 +665,14 @@ describe("CELL4: corruption corpus", () => {
 			setStoragePathDirect(f);
 			const flaggedPath = getFlaggedAccountsPath();
 			await fs.writeFile(flaggedPath, c.content);
-			// [KNOWN-ISSUE] the flagged loader swallows every form of corruption
-			// into an EMPTY pool — the main store would throw INVALID_STORAGE.
-			const r = await loadFlaggedAccounts();
-			expect(r.accounts.length).toBe(0);
+			// [FIXED] the flagged loader is now loud like the main store:
+			// every malformed payload throws a typed StorageError
+			// (INVALID_STORAGE, or UNSUPPORTED_SCHEMA_VERSION for a recognized
+			// numeric version other than 1) and the file is left intact.
+			let code = "";
+			try { await loadFlaggedAccounts(); } catch (e) { code = (e as StorageError).code; }
+			expect(["INVALID_STORAGE", "UNSUPPORTED_SCHEMA_VERSION"]).toContain(code);
+			expect(existsSync(flaggedPath)).toBe(true);
 		});
 	}
 
@@ -704,31 +700,34 @@ describe("CELL4: corruption corpus", () => {
 		expect(a?.rateLimitResetTimes?.fine).toBeGreaterThan(0);
 	});
 
-	it("4-flagged: version≠1 file is silently emptied (no V2-style guard)", async () => {
+	it("4-flagged: version≠1 file throws UNSUPPORTED_SCHEMA_VERSION", async () => {
 		const d = await dirOf("f-v2");
 		const f = join(d, "accounts.json");
 		setStoragePathDirect(f);
 		const flaggedPath = getFlaggedAccountsPath();
 		await fs.writeFile(flaggedPath, JSON.stringify({ version: 2, accounts: [{ refreshToken: "rt-flagged", flaggedAt: 1 }] }));
-		const loaded = await loadFlaggedAccounts();
-		// [KNOWN-ISSUE] the flagged store has no version guard: a version:2 file
-		// returns an empty pool where the main store would throw
-		// UNKNOWN_V2_FORMAT.
-		expect(loaded.accounts.length).toBe(0);
+		// [FIXED] the flagged store now has a version guard: a version:2 file
+		// throws UNSUPPORTED_SCHEMA_VERSION instead of reading as an empty
+		// pool, and the file is left intact.
+		let code = "";
+		try { await loadFlaggedAccounts(); } catch (e) { code = (e as StorageError).code; }
+		expect(code).toBe("UNSUPPORTED_SCHEMA_VERSION");
+		expect(existsSync(flaggedPath)).toBe(true);
 	});
 
-	it("4-flagged legacy file that normalizes to empty is DELETED anyway", async () => {
+	it("4-flagged legacy file that normalizes to empty throws and is KEPT", async () => {
 		const d = await dirOf("f-legacy");
 		const f = join(d, "accounts.json");
 		setStoragePathDirect(f);
 		const legacyPath = join(d, "openai-codex-flagged-accounts.json");
 		// JSON parses, but shape doesn't yield accounts (e.g. v2 flagged or wrong shape)
 		await fs.writeFile(legacyPath, JSON.stringify({ version: 2, accounts: [{ refreshToken: "rt-old-flag" }] }));
-		const loaded = await loadFlaggedAccounts();
-		// [KNOWN-ISSUE] flagged.ts unlinks the legacy file even when
-		// normalization produced zero accounts — silent credential loss.
-		expect(loaded.accounts.length).toBe(0);
-		expect(existsSync(legacyPath)).toBe(false);
+		// [FIXED] flagged migration is loud and never unlinks a legacy file
+		// it could not convert — no silent credential loss.
+		let code = "";
+		try { await loadFlaggedAccounts(); } catch (e) { code = (e as StorageError).code; }
+		expect(["INVALID_STORAGE", "UNSUPPORTED_SCHEMA_VERSION", "UNKNOWN_V2_FORMAT"]).toContain(code);
+		expect(existsSync(legacyPath)).toBe(true);
 	});
 
 	it("4-main: credential snapshot preserves a corrupt file before overwrite", async () => {

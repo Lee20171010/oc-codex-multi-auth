@@ -131,7 +131,7 @@ describe("B) stale eviction (>maxEntryAgeMs) re-issues the SAME single-use token
 });
 
 describe("C) pending.delete(token) deletes by key — evicts a NEWER live entry", () => {
-	it("isRefreshing() lies while the replacement exchange is in flight", async () => {
+	it("isRefreshing() stays true while the replacement exchange is in flight", async () => {
 		let exchangeN = 0;
 		const resolvers: Array<() => void> = [];
 		vi.mocked(authModule.refreshAccessToken).mockImplementation(async (token: string) => {
@@ -150,16 +150,18 @@ describe("C) pending.delete(token) deletes by key — evicts a NEWER live entry"
 		expect(queue.isRefreshing("tok")).toBe(true); // #2 tracked
 
 		resolvers[0]!();
-		await p1;                           // #1's finally: pending.delete("tok") — by KEY
+		await p1;                           // #1's finally evicts its OWN entry only
 		await sleep(1);
-		// BUG: exchange #2 is still in flight but the map no longer tracks it.
-		expect(queue.isRefreshing("tok")).toBe(false);
-		expect(queue.pendingCount).toBe(0);
+		// [FIXED] identity-keyed eviction: exchange #2 is still in flight and
+		// the map still tracks it — #1's settle can no longer clobber it.
+		expect(queue.isRefreshing("tok")).toBe(true);
+		expect(queue.pendingCount).toBe(1);
 
-		// A caller arriving after the settled-rotation TTL also escapes dedup:
-		// recentRotations aged out (same maxEntryAgeMs window), pending entry
-		// was wrongly deleted -> exchange #3 while #2 is STILL in flight.
-		await sleep(45);                    // past #1's settledAt+40ms TTL
+		// A caller arriving after the entry's 40ms TTL still replaces the
+		// stale in-flight exchange — that eviction is the sanctioned path for
+		// a presumed-hung refresh; what's fixed is that #1's settle no longer
+		// clobbers the replacement's map entry while it's still young.
+		await sleep(45);
 		const p3 = queue.refresh("tok");
 		await sleep(1);
 		expect(exchangeN).toBe(3);

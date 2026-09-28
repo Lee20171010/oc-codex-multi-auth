@@ -68,7 +68,7 @@ Everything below lives on your machine. Mode bits (`0o600`/`0o700`) are applied
 | Per-project pool (default on) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | `0o600` / `0o700` |
 | Flagged (quarantined) accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active accounts file | `0o600` / `0o700` |
 | Credential snapshots (pre-write backups) | `backups/codex-credential-snapshot-*.json` beside the active accounts file | `0o600` / `0o700` |
-| Rotation journal | `*.pending-rotation.json` beside the active accounts file — a refresh committed upstream but not yet saved to the pool | `0o600` / `0o700` |
+| Rotation journal | `<accounts-file>.refresh.pending` beside the active accounts file — a refresh committed upstream but not yet saved to the pool | `0o600` / `0o700` |
 | Storage locks | `<storage>.transaction.lock`, `<storage>.refresh.lock` beside the active accounts file | — |
 | Plugin config | `~/.opencode/openai-codex-auth-config.json` | — |
 | Quota notification state | `oc-codex-multi-auth-quota-notifications.json` beside the active accounts file | `0o600` / `0o700` |

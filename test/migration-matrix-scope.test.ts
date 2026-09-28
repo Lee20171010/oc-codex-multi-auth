@@ -77,7 +77,7 @@ afterEach(async () => {
 });
 
 describe("CROSS-SCOPE: seeded pair + rotation propagation", () => {
-	it("rotation in project pool does NOT propagate to the global file it was seeded from", async () => {
+	it("a missing project pool is NOT seeded from the global file", async () => {
 		const globalDir = join(homedir(), ".opencode");
 		await fs.mkdir(globalDir, { recursive: true });
 		const globalFile = join(globalDir, "oc-codex-multi-auth-accounts.json");
@@ -90,27 +90,31 @@ describe("CROSS-SCOPE: seeded pair + rotation propagation", () => {
 		const proj = await mkProject("projSeed");
 		setStoragePath(proj);
 		const projectPath = getStoragePath();
-		// trigger the seed
+		// [FIXED] project scope no longer seeds from the global pool — a
+		// single-use refresh token can never be duplicated across scopes.
 		const seeded = await loadAccounts();
-		expect(seeded?.accounts[0]?.refreshToken).toBe(shared);
-		expect(existsSync(projectPath)).toBe(true);
+		expect(seeded).toBeNull();
+		expect(existsSync(projectPath)).toBe(false);
 
-		// rotate inside the project scope via the coordinated path
+		// A rotation attempt in the empty project scope cannot reach the
+		// provider: with no pool file the coordinated path throws
+		// "Account storage is unavailable" before any exchange.
 		vi.mocked(queuedRefresh).mockResolvedValue({
 			type: "success", access: "a1", refresh: "rt-SHARED-1", expires: Date.now() + 3_600_000,
 		} as TokenResult);
-		const res = await coordinatePersistedRefresh({
-			organizationId: "o", accountId: "w", accountUserId: "m", refreshToken: shared,
-		});
-		expect(res.type).toBe("success");
+		let threw: unknown = null;
+		try {
+			await coordinatePersistedRefresh({
+				organizationId: "o", accountId: "w", accountUserId: "m", refreshToken: shared,
+			});
+		} catch (e) { threw = e; }
+		expect((threw as Error | null)?.message).toContain("storage is unavailable");
+		expect(vi.mocked(queuedRefresh)).not.toHaveBeenCalled();
 
-		const projectAfter = JSON.parse(await fs.readFile(projectPath, "utf-8")) as AccountStorageV3;
+		// The global file is untouched — no consumed-token residue.
 		const globalAfter = JSON.parse(await fs.readFile(globalFile, "utf-8")) as AccountStorageV3;
-		// [KNOWN-ISSUE] propagation only reaches same-scope flagged/main: the
-		// consumed single-use token survives in the global file, so the next
-		// global-scope refresh exchanges a dead token -> refresh_token_reused.
-		expect(projectAfter.accounts[0]?.refreshToken).toBe("rt-SHARED-1");
 		expect(globalAfter.accounts[0]?.refreshToken).toBe(shared);
+		expect(existsSync(projectPath)).toBe(false);
 	});
 });
 
@@ -133,11 +137,10 @@ describe("CELL2 extra: flagged transaction under mid-transaction scope flip", ()
 		});
 		const a = JSON.parse(await fs.readFile(flaggedA, "utf-8")) as { accounts: Array<{ refreshToken: string }> };
 		const b = JSON.parse(await fs.readFile(flaggedB, "utf-8")) as { accounts: Array<{ refreshToken: string }> };
-		// [KNOWN-ISSUE] getFlaggedAccountsPath() resolves at persist time, so
-		// the flagged write lands on B under A's lease — same torn-write
-		// window as the main store (cell 2c).
-		expect(a.accounts[0]?.refreshToken).toBe("rt-fA");
-		expect(b.accounts[0]?.refreshToken).toBe("rt-FLIPPED");
+		// [FIXED] the flagged path is scope-pinned at call time — the persist
+		// lands on A (the transaction's scope) under A's own lease.
+		expect(a.accounts[0]?.refreshToken).toBe("rt-FLIPPED");
+		expect(b.accounts[0]?.refreshToken).toBe("rt-fB");
 		setStoragePathDirect(null);
 	});
 });
@@ -156,14 +159,13 @@ describe("CELL1 extra: V2 in PROJECT legacy slot -> swallowed + global seed", ()
 		await fs.writeFile(legacyPath, JSON.stringify({ version: 2, accounts: [{ refreshToken: "rt-v2-legacy" }] }));
 
 		setStoragePath(proj);
+		// [FIXED] the V2 rejection is now loud (typed StorageError), the
+		// legacy V2 file is left in place, and the pool is never seeded
+		// from the global file.
 		let threw: unknown = null;
-		let loaded: Awaited<ReturnType<typeof loadAccounts>> = null;
-		try { loaded = await loadAccounts(); } catch (e) { threw = e; }
-		// [KNOWN-ISSUE] the V2 rejection is swallowed, the legacy V2 file is
-		// left in place, AND the pool is then silently seeded from the global
-		// file — the user's V2 data is invisible while unrelated creds appear.
-		expect(threw).toBeNull();
-		expect(loaded?.accounts[0]?.refreshToken).toBe("rt-GLOBAL");
+		try { await loadAccounts(); } catch (e) { threw = e; }
+		expect(threw).not.toBeNull();
+		expect((threw as { code?: string }).code).toBe("UNKNOWN_V2_FORMAT");
 		expect(existsSync(legacyPath)).toBe(true);
 		setStoragePathDirect(null);
 	});

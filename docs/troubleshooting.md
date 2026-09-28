@@ -168,7 +168,7 @@ login.
 updating `openai-codex-auth-config.json`; `CODEX_STORAGE_TRANSACTION_CONTENTION`
 means another holds the account-store lease. Nothing partial was applied —
 retry shortly, or stop the other session. A refresh that succeeded upstream but
-could not be committed to the pool is journaled in a `*.pending-rotation.json`
+could not be committed to the pool is journaled in a `<accounts-file>.refresh.pending`
 file beside the accounts file, so the rotated credential is applied on the next
 load instead of being lost to a crash or a lost lease.
 

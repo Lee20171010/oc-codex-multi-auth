@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { LOG_DIR } from "../lib/logger.js";
 
 const { rewriteUrlForCodexMock } = vi.hoisted(() => ({
 	rewriteUrlForCodexMock: vi.fn((url: string) => url),
@@ -7139,7 +7140,7 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			expect(body).toEqual({
 				error: {
 					code: "all_accounts_failed",
-					message: "All 1 account(s) failed (server errors or auth issues). Check account health with `codex-health`. Request logs live in /mock/logs/codex-plugin (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).",
+					message: `All 1 account(s) failed (server errors or auth issues). Check account health with \`codex-health\`. Request logs live in ${LOG_DIR} (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).`,
 				},
 			});
 		});

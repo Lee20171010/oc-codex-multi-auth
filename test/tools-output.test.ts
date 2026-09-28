@@ -164,7 +164,7 @@ describe("enrichThrownError", () => {
 			),
 		) as StorageError;
 		expect(enriched.message).toContain("save failed");
-		expect(enriched.message).toContain("Hint: check permissions");
+		expect(enriched.message).toContain("hint: check permissions");
 		expect(enriched.code).toBe(ErrorCode.STORAGE_ERROR);
 	});
 
@@ -193,7 +193,7 @@ describe("toToolCallError", () => {
 		expect(error).toBeInstanceOf(CodexError);
 		expect(error.code).toBe(ErrorCode.STORAGE_ERROR);
 		expect(error.message).toContain("Import failed: disk full");
-		expect(error.message).toContain("Hint: free space");
+		expect(error.message).toContain("hint: free space");
 	});
 
 	it("marks transient causes retryable in the message", () => {
@@ -268,7 +268,7 @@ describe("withToolErrorEnvelope", () => {
 			),
 		);
 		await expect(wrapped.execute({}, TOOL_CONTEXT)).rejects.toThrow(
-			/Hint: fix the file/,
+			/hint: fix the file/,
 		);
 	});
 

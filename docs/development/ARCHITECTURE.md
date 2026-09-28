@@ -88,7 +88,7 @@ Invariants:
 
 - V1 pools migrate to V3 on load; V2-format files throw `UNKNOWN_V2_FORMAT`; versions above 3 throw `UNSUPPORTED_SCHEMA_VERSION`.
 - Mutations run under a process mutex plus a `proper-lockfile` lease on `<storage>.transaction.lock`. OAuth refresh uses a **second** lease on `<storage>.refresh.lock` because refresh tokens are single-use — `lib/storage/coordinated-refresh.ts` serializes the exchange across processes and `propagateRotationToSiblingStore` keeps the sibling store's rotation state consistent. `<storage>.lock` remains advisory collision diagnostics; `lib/storage/worktree-lock.ts` detects other live processes without blocking.
-- A refresh that succeeded upstream but could not be committed to the pool (crash, lost lease) is journaled in a `*.pending-rotation.json` file beside the accounts file and applied on the next load, so a rotated refresh token is never lost to an interrupted write.
+- A refresh that succeeded upstream but could not be committed to the pool (crash, lost lease) is journaled in a `<accounts-file>.refresh.pending` file beside the accounts file and applied on the next load, so a rotated refresh token is never lost to an interrupted write.
 - Keychain is opt-in (`CODEX_KEYCHAIN=1`), service `oc-codex-multi-auth`, keys `accounts:global` / `accounts:<project-storage-key>`. Migrating JSON→keychain renames the source to `<file>.migrated-to-keychain.<timestamp>` as the rollback artifact; `deleteFlaggedFromKeychain` handles flagged entries. Keychain failures never silently delete JSON credentials.
 - Import supports dry-run preview and takes a pre-import backup when accounts exist.
 

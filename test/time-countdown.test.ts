@@ -281,61 +281,57 @@ describe("clock audit — sleepWithCountdown under wall-clock jumps", () => {
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 	});
 
-	it("AUDIT BUG: a backward jump mid-wait extends the countdown by the rollback amount (index.ts:2694-2735)", async () => {
+	it("FIXED: a backward jump mid-wait does NOT extend the countdown — it is monotonic now (index.ts)", async () => {
 		const sdk = await bootPlugin();
 		let settled = false;
 		const fetchPromise = sdk.fetch("https://example.com", {}).finally(() => { settled = true; });
 
-		// 3s into a 10s wait, wall clock jumps back 60s.
+		// 3s into a 10s wait, wall clock jumps back 60s. The countdown runs on
+		// performance.now(), which vitest advances with the fake timers and the
+		// Date jump cannot touch.
 		await vi.advanceTimersByTimeAsync(3_000);
 		vi.setSystemTime(T0 - 60_000);
 
-		// Original 10s deadline has elapsed in fake time — yet the loop's
-		// `Date.now() < endTime` is re-evaluated against the rolled-back clock,
-		// so it is still waiting (remaining grew by the rollback).
 		await vi.advanceTimersByTimeAsync(10_000);
-		expect(settled).toBe(false);
-		expect(globalThis.fetch).not.toHaveBeenCalled();
-
-		// The wait only ends when the wall clock re-crosses endTime: ~60s late.
-		await vi.advanceTimersByTimeAsync(61_000);
+		// ~13s of monotonic advance > the 10s deadline — the wait ends on
+		// schedule instead of running ~60s late.
 		await fetchPromise;
 		expect(settled).toBe(true);
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 	});
 
-	it("AUDIT FINDING: a forward jump ends the wait at the next sleep boundary, abandoning the remaining backoff (index.ts:2702)", async () => {
-		// NOTE: vitest fake timers cannot model this faithfully — a forward
-		// setSystemTime strands pending fake setTimeout calls (verified
-		// separately). Real Node setTimeout is monotonic-elapsed and unaffected
-		// by wall-clock jumps, so we fake ONLY Date and let real timers run.
+	it("FIXED: a forward jump no longer abandons the remaining backoff — the monotonic deadline stands (index.ts)", async () => {
+		// Fake ONLY Date so performance.now() and setTimeout run on real,
+		// monotonic time — which is exactly what the fixed loop uses.
 		vi.useFakeTimers({ toFake: ["Date"] });
 		vi.setSystemTime(T0);
-		knobs.waitMs = 60_000;
+		knobs.waitMs = 8_000;
 		const sdk = await bootPlugin();
 		let settled = false;
 		const fetchPromise = sdk.fetch("https://example.com", {}).finally(() => { settled = true; });
 		const startedAt = performance.now(); // real monotonic — Date is faked
 
-		// Let the traversal reach the countdown and start its first real sleep
-		// (sleepTime = min(intervalMs=5000, remaining≈60000) = 5000 real ms).
 		await new Promise((resolve) => setTimeout(resolve, 250));
 		expect(globalThis.fetch).not.toHaveBeenCalled();
 
 		vi.setSystemTime(T0 + 600_000); // wall clock jumps 10 minutes forward
 
-		// The in-flight sleep still runs its full real 5s; when it resolves the
-		// loop sees now > endTime and exits — the remaining ~55s of backoff is
-		// skipped and upstream is retried ~5s after the jump, not 55s.
+		// The first 5s sleep boundary is where the old loop exited early;
+		// under the monotonic deadline the wait is still running.
+		await new Promise((resolve) => setTimeout(resolve, 5_500));
+		expect(settled).toBe(false);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+
+		// It completes only when the real ~8s have elapsed.
 		await fetchPromise;
 		expect(settled).toBe(true);
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
-		// Total real elapsed ~5s (one intervalMs sleep), nowhere near 60s.
 		const realElapsed = performance.now() - startedAt;
+		expect(realElapsed).toBeGreaterThan(7_000);
 		expect(realElapsed).toBeLessThan(20_000);
 	}, 20_000);
 
-	it("AUDIT BUG: backward jump under REAL setTimeout semantics — in-flight sleep completes, loop re-sleeps until wall time recovers (index.ts:2694-2735)", async () => {
+	it("FIXED: backward jump under REAL setTimeout semantics — the monotonic wait completes on schedule, no clock recovery needed (index.ts)", async () => {
 		vi.useFakeTimers({ toFake: ["Date"] });
 		vi.setSystemTime(T0);
 		knobs.waitMs = 300; // one real 300ms sleep first
@@ -348,17 +344,9 @@ describe("clock audit — sleepWithCountdown under wall-clock jumps", () => {
 
 		vi.setSystemTime(T0 - 60_000); // clock rolls back a minute mid-wait
 
-		// The 300ms sleep still resolves on real schedule, but the loop
-		// re-evaluates Date.now() < endTime against the rolled-back clock and
-		// re-sleeps for a full 5s interval — the 300ms wait has already run
-		// 10x past its intended length and counting.
+		// The old loop re-slept until the wall clock recovered; the monotonic
+		// deadline ignores the jump entirely and exits at ~300ms real.
 		await new Promise((resolve) => setTimeout(resolve, 700));
-		expect(settled).toBe(false);
-		expect(globalThis.fetch).not.toHaveBeenCalled();
-
-		// Recover the clock far past endTime; the loop exits at the next sleep
-		// boundary (~5s from the rollback, real monotonic).
-		vi.setSystemTime(T0 + 600_000);
 		await fetchPromise;
 		expect(settled).toBe(true);
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
