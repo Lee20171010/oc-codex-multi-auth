@@ -68,23 +68,32 @@ async function seedPool(home: string, accounts: unknown[]) {
 }
 
 const QUOTA_DISPLAY_ENV = "CODEX_AUTH_QUOTA_DISPLAY";
+const PER_PROJECT_ENV = "CODEX_AUTH_PER_PROJECT_ACCOUNTS";
 
 describe("standalone oc-codex-multi-auth CLI commands", () => {
 	let tempHome: string | null = null;
 	let previousQuotaDisplay: string | undefined;
+	let previousPerProject: string | undefined;
 
 	// These cases load the real `dist/lib/config.js`, whose config path is the
 	// developer's own `~/.opencode`, not the temp home handed to `runInstaller`.
 	// Pinning the env override - which outranks the file - keeps a machine that
 	// has opted into `used` from failing every `% left` assertion below.
+	// `perProjectAccounts` defaults on in the shipped config, and the suite runs
+	// inside a project root, so without the pin every command would resolve the
+	// per-project pool instead of the global file these tests seed.
 	beforeEach(() => {
 		previousQuotaDisplay = process.env[QUOTA_DISPLAY_ENV];
 		process.env[QUOTA_DISPLAY_ENV] = "free";
+		previousPerProject = process.env[PER_PROJECT_ENV];
+		process.env[PER_PROJECT_ENV] = "0";
 	});
 
 	afterEach(async () => {
 		if (previousQuotaDisplay === undefined) delete process.env[QUOTA_DISPLAY_ENV];
 		else process.env[QUOTA_DISPLAY_ENV] = previousQuotaDisplay;
+		if (previousPerProject === undefined) delete process.env[PER_PROJECT_ENV];
+		else process.env[PER_PROJECT_ENV] = previousPerProject;
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
 		if (tempHome) {
