@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file. Dates are I
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.25.2] - 2026-09-28
+
+### Fixed
+- Credential writes no longer leak an open handle when an fsync wedges past the write deadline or `close()` stays pending after `sync()` resolves — the abandoned handle is closed under a bound or handed back so the caller retries the temp-file unlink when the fd releases, instead of leaving a token-bearing `.tmp` behind. (#275)
+- Clearing accounts or flagged accounts now verifies the keychain delete by re-reading the entry — a backend that reports `false` without an error is ambiguous with "entry absent" — and retires `.migrated-to-keychain.*` rollback backups that still hold plaintext refresh tokens, so cleared credentials cannot resurrect on the next opt-in load. (#275, #280)
+- A rotated refresh token now propagates to the sibling store with a retry while the refresh lease is still held, and — when propagation still fails — a per-token journal (`*.refresh.pending.<hash>`) is replayed in dependency order on the next refresh so chained rotations can't strand a record on a consumed token. A record that moved between the main and flagged stores mid-exchange is salvaged instead of throwing the new credential away. (#275, #280)
+- A keychain save refused for exceeding the backend's blob-size cap now lands the JSON fallback *before* the stale keychain entry is retired, so a failed fallback can no longer leave the pool unreachable. Migration markers that can't be removed are refreshed to the current pool rather than left serving pre-rotation credentials. (#282, #280)
+- Prompt templates are only served from the disk cache offline when a recorded content hash (`contentSha`, falling back to a hash-bound ETag) verifies the body — planted or unverifiable cache entries now fall back to the bundled instructions instead of being trusted. (#281)
+- The installer resolves the standalone account pool through `os.homedir()` like the runtime, refuses a relative home path instead of pointing token-bearing storage at the working directory, warns before rewriting `opencode.json`/`tui.json` when they contain comments (dry-run notes no longer claim a backup exists), and `doctor` reports flagged-store runtime failures instead of silently reporting zero flagged accounts. (#275, #282)
+- The request pipeline, plugin config bounds, V2 adapter surface detection, and OAuth host binding were hardened against boundary inputs and lost-update races. (#276, #281)
+- Keychain rollback validates a backup's storage shape before promoting it and treats access errors other than `ENOENT` as "file may exist" — a live store is no longer overwritten when existence can't be proven. (#277)
+- `codex-reset` failure JSON now carries the same `ok`/`tool`/`nextAction` envelope fields as other failures, and duplicate credit ids are counted once. (#282)
+- The logger masks credential-suffix fields (`tokenSuffix`/`token_suffix`), bounds email masking so an overlong local part can't leave an unmasked prefix, and routes every console line to stderr so stdout stays machine-readable. (#281, #282)
+- Rate-limit backoff clamps sub-millisecond server delays to at least 1 ms and survives backward clock jumps without freezing dedup state. (#281)
+- Export-path containment realpaths the allowed roots too, so exports inside a symlinked home or temp directory are no longer wrongly rejected. (#275)
+
+### Internal
+- Documentation was rewritten for clarity against the post-fix architecture. (#279)
+- Test infrastructure gained mock parity, per-directory coverage floors, `FC_SEED` property testing, and promoted audit regressions. (#278, #282)
+
 ## [6.25.1] - 2026-09-28
 
 ### Added
