@@ -151,6 +151,7 @@ export function messageHasContent(messageID: string): boolean {
 // =============================================================================
 
 export function injectTextPart(sessionID: string, messageID: string, text: string): boolean {
+  validatePathId(messageID, "messageID");
   const partDir = join(PART_STORAGE, messageID);
 
   try {
@@ -245,6 +246,7 @@ export function findMessagesWithOrphanThinking(sessionID: string): string[] {
 }
 
 export function prependThinkingPart(sessionID: string, messageID: string): boolean {
+  validatePathId(messageID, "messageID");
   const partDir = join(PART_STORAGE, messageID);
 
   try {
@@ -270,6 +272,7 @@ export function prependThinkingPart(sessionID: string, messageID: string): boole
 }
 
 export function stripThinkingParts(messageID: string): boolean {
+  validatePathId(messageID, "messageID");
   const partDir = join(PART_STORAGE, messageID);
   if (!existsSync(partDir)) return false;
 
@@ -358,6 +361,7 @@ export function findMessageByIndexNeedingThinking(sessionID: string, targetIndex
 }
 
 export function replaceEmptyTextParts(messageID: string, replacementText: string): boolean {
+  validatePathId(messageID, "messageID");
   const partDir = join(PART_STORAGE, messageID);
   if (!existsSync(partDir)) return false;
 
