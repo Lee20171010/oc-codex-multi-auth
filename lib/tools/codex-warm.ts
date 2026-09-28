@@ -36,6 +36,10 @@ import {
 	formatUiItem,
 	paintUiText,
 } from "../ui/format.js";
+import {
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 /**
@@ -84,7 +88,12 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 	return tool({
 		description:
 			"Warm up all accounts by sending one lightweight request to each, starting their usage windows so weekly/5h quotas stagger instead of expiring together.",
-		args: { format: tool.schema.enum(["text", "json"]).optional() },
+		args: {
+			format: tool.schema
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
+				.optional()
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
+		},
 		async execute(args) {
 			const ui = resolveUiRuntime();
 			const maskEmail = resolveMaskEmail();

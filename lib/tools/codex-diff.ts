@@ -123,9 +123,9 @@ function redactValue(value: unknown, terminalKey?: string): string {
 
 /**
  * Sensitive leaf keys whose VALUES must always be masked in diff output,
- * independent of whether the value looks token-shaped. Mirrors (a subset of)
- * the SENSITIVE_KEYS set in lib/logger.ts; kept local to avoid exporting the
- * logger internals. Keys are compared after stripping `-`/`_` and lowercasing.
+ * independent of whether the value looks token-shaped. Mirrors the
+ * SENSITIVE_KEYS set in lib/logger.ts (normalized the same way: `-`/`_`
+ * stripped, lowercased); kept local to avoid exporting the logger internals.
  */
 const SENSITIVE_LEAF_KEYS = new Set([
 	"refreshtoken",
@@ -143,6 +143,9 @@ const SENSITIVE_LEAF_KEYS = new Set([
 	"clientsecret",
 	"secret",
 	"password",
+	"credential",
+	"email",
+	"xauthtoken",
 ]);
 
 function isSensitiveLeafKey(key: string): boolean {
