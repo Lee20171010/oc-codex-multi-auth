@@ -20,6 +20,7 @@ import {
 	writeFileAtomic,
 	writeFileWithTimeout,
 } from "../lib/storage/atomic-write.js";
+import { writeBackupFileContent } from "../lib/storage/backup.js";
 import {
 	clearAccounts,
 	exportAccounts,
@@ -197,6 +198,116 @@ describe("writeFileWithTimeout", () => {
 			restore();
 		}
 	});
+
+	it("hands the abandoned close back so cleanup can retry once the fd releases", async () => {
+		// When the fsync wedges past the caller's budget, close() can stay
+		// pending on it too — a single immediate unlink then loses to the
+		// still-open fd on Windows. The callback exposes the eventual close
+		// so a deferred retry runs exactly when the fd releases, without
+		// extending the caller's timeout (coderabbit minor on PR #275).
+		let releaseClose!: () => void;
+		const closeGate = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		const origOpen = fs.open.bind(fs);
+		const openSpy = vi
+			.spyOn(fs, "open")
+			.mockImplementation(async (path, flags, mode) => {
+				if (flags === "r+") {
+					return {
+						fd: 4242,
+						sync: () => new Promise<void>(() => {}),
+						close: () => closeGate,
+					} as unknown as Awaited<ReturnType<typeof fs.open>>;
+				}
+				return origOpen(path, flags, mode);
+			});
+		try {
+			const target = join(dir, "backup.json");
+			let abandoned: Promise<void> | undefined;
+			await expect(
+				writeFileWithTimeout(target, "payload", 100, (closed) => {
+					abandoned = closed;
+				}),
+			).rejects.toThrow(/Timed out/);
+			expect(abandoned).toBeDefined();
+
+			let released = false;
+			void abandoned!.then(() => {
+				released = true;
+			});
+			await Promise.resolve();
+			expect(released).toBe(false);
+			releaseClose();
+			await vi.waitFor(() => expect(released).toBe(true));
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
+	it("writeBackupFileContent retries the temp unlink once the abandoned handle closes", async () => {
+		// Same stalled-fsync scenario at the caller level: the first unlink
+		// loses to the open fd (EPERM), and the deferred retry must remove the
+		// token-bearing temp file once close() finally completes. Real timers:
+		// the write budget is real IO interleaved with real setTimeout.
+		let releaseClose!: () => void;
+		const closeGate = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		const origOpen = fs.open.bind(fs);
+		const openSpy = vi
+			.spyOn(fs, "open")
+			.mockImplementation(async (path, flags, mode) => {
+				if (flags === "r+") {
+					return {
+						fd: 4242,
+						sync: () => new Promise<void>(() => {}),
+						close: () => closeGate,
+					} as unknown as Awaited<ReturnType<typeof fs.open>>;
+				}
+				return origOpen(path, flags, mode);
+			});
+		let epermFired = false;
+		const origUnlink = fs.unlink.bind(fs);
+		const unlinkSpy = vi
+			.spyOn(fs, "unlink")
+			.mockImplementation(async (target) => {
+				if (!epermFired && String(target).endsWith(".tmp")) {
+					epermFired = true;
+					throw Object.assign(
+						new Error("simulated EPERM on temp unlink"),
+						{ code: "EPERM" },
+					);
+				}
+				return origUnlink(target);
+			});
+		try {
+			const backupPath = join(dir, "backup.json");
+			await expect(
+				writeBackupFileContent(backupPath, "payload"),
+			).rejects.toThrow(/Timed out/);
+
+			expect(unlinkSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+			const tempPath = String(unlinkSpy.mock.calls[0]![0]);
+			expect(tempPath).toContain(".tmp");
+			expect(existsSync(tempPath)).toBe(true);
+
+			releaseClose();
+			await vi.waitFor(
+				() => {
+					expect(epermFired).toBe(true);
+					expect(
+						unlinkSpy.mock.calls.length,
+					).toBeGreaterThanOrEqual(2);
+					expect(existsSync(tempPath)).toBe(false);
+				},
+				{ timeout: 5_000 },
+			);
+		} finally {
+			unlinkSpy.mockRestore();
+			openSpy.mockRestore();
+		}
+	}, 15_000);
 });
 
 describe("storage-level crash durability", () => {
