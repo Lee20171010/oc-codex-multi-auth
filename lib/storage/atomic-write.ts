@@ -159,20 +159,40 @@ export async function writeFileWithTimeout(filePath: string, content: string, ti
     });
     // writeFile's internal close does not order the flush: re-open the file
     // just to fsync it, so the backup is durable the moment the caller moves
-    // on to the rename.
-    let handle: FileHandle | undefined;
-    try {
-      handle = await fs.open(filePath, "r+");
-      await handle.sync();
-    } finally {
-      if (handle) {
-        try {
-          await handle.close();
-        } catch {
-          // Close failure is secondary to the write outcome.
+    // on to the rename. The reopen+fsync shares the same wall-clock budget —
+    // a wedged disk most often stalls in fsync itself, so it races the same
+    // abort signal and surfaces as ETIMEDOUT instead of outliving the
+    // caller's deadline.
+    const flushExisting = (async () => {
+      let handle: FileHandle | undefined;
+      try {
+        handle = await fs.open(filePath, "r+");
+        await handle.sync();
+      } finally {
+        if (handle) {
+          try {
+            await handle.close();
+          } catch {
+            // Close failure is secondary to the write outcome.
+          }
         }
       }
-    }
+    })();
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const fail = () =>
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      if (controller.signal.aborted) {
+        fail();
+        return;
+      }
+      controller.signal.addEventListener("abort", fail, { once: true });
+    });
+    // Observe both arms so the loser never reports as unhandled — the race
+    // only decides which outcome surfaces. A hung fsync cannot be cancelled,
+    // but the caller stops waiting on it here.
+    flushExisting.catch(() => {});
+    aborted.catch(() => {});
+    await Promise.race([flushExisting, aborted]);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       const timeoutError = Object.assign(

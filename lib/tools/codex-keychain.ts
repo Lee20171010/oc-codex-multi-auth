@@ -32,12 +32,16 @@ import { randomBytes } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 import { withAccountStorageTransaction } from "../storage.js";
-import { getFlaggedAccountsPath } from "../storage/flagged.js";
+import {
+	getFlaggedAccountsPath,
+	normalizeFlaggedStorage,
+} from "../storage/flagged.js";
 import {
 	deleteFlaggedFromKeychain,
 	deleteFromKeychain,
 	isKeychainOptInEnabled,
 	keychainIsAvailable,
+	readFlaggedFromKeychain,
 	readFromKeychain,
 } from "../storage/keychain.js";
 import {
@@ -49,6 +53,7 @@ import { withStorageTransaction } from "../storage/transaction-lock.js";
 import {
 	fsyncParentDirectory,
 	renameWithWindowsRetry,
+	writeFileAtomic,
 } from "../storage/atomic-write.js";
 import {
 	getCredentialArtifactRetentionLimit,
@@ -153,6 +158,225 @@ async function pruneSiblingArtifacts(path: string, suffix: string): Promise<void
 		`${basename(path)}${suffix}`,
 		getCredentialArtifactRetentionLimit(),
 	);
+}
+
+/**
+ * Preserve a live keychain blob before the rollback deletes the entry.
+ *
+ * Rollback restores a point-in-time backup over whatever the keychain held
+ * — but after migration, every save writes the keychain ONLY (the on-disk
+ * copy stays frozen at migration time). The live entry can therefore be
+ * strictly newer than the backup being restored; deleting it would lose
+ * every rotation and quarantine that landed since. Archiving the blob to a
+ * `.pre-rollback-keychain.<ts>` file beside the restored store keeps the
+ * divergence recoverable.
+ *
+ * Returns `true` when it is safe to delete the entry (nothing live to
+ * preserve, or the archive landed). A failed archive returns `false` — the
+ * caller must then SKIP the delete, because deleting without a preserved
+ * copy is exactly the loss this guard exists to prevent.
+ */
+async function archiveLiveKeychainBlob(
+	read: () => Promise<string | null>,
+	anchorPath: string,
+	warnings: string[],
+	label: string,
+): Promise<boolean> {
+	let live: string | null;
+	try {
+		live = await read();
+	} catch (err) {
+		warnings.push(
+			`codex-keychain rollback: could not read the live ${label} OS-keychain entry before deleting it: ${(err as Error).message}. The entry was left in place — delete it manually after verifying it holds nothing newer than the restored file.`,
+		);
+		return false;
+	}
+	if (live === null) return true;
+	const archive = timestampedArtifactName(anchorPath, ".pre-rollback-keychain.");
+	try {
+		await writeFileAtomic(archive, live);
+		await fsyncParentDirectory(archive);
+	} catch (err) {
+		warnings.push(
+			`codex-keychain rollback: could not archive the live ${label} OS-keychain entry to ${archive}: ${(err as Error).message}. The entry was left in place so its newer state is not lost.`,
+		);
+		return false;
+	}
+	warnings.push(
+		`codex-keychain rollback: archived the live ${label} OS-keychain entry to ${archive} before deleting it; it may hold state newer than the restored backup.`,
+	);
+	return true;
+}
+
+/**
+ * Restore the flagged store from its newest `.migrated-to-keychain` backup,
+ * under the flagged store's OWN transaction lease.
+ *
+ * This runs after the main-store rollback has released its lease — the two
+ * stores serialize on different lock files, and `withStorageLock` is not
+ * re-entrant, so nesting flagged work inside the main transaction would
+ * both deadlock and leave the flagged file mutated under the wrong lease.
+ *
+ * Every failure degrades to a warning and `restored: false`: the main store
+ * is already authoritative again by the time this runs.
+ */
+async function restoreFlaggedStoreFromKeychainBackup(options: {
+	confirm: boolean;
+	optIn: boolean;
+	projectKey: string | null;
+}): Promise<{ restored: boolean; warnings: string[] }> {
+	const warnings: string[] = [];
+	let flaggedPath: string;
+	try {
+		flaggedPath = getFlaggedAccountsPath();
+	} catch (err) {
+		warnings.push(
+			`codex-keychain rollback: could not resolve the flagged accounts path: ${(err as Error).message}. The main store was still restored.`,
+		);
+		return { restored: false, warnings };
+	}
+	const outcome = await withStorageTransaction({
+		storagePath: flaggedPath,
+		load: () => Promise.resolve<null>(null),
+		persist: () => Promise.resolve(),
+		handler: async () => {
+			try {
+				const flaggedBackup = (await findMigrationBackups(flaggedPath))[0];
+				if (!flaggedBackup) {
+					return { restored: false, warnings };
+				}
+				// Validate against the real flagged-store shape — not merely "has
+				// an accounts array". A structurally wrong backup (wrong version,
+				// corrupt entry) promoted to the flagged path would be rejected
+				// by the loader on the next read and could quarantine-live-state.
+				let flaggedParses = false;
+				try {
+					const parsed = JSON.parse(
+						await fs.readFile(flaggedBackup, "utf-8"),
+					) as unknown;
+					normalizeFlaggedStorage(parsed, flaggedBackup);
+					flaggedParses = true;
+				} catch {
+					/* unreadable, unparseable, or shape-invalid: stays false */
+				}
+				if (!flaggedParses) {
+					warnings.push(
+						`codex-keychain rollback: flagged backup at ${flaggedBackup} did not parse as flagged-account storage; left in place.`,
+					);
+					return { restored: false, warnings };
+				}
+
+				let flaggedCurrentExists = false;
+				try {
+					await fs.access(flaggedPath);
+					flaggedCurrentExists = true;
+				} catch (err) {
+					// Only ENOENT means "no flagged file". Any other failure
+					// (EACCES, transient I/O) leaves existence unknown — guessing
+					// "absent" could silently clobber live flagged credentials,
+					// so the restore is skipped rather than the confirm gate.
+					if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+						warnings.push(
+							`codex-keychain rollback: could not check for an existing flagged accounts file at ${flaggedPath}: ${(err as Error).message}. Flagged restore skipped.`,
+						);
+						return { restored: false, warnings };
+					}
+				}
+				if (flaggedCurrentExists && !options.confirm) {
+					warnings.push(
+						`codex-keychain rollback: flagged backup ${flaggedBackup} found but a flagged file already exists at ${flaggedPath} and confirm was not set -- left in place.`,
+					);
+					return { restored: false, warnings };
+				}
+
+				let flaggedArchive: string | null = null;
+				if (flaggedCurrentExists) {
+					flaggedArchive = timestampedArtifactName(flaggedPath, ".pre-rollback.");
+					try {
+						await renameWithWindowsRetry(flaggedPath, flaggedArchive);
+					} catch (err) {
+						warnings.push(
+							`codex-keychain rollback: could not archive the existing flagged file at ${flaggedPath}: ${(err as Error).message}. Flagged restore skipped.`,
+						);
+						return { restored: false, warnings };
+					}
+				}
+
+				if (process.platform !== "win32") {
+					try {
+						await fs.chmod(flaggedBackup, 0o600);
+					} catch {
+						warnings.push(
+							`codex-keychain rollback: could not set restrictive permissions on flagged backup ${flaggedBackup} before restoring it.`,
+						);
+					}
+				}
+				let restored = false;
+				try {
+					await renameWithWindowsRetry(flaggedBackup, flaggedPath);
+					await fsyncParentDirectory(flaggedPath);
+					restored = true;
+				} catch (renameErr) {
+					if (flaggedArchive) {
+						try {
+							await renameWithWindowsRetry(flaggedArchive, flaggedPath);
+							warnings.push(
+								`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}. Recovered the previously archived flagged file.`,
+							);
+						} catch (recoveryErr) {
+							warnings.push(
+								`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}. Recovery also failed: ${(recoveryErr as Error).message}. Check ${flaggedArchive} manually.`,
+							);
+						}
+					} else {
+						warnings.push(
+							`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}.`,
+						);
+					}
+				}
+
+				if (restored) {
+					// Preserve then delete the flagged keychain entry — same
+					// divergence rule as the main entry: post-migration saves
+					// wrote keychain-only, so the live entry may hold quarantines
+					// newer than the backup. A failed archive SKIPS the delete so
+					// newer flagged state is never destroyed unpreserved.
+					const flaggedSafeToDelete = await archiveLiveKeychainBlob(
+						() => readFlaggedFromKeychain(options.projectKey),
+						flaggedPath,
+						warnings,
+						"flagged accounts",
+					);
+					if (flaggedSafeToDelete) {
+						const result = await deleteFlaggedFromKeychain(options.projectKey);
+						if (!result.deleted && (result.error || options.optIn)) {
+							warnings.push(
+								`codex-keychain rollback: could not confirm the flagged OS-keychain entry was deleted${
+									result.error ? ` (${result.error})` : ""
+								}. The keychain copy may still be preferred on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
+							);
+						}
+					}
+				}
+				return { restored, warnings };
+			} catch (err) {
+				warnings.push(
+					`codex-keychain rollback: flagged-store rollback probe failed: ${(err as Error).message}. The main store was still restored.`,
+				);
+				return { restored: false, warnings };
+			}
+		},
+	});
+	// Bound the flagged artifact families the same way the main store's are
+	// bounded — best-effort, a prune failure never fails the rollback.
+	try {
+		await pruneSiblingArtifacts(flaggedPath, ".migrated-to-keychain.");
+		await pruneSiblingArtifacts(flaggedPath, ".pre-rollback.");
+		await pruneSiblingArtifacts(flaggedPath, ".pre-rollback-keychain.");
+	} catch {
+		/* pruning is best-effort */
+	}
+	return outcome;
 }
 
 export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
@@ -466,144 +690,35 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 						message: `codex-keychain rollback: failed to rename ${mostRecent} -> ${storagePath}: ${renameError}`,
 					};
 				}
-				// Unconditional keychain delete now that the backup is active:
-				// rollback means "stop trusting the keychain copy", and the
-				// typical flow is `unset CODEX_KEYCHAIN` BEFORE rolling back —
-				// gating the delete on opt-in would leave a stale keychain
-				// entry that silently becomes authoritative again the next
-				// time the opt-in is set. A false/failed delete does not fail
-				// the rollback (the JSON file is already authoritative again),
-				// but the operator needs to know a stale keychain copy might
-				// still be preferred on the next load.
-				try {
-					const deleted = await deleteFromKeychain(projectKey);
-					if (!deleted && optIn) {
+				// Preserve then delete the keychain entry now that the backup
+				// is active. Rollback means "stop trusting the keychain copy",
+				// and the typical flow is `unset CODEX_KEYCHAIN` BEFORE rolling
+				// back — gating the delete on opt-in would leave a stale entry
+				// that silently becomes authoritative again on the next opt-in.
+				// The live entry is archived first: every post-migration save
+				// wrote keychain-only, so it can hold state strictly newer than
+				// the backup being restored. A failed archive SKIPS the delete —
+				// deleting unpreserved newer state is the loss this tool exists
+				// to prevent.
+				const mainSafeToDelete = await archiveLiveKeychainBlob(
+					() => readFromKeychain(projectKey),
+					storagePath,
+					warnings,
+					"accounts",
+				);
+				if (mainSafeToDelete) {
+					const result = await deleteFromKeychain(projectKey);
+					if (!result.deleted && (result.error || optIn)) {
 						warnings.push(
-							"codex-keychain rollback: could not confirm the OS-keychain entry was deleted. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.",
+							`codex-keychain rollback: could not confirm the OS-keychain entry was deleted${
+								result.error ? ` (${result.error})` : ""
+							}. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
 						);
 					}
-				} catch (err) {
-					warnings.push(
-						`codex-keychain rollback: failed to delete the OS-keychain entry: ${(err as Error).message}. The keychain copy may still exist and would be preferred over this restored file on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
-					);
-				}
-				// Flagged-store parity: flagged entries migrate to the keychain
-				// under the same `.migrated-to-keychain.<ts>` marker scheme, so a
-				// rollback that restores only the main file leaves quarantined
-				// credentials keychain-only. Restore the newest flagged marker
-				// the same way. Flagged failures are warnings, never aborts --
-				// the main store is already authoritative again.
-				let flaggedRestored = false;
-				try {
-					const flaggedPath = getFlaggedAccountsPath();
-					const flaggedBackup = (await findMigrationBackups(flaggedPath))[0];
-					if (flaggedBackup) {
-						let flaggedParses = false;
-						try {
-							const parsed = JSON.parse(
-								await fs.readFile(flaggedBackup, "utf-8"),
-							) as unknown;
-							flaggedParses =
-								typeof parsed === "object" &&
-								parsed !== null &&
-								Array.isArray((parsed as { accounts?: unknown }).accounts);
-						} catch {
-							/* unreadable or unparseable: flaggedParses stays false */
-						}
-						if (!flaggedParses) {
-							warnings.push(
-								`codex-keychain rollback: flagged backup at ${flaggedBackup} did not parse as flagged-account storage; left in place.`,
-							);
-						} else {
-							let flaggedCurrentExists = false;
-							try {
-								await fs.access(flaggedPath);
-								flaggedCurrentExists = true;
-							} catch {
-								/* ENOENT: flagged path is clear */
-							}
-							if (flaggedCurrentExists && !confirm) {
-								warnings.push(
-									`codex-keychain rollback: flagged backup ${flaggedBackup} found but a flagged file already exists at ${flaggedPath} and confirm was not set -- left in place.`,
-								);
-							} else {
-								let flaggedArchive: string | null = null;
-								if (flaggedCurrentExists) {
-									flaggedArchive = timestampedArtifactName(flaggedPath, ".pre-rollback.");
-									try {
-										await renameWithWindowsRetry(flaggedPath, flaggedArchive);
-									} catch (err) {
-										flaggedArchive = null;
-										warnings.push(
-											`codex-keychain rollback: could not archive the existing flagged file at ${flaggedPath}: ${(err as Error).message}. Flagged restore skipped.`,
-										);
-									}
-								}
-								if (flaggedArchive || !flaggedCurrentExists) {
-									if (process.platform !== "win32") {
-										try {
-											await fs.chmod(flaggedBackup, 0o600);
-										} catch {
-											warnings.push(
-												`codex-keychain rollback: could not set restrictive permissions on flagged backup ${flaggedBackup} before restoring it.`,
-											);
-										}
-									}
-									try {
-										await renameWithWindowsRetry(flaggedBackup, flaggedPath);
-										await fsyncParentDirectory(flaggedPath);
-										flaggedRestored = true;
-									} catch (renameErr) {
-										if (flaggedArchive) {
-											try {
-												await renameWithWindowsRetry(flaggedArchive, flaggedPath);
-												warnings.push(
-													`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}. Recovered the previously archived flagged file.`,
-												);
-											} catch (recoveryErr) {
-												warnings.push(
-													`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}. Recovery also failed: ${(recoveryErr as Error).message}. Check ${flaggedArchive} manually.`,
-												);
-											}
-										} else {
-											warnings.push(
-												`codex-keychain rollback: failed to restore flagged backup ${flaggedBackup} -> ${flaggedPath}: ${(renameErr as Error).message}.`,
-											);
-										}
-									}
-									if (flaggedRestored) {
-										// Unconditional for the same reason as the
-										// main entry: a rollback run after CODEX_KEYCHAIN
-										// was unset must still retire the flagged keychain
-										// copy or it silently becomes authoritative on the
-										// next opt-in.
-										try {
-											const deleted =
-												await deleteFlaggedFromKeychain(projectKey);
-											if (!deleted && optIn) {
-												warnings.push(
-													"codex-keychain rollback: could not confirm the flagged OS-keychain entry was deleted. The keychain copy may still be preferred on the next load -- delete it manually or disable CODEX_KEYCHAIN.",
-												);
-											}
-										} catch (err) {
-											warnings.push(
-												`codex-keychain rollback: failed to delete the flagged OS-keychain entry: ${(err as Error).message}. The keychain copy may still be preferred on the next load -- delete it manually or disable CODEX_KEYCHAIN.`,
-											);
-										}
-									}
-								}
-							}
-						}
-					}
-				} catch (err) {
-					warnings.push(
-						`codex-keychain rollback: flagged-store rollback probe failed: ${(err as Error).message}. The main store was still restored.`,
-					);
 				}
 				return {
 					ok: true as const,
 					preRollbackArchive,
-					flaggedRestored,
 					warnings,
 				};
 				},
@@ -612,6 +727,23 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 			if (!rollbackResult.ok) {
 				return rollbackResult.message;
 			}
+			// Flagged-store parity: flagged entries migrate to the keychain
+			// under the same `.migrated-to-keychain.<ts>` marker scheme, so a
+			// rollback that restores only the main file leaves quarantined
+			// credentials keychain-only. The flagged store carries its OWN
+			// transaction lease — running the flagged renames inside the main
+			// transaction would mutate it unprotected (and deadlocks anyway:
+			// withStorageLock is not re-entrant), so it runs here, after the
+			// main lease is released, under the flagged lease itself.
+			const flaggedOutcome = await restoreFlaggedStoreFromKeychainBackup({
+				confirm: confirm === true,
+				optIn,
+				projectKey,
+			});
+			const warnings = [
+				...rollbackResult.warnings,
+				...flaggedOutcome.warnings,
+			];
 			// Bound the artifact families this tool creates. The marker just
 			// promoted out of `migrated-to-keychain` is already gone; pruning
 			// here keeps older markers plus the `pre-rollback` archives from
@@ -619,16 +751,23 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 			// cycles. Best-effort — a prune failure never fails the rollback.
 			await pruneSiblingArtifacts(storagePath, ".migrated-to-keychain.");
 			await pruneSiblingArtifacts(storagePath, ".pre-rollback.");
+			await pruneSiblingArtifacts(storagePath, ".pre-rollback-keychain.");
 			const preRollbackArchive = rollbackResult.preRollbackArchive;
 
+			// Warnings and paths are app-generated but interpolate long storage
+			// paths — give them a bound well above the untrusted-label cap so a
+			// hard truncate cannot cut the message before its reason.
 			const lines: string[] = [
 				...formatUiHeader(ui, "Codex keychain rollback"),
 				"",
 				formatUiItem(
 					ui,
 					`Restored ${accountCount} account(s) from backup ${mostRecent}.`,
+					"normal",
+					"",
+					400,
 				),
-				formatUiKeyValue(ui, "Active file", storagePath),
+				formatUiKeyValue(ui, "Active file", storagePath, "normal", 400),
 			];
 			if (preRollbackArchive) {
 				lines.push(
@@ -636,10 +775,12 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 						ui,
 						"Previous file archived at",
 						preRollbackArchive,
+						"normal",
+						400,
 					),
 				);
 			}
-			if (rollbackResult.flaggedRestored) {
+			if (flaggedOutcome.restored) {
 				lines.push(
 					formatUiItem(
 						ui,
@@ -647,8 +788,8 @@ export function createCodexKeychainTool(ctx: ToolContext): ToolDefinition {
 					),
 				);
 			}
-			for (const warning of rollbackResult.warnings) {
-				lines.push(formatUiItem(ui, warning, "warning"));
+			for (const warning of warnings) {
+				lines.push(formatUiItem(ui, warning, "warning", "", 400));
 			}
 			lines.push(
 				formatUiItem(

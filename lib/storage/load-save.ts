@@ -496,6 +496,51 @@ async function loadAccountsInternal(
     if (error instanceof StorageError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
+      // A missing canonical file with a `.migrated-to-keychain` marker still
+      // present is the signature of a process that died (or a keychain write
+      // that failed) between the pre-keychain rename and persisting the new
+      // state. The marker holds the last good store — reads MUST see it or
+      // the pool reports empty and the next save clobbers the credentials.
+      // `path` was scoped to the try block, so re-resolve it the same way
+      // the V2 recovery-hint block above does.
+      const markerAnchor = (() => {
+        try {
+          return getStoragePath();
+        } catch {
+          return "";
+        }
+      })();
+      for (const markerPath of markerAnchor
+        ? await listKeychainMigrationMarkers(markerAnchor)
+        : []) {
+        try {
+          const markerData = JSON.parse(
+            (await fs.readFile(markerPath, "utf-8")).replace(/^\uFEFF/, ""),
+          ) as unknown;
+          const markerNormalized = normalizeAccountStorage(markerData, markerPath);
+          if (markerNormalized) {
+            log.warn(
+              "Recovered account storage from an interrupted keychain-migration marker; the canonical file was missing",
+              { markerPath },
+            );
+            return markerNormalized;
+          }
+        } catch (markerErr) {
+          // A corrupt newest marker must not hide an older valid one — but
+          // typed failures (forward schema, quarantined V2) stay loud exactly
+          // as they do on the canonical path.
+          if (
+            markerErr instanceof StorageError &&
+            markerErr.code !== "INVALID_STORAGE"
+          ) {
+            throw markerErr;
+          }
+          log.warn("keychain: skipping an unreadable migration marker", {
+            markerPath,
+            error: String(markerErr),
+          });
+        }
+      }
       // Same-scope legacy migration only. A project-scoped ENOENT must NOT
       // fall back to the live global file: copying the global pool into the
       // project store duplicated single-use refresh tokens across scopes, so
@@ -683,6 +728,86 @@ export async function migrateOnDiskJsonToKeychainBackup(
   }
 }
 
+/**
+ * Remove every `.migrated-to-keychain.<ts>` rollback artefact beside
+ * `storagePath`. Clear operations call this so a "delete all credentials"
+ * request cannot leave a plaintext copy of the full token set sitting next
+ * to the (now removed) store — an artefact a future `codex-keychain
+ * rollback` or a casual `cat` would otherwise expose.
+ *
+ * Best-effort and strictly append-only on failure: each unlink failure is
+ * warned about individually and never fails the enclosing clear, matching
+ * the clear's own "partial failure warns, never throws" contract. Exported
+ * for the flagged sibling store, whose clear shares the same contract.
+ */
+export async function retireKeychainMigrationArtifacts(
+  storagePath: string,
+): Promise<void> {
+  const dir = dirname(storagePath);
+  const prefix = `${basename(storagePath)}.migrated-to-keychain.`;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return; // Directory unreadable or absent — nothing to retire.
+  }
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const target = join(dir, name);
+    try {
+      await fs.unlink(target);
+      await fsyncParentDirectory(target);
+    } catch (err) {
+      log.warn("keychain: failed to retire a migration artefact during clear", {
+        target,
+        error: String(err),
+      });
+    }
+  }
+}
+
+/**
+ * List `.migrated-to-keychain.<ts>` markers beside `storagePath`, newest
+ * first. Loads use this as a recovery source: a process that died between
+ * the pre-keychain rename and the keychain write leaves NO canonical file
+ * while the marker still holds the last good store. Falling through to an
+ * empty pool in that state would lose the accounts on the next save.
+ *
+ * Sorting is by `mtimeMs` (not the timestamp embedded in the name) so it
+ * matches "most recently written" exactly; the filename is the tiebreaker
+ * for the rare identical-mtime case so the order stays deterministic.
+ */
+export async function listKeychainMigrationMarkers(
+  storagePath: string,
+): Promise<string[]> {
+  const dir = dirname(storagePath);
+  const prefix = `${basename(storagePath)}.migrated-to-keychain.`;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const matches = entries.filter((name) => name.startsWith(prefix));
+  const withMtime = await Promise.all(
+    matches.map(async (name) => {
+      const full = join(dir, name);
+      let mtimeMs = Number.NEGATIVE_INFINITY;
+      try {
+        mtimeMs = (await fs.stat(full)).mtimeMs;
+      } catch {
+        // Stat raced with a prune — sort last.
+      }
+      return { full, name, mtimeMs };
+    }),
+  );
+  withMtime.sort((a, b) => {
+    if (b.mtimeMs !== a.mtimeMs) return b.mtimeMs - a.mtimeMs;
+    return a.name < b.name ? 1 : a.name > b.name ? -1 : 0;
+  });
+  return withMtime.map((entry) => entry.full);
+}
+
 async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
   // Refresh our lock (or surface a collision) on every write. This also
   // bumps `lastActive`, which is the stale-detection timestamp read by
@@ -815,9 +940,9 @@ export async function clearAccounts(): Promise<void> {
       load: () => Promise.resolve<AccountStorageV3 | null>(null),
       persist: () => Promise.resolve(),
       handler: async () => {
+        const path = getStoragePath();
         let jsonCleared = true;
         try {
-          const path = getStoragePath();
           assertTestRunNeverTouchesRealHome(path);
           // Deleting the store outright needs no significance test - `null`
           // says there is no successor document to compare against. The
@@ -853,16 +978,26 @@ export async function clearAccounts(): Promise<void> {
         // Only delete the keychain entry after the on-disk copy is gone (or
         // was already absent). This preserves atomicity-enough semantics: a
         // partial failure leaves both sides present rather than clearing one
-        // side and letting a subsequent load rehydrate from the other.
+        // side and letting a subsequent load rehydrate from the other. A
+        // FAILED delete is surfaced distinctly from "no entry existed": the
+        // stale copy would silently resurrect the cleared credentials on the
+        // next keychain-first load.
         if (jsonCleared && isKeychainOptInEnabled()) {
-          try {
-            const projectKey = getCurrentProjectStorageKey();
-            await deleteFromKeychain(projectKey);
-          } catch (err) {
-            log.warn("keychain: delete during clearAccounts failed", {
-              error: String(err),
-            });
+          const projectKey = getCurrentProjectStorageKey();
+          const result = await deleteFromKeychain(projectKey);
+          if (!result.deleted && result.error) {
+            log.warn(
+              "keychain: delete during clearAccounts failed; a stale keychain copy may survive and resurrect the cleared accounts on the next opt-in load",
+              { error: result.error },
+            );
           }
+        }
+
+        // The migration markers hold plaintext copies of the same token set.
+        // A clear that retires only the canonical file and keychain entry
+        // still leaves full credentials sitting next to the store.
+        if (jsonCleared) {
+          await retireKeychainMigrationArtifacts(path);
         }
       },
     }),

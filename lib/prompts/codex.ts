@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -34,44 +35,28 @@ function classifyFetchError(error: unknown, aborted: boolean): Error {
 	);
 }
 
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+/**
+ * One deadline and one controller cover request AND body: `fetch()` resolves
+ * when headers arrive, so a signal scoped to `fetch` alone stops guarding the
+ * body read, and a body-read race that only rejects the reader leaves the
+ * socket open. Aborting this controller on timeout cancels the connection
+ * itself, which is what releases it.
+ */
+async function fetchTextWithTimeout(
+	url: string,
+	init?: RequestInit,
+): Promise<{ response: Response; text: string }> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), PROMPT_FETCH_TIMEOUT_MS);
 	timeout.unref();
 	try {
-		return await fetch(url, { ...init, signal: controller.signal });
+		const response = await fetch(url, { ...init, signal: controller.signal });
+		const text = await response.text();
+		return { response, text };
 	} catch (error) {
 		throw classifyFetchError(error, controller.signal.aborted);
 	} finally {
 		clearTimeout(timeout);
-	}
-}
-
-/**
- * `fetch()` resolves when response headers arrive — its abort signal stops
- * guarding the moment it resolves, so a connection that stalls mid-body would
- * hang `response.text()`/`response.json()` forever. This races the body read
- * against the same bound so the whole fetch window is covered.
- */
-async function readBodyWithTimeout<T>(read: () => Promise<T>): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			read(),
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => {
-					reject(
-						new CodexTimeoutError(
-							`Prompt body read timed out after ${PROMPT_FETCH_TIMEOUT_MS}ms`,
-							{ timeoutMs: PROMPT_FETCH_TIMEOUT_MS },
-						),
-					);
-				}, PROMPT_FETCH_TIMEOUT_MS);
-				timer.unref();
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -128,6 +113,30 @@ function isUsableCacheTimestamp(lastChecked: unknown, now: number): lastChecked 
 	);
 }
 
+/**
+ * `raw.githubusercontent.com` serves the git blob SHA as the ETag. When a 304
+ * confirms the cached etag is still current, the disk body is only the real
+ * upstream content if its git-blob hash (`sha1|sha256 "blob <len>\0<body>"`)
+ * actually equals that etag — otherwise the cache was planted or torn and the
+ * bytes must be refetched unconditionally. An etag in any other form cannot
+ * bind content, so it fails closed to a refetch rather than trusting bytes.
+ */
+function isContentBoundToEtag(content: string, etag: string | null): boolean {
+	if (!etag) return false;
+	const cleaned = etag.trim().replace(/^W\//i, "").replace(/^"|"$/g, "");
+	const hex = cleaned.match(/^(?:sha1|sha256):([0-9a-f]+)$/i)?.[1] ?? cleaned;
+	if (!/^[0-9a-f]{40}$/i.test(hex) && !/^[0-9a-f]{64}$/i.test(hex)) {
+		return false;
+	}
+	const algorithm = hex.length === 64 ? "sha256" : "sha1";
+	const payload = Buffer.from(content, "utf8");
+	const digest = createHash(algorithm)
+		.update(`blob ${payload.length}\0`)
+		.update(payload)
+		.digest("hex");
+	return digest === hex.toLowerCase();
+}
+
 function parseCacheMetadata(metaContent: string, now: number): CacheMetadata | null {
 	let parsed: unknown;
 	try {
@@ -156,8 +165,22 @@ function parseCacheMetadata(metaContent: string, now: number): CacheMetadata | n
 }
 
 const MAX_CACHE_SIZE = 50;
+/**
+ * `memoryCache` holds only content this process fetched (or hash-verified)
+ * from GitHub, plus the vendored bundle. Disk bytes are never stored here
+ * unverified — which is what makes a same-UID-planted cache file un-servable:
+ * the planter can write the cache and its meta, but cannot populate this map
+ * without the fetch.
+ */
 const memoryCache = new Map<string, { content: string; timestamp: number }>();
 const refreshPromises = new Map<string, Promise<void>>();
+/**
+ * Keys whose last upstream exchange failed. A failed fetch is retried only
+ * after `CACHE_TTL_MS`, so an offline window serves the fallback once instead
+ * of paying a timeout stall on every call — and a planted cache can only
+ * reach output while the trusted source is genuinely unreachable.
+ */
+const fetchFailedAt = new Map<string, number>();
 const RELEASE_TAG_TTL_MS = 5 * 60 * 1000;
 let latestReleaseTagCache: { tag: string; checkedAt: number } | null = null;
 
@@ -168,6 +191,7 @@ let latestReleaseTagCache: { tag: string; checkedAt: number } | null = null;
 export function __clearCacheForTesting(): void {
 	memoryCache.clear();
 	refreshPromises.clear();
+	fetchFailedAt.clear();
 	catalogMemo = null;
 	catalogInflight = null;
 	latestReleaseTagCache = null;
@@ -390,14 +414,13 @@ async function fetchCatalogText(tag: string): Promise<string> {
 
 	const url = `https://raw.githubusercontent.com/openai/codex/${tag}/${CATALOG_PATH}`;
 	const promise = (async () => {
-		const response = await fetchWithTimeout(url);
+		const { response, text } = await fetchTextWithTimeout(url);
 		if (!response.ok) {
 			throw new PromptError(`HTTP ${response.status}`, {
 				code: "HTTP_ERROR",
 				context: { status: response.status },
 			});
 		}
-		const text = await readBodyWithTimeout(() => response.text());
 		// Only a successful fetch populates the memo; a failure leaves any prior
 		// value untouched and lets the next caller retry.
 		catalogMemo = { tag, text, timestamp: Date.now() };
@@ -623,11 +646,9 @@ async function getLatestReleaseTag(): Promise<string> {
 	}
 
 	try {
-		const response = await fetchWithTimeout(GITHUB_API_RELEASES);
+		const { response, text } = await fetchTextWithTimeout(GITHUB_API_RELEASES);
 		if (response.ok) {
-			const data = (await readBodyWithTimeout(() =>
-				response.json(),
-			)) as GitHubRelease;
+			const data = JSON.parse(text) as GitHubRelease;
 			if (typeof data.tag_name === "string" && isValidReleaseTag(data.tag_name)) {
 				latestReleaseTagCache = {
 					tag: data.tag_name,
@@ -645,7 +666,9 @@ async function getLatestReleaseTag(): Promise<string> {
 		// Fall through to HTML fallback
 	}
 
-	const htmlResponse = await fetchWithTimeout(GITHUB_HTML_RELEASES);
+	const { response: htmlResponse, text: html } = await fetchTextWithTimeout(
+		GITHUB_HTML_RELEASES,
+	);
 	if (!htmlResponse.ok) {
 		throw new PromptError(
 			`Failed to fetch latest release: ${htmlResponse.status}`,
@@ -669,7 +692,6 @@ async function getLatestReleaseTag(): Promise<string> {
 		}
 	}
 
-	const html = await readBodyWithTimeout(() => htmlResponse.text());
 	const match = html.match(/\/openai\/codex\/releases\/tag\/([^"]+)/);
 	if (match && match[1] && isValidReleaseTag(match[1])) {
 		const tag = match[1];
@@ -701,6 +723,8 @@ export async function getCodexInstructions(
 	const source = resolveInstructionSource(normalizedModel);
 	const { key, cacheFile, cacheMetaFile } = source;
 	const now = Date.now();
+	// Memory entries exist only because this process fetched them — serving
+	// one never involves trusting a writable file.
 	const cached = memoryCache.get(key);
 	if (cached && now - cached.timestamp < CACHE_TTL_MS) {
 		return rewriteInstructionIdentity(cached.content, normalizedModel);
@@ -726,51 +750,56 @@ export async function getCodexInstructions(
 	const usableDiskContent =
 		diskContent && isUsableInstructions(diskContent) ? diskContent : null;
 
-	if (usableDiskContent && cachedMetadata) {
-		if (now - cachedMetadata.lastChecked < CACHE_TTL_MS) {
-			setCacheEntry(key, { content: usableDiskContent, timestamp: now });
-			return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
-		}
-		// Stale-while-revalidate: return stale cache immediately and refresh in background.
-		setCacheEntry(key, { content: usableDiskContent, timestamp: now });
-		void refreshInstructionsInBackground(source, cachedMetadata);
-		return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
-	}
+	const lastFailed = fetchFailedAt.get(key);
+	const upstreamRecentlyFailed =
+		lastFailed !== undefined && now - lastFailed < CACHE_TTL_MS;
 
-	if (cached && now - cached.timestamp >= CACHE_TTL_MS) {
-		// Keep session latency stable by serving stale memory cache while refreshing.
+	if (cached) {
+		// Stale but fetched-here content: serve it while revalidating, unless a
+		// very recent refresh already failed — then serve it as-is instead of
+		// paying a doomed fetch on every call inside an offline window.
 		setCacheEntry(key, { content: cached.content, timestamp: now });
-		void refreshInstructionsInBackground(source, cachedMetadata);
+		if (!upstreamRecentlyFailed) {
+			void refreshInstructionsInBackground(source, cachedMetadata);
+		}
 		return rewriteInstructionIdentity(cached.content, normalizedModel);
 	}
 
-	try {
-		const instructions = await fetchAndPersistInstructions(source, cachedMetadata);
-		return rewriteInstructionIdentity(instructions, normalizedModel);
-	} catch (error) {
-		const err = error as Error;
-		logError(`Failed to fetch ${key} instructions from GitHub: ${err.message}`);
-
-		if (usableDiskContent) {
-			logWarn(`Using cached ${key} instructions`);
-			setCacheEntry(key, { content: usableDiskContent, timestamp: now });
-			return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
+	// No verified content: the trusted source must be hit before any cache
+	// bytes may serve. A same-UID planter can write a plausible body plus a
+	// past `lastChecked`, but cannot make GitHub acknowledge it — the fetch
+	// below either returns real content (or a 304 whose etag binds the disk
+	// body by hash) or fails, which is the only state in which the disk cache
+	// is a fallback.
+	if (!upstreamRecentlyFailed) {
+		try {
+			const instructions = await fetchAndPersistInstructions(source, cachedMetadata);
+			return rewriteInstructionIdentity(instructions, normalizedModel);
+		} catch (error) {
+			fetchFailedAt.set(key, Date.now());
+			const err = error as Error;
+			logError(`Failed to fetch ${key} instructions from GitHub: ${err.message}`);
 		}
-
-		// Last resort is the vendored copy, not a sibling file: the bundled
-		// codex-instructions.md was dropped in v1.0.3, so reading it here threw
-		// ENOENT on every offline first run and the caller shipped the request
-		// upstream untransformed.
-		logWarn(`Falling back to bundled instructions for ${key}`);
-		setCacheEntry(key, {
-			content: BUNDLED_CODEX_INSTRUCTIONS,
-			timestamp: now,
-		});
-		return rewriteInstructionIdentity(
-			BUNDLED_CODEX_INSTRUCTIONS,
-			normalizedModel,
-		);
 	}
+
+	if (usableDiskContent) {
+		logWarn(`Using cached ${key} instructions`);
+		return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
+	}
+
+	// Last resort is the vendored copy, not a sibling file: the bundled
+	// codex-instructions.md was dropped in v1.0.3, so reading it here threw
+	// ENOENT on every offline first run and the caller shipped the request
+	// upstream untransformed.
+	logWarn(`Falling back to bundled instructions for ${key}`);
+	setCacheEntry(key, {
+		content: BUNDLED_CODEX_INSTRUCTIONS,
+		timestamp: now,
+	});
+	return rewriteInstructionIdentity(
+		BUNDLED_CODEX_INSTRUCTIONS,
+		normalizedModel,
+	);
 }
 
 async function persistInstructions(
@@ -851,10 +880,22 @@ async function fetchAndPersistInstructions(
 		headers["If-None-Match"] = cachedETag;
 	}
 
-	const response = await fetchWithTimeout(instructionsUrl, { headers });
+	let { response, text: fetchedText } = await fetchTextWithTimeout(
+		instructionsUrl,
+		{ headers },
+	);
 	if (response.status === 304) {
 		const diskContent = await readFileOrNull(cacheFile);
-		if (diskContent && isUsableInstructions(diskContent)) {
+		// A 304 says the etag is current — but the disk body is same-UID
+		// writable, so "current etag" alone cannot prove the bytes are the
+		// upstream payload. The git blob hash can: serve the disk body only
+		// when it hashes to the acknowledged etag, and otherwise refetch
+		// unconditionally for the real body.
+		if (
+			diskContent &&
+			isUsableInstructions(diskContent) &&
+			isContentBoundToEtag(diskContent, cachedETag)
+		) {
 			setCacheEntry(key, { content: diskContent, timestamp: Date.now() });
 			await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
 			await writeFileAtomic(
@@ -870,6 +911,9 @@ async function fetchAndPersistInstructions(
 			);
 			return diskContent;
 		}
+		({ response, text: fetchedText } = await fetchTextWithTimeout(
+			instructionsUrl,
+		));
 	}
 
 	if (!response.ok) {
@@ -879,7 +923,6 @@ async function fetchAndPersistInstructions(
 		});
 	}
 
-	const fetchedText = await readBodyWithTimeout(() => response.text());
 	// An empty/whitespace 200 (or an HTML error page that slipped past the
 	// status check) must never shadow the bundled prompt or be persisted —
 	// reject it here so the caller degrades to the disk cache or the vendored
@@ -909,6 +952,10 @@ function refreshInstructionsInBackground(
 	const refreshPromise = fetchAndPersistInstructions(source, cachedMetadata)
 		.then(() => undefined)
 		.catch((error) => {
+			// Mark the upstream as recently failed so the next call does not
+			// immediately schedule another doomed refresh — the stale verified
+			// entry keeps serving until the retry window passes.
+			fetchFailedAt.set(source.key, Date.now());
 			logDebug(`Background prompt refresh failed for ${source.key}`, {
 				error: String(error),
 			});

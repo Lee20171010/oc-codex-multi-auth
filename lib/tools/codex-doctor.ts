@@ -79,7 +79,6 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 		buildRoutingVisibilitySnapshot,
 		appendRoutingVisibilityText,
 		appendRoutingVisibilityUi,
-		formatDoctorSeverity,
 		formatDoctorSeverityText,
 		runtimeMetrics,
 		cachedAccountManagerRef,
@@ -461,7 +460,10 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 					lines.push(
 						formatUiItem(
 							ui,
-							`${formatDoctorSeverity(ui, finding.severity)} ${finding.summary}`,
+							// The badge shares the finding's tone, so inlining its
+							// text keeps the "badge summary" layout with the same
+							// styling — the sanitizer strips embedded SGR either way.
+							`${formatDoctorSeverityText(finding.severity)} ${finding.summary}`,
 							tone,
 						),
 					);

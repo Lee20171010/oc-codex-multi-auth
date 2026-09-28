@@ -160,17 +160,14 @@ async function loadNativeBackend(): Promise<KeychainBackend | null> {
 				return Promise.resolve();
 			},
 			delete(service, account) {
-				try {
-					const entry = new mod.Entry(service, account);
-					return Promise.resolve(entry.deletePassword());
-				} catch (err) {
-					log.warn("keychain: delete failed", {
-						service,
-						account,
-						error: (err as Error).message,
-					});
-					return Promise.resolve(false);
-				}
+				// Native errors propagate to the public wrappers below so callers
+				// can distinguish "entry absent" (false) from "delete failed"
+				// (a thrown error becomes `KeychainDeleteResult.error`). A failed
+				// delete is NOT safe to treat like an absent entry: the stale copy
+				// would silently resurrect the cleared credentials on the next
+				// keychain-first load.
+				const entry = new mod.Entry(service, account);
+				return Promise.resolve(entry.deletePassword());
 			},
 			isAvailable() {
 				// Round-trip a throwaway entry under a reserved, namespaced
@@ -296,17 +293,42 @@ export async function writeToKeychain(
 }
 
 /**
- * Remove the plugin's keychain entry for the given project key. Returns
- * true when the entry existed and was deleted, false otherwise (including
- * "not present"). Never throws.
+ * Result of a keychain delete attempt.
+ *
+ * `deleted` is true only when the backend confirmed the entry existed and
+ * was removed. When `deleted` is false, `error` distinguishes the causes:
+ *   - `error` set → the delete attempt itself failed (native error or the
+ *     backend being unavailable). A stale copy may survive and silently
+ *     resurrect the credentials on the next keychain-first load; callers
+ *     must surface this, not treat it like "nothing was there".
+ *   - `error` unset → no entry existed; nothing survived.
+ */
+export interface KeychainDeleteResult {
+	deleted: boolean;
+	error?: string;
+}
+
+/**
+ * Remove the plugin's keychain entry for the given project key. Never throws
+ * — the returned `error` field carries failure detail instead.
  */
 export async function deleteFromKeychain(
 	projectStorageKey: string | null,
-): Promise<boolean> {
+): Promise<KeychainDeleteResult> {
 	const backend = await getBackend();
-	if (!backend) return false;
+	if (!backend) return { deleted: false, error: "backend unavailable" };
 	const account = buildKeychainAccountKey(projectStorageKey);
-	return backend.delete(KEYCHAIN_SERVICE_NAME, account);
+	try {
+		return { deleted: await backend.delete(KEYCHAIN_SERVICE_NAME, account) };
+	} catch (err) {
+		const message = (err as Error).message;
+		log.warn("keychain: delete failed", {
+			service: KEYCHAIN_SERVICE_NAME,
+			account,
+			error: message,
+		});
+		return { deleted: false, error: message };
+	}
 }
 
 /**
@@ -352,19 +374,30 @@ export async function writeFlaggedToKeychain(
 
 /**
  * Remove the plugin's FLAGGED-account keychain entry for the given project
- * key. Returns true when the entry existed and was deleted, false otherwise
- * (including "not present"). Never throws.
+ * key. Never throws — semantics match {@link deleteFromKeychain}, including
+ * the `error` field that distinguishes "absent" from "delete failed".
  *
- * This completes the flagged-store parity with {@link deleteFromKeychain}:
- * `clearFlaggedAccounts` must retire the keychain copy alongside the JSON
- * file or the next keychain-first load resurrects the cleared records.
+ * This completes the flagged-store parity: `clearFlaggedAccounts` must
+ * retire the keychain copy alongside the JSON file or the next
+ * keychain-first load resurrects the cleared records.
  */
 export async function deleteFlaggedFromKeychain(
 	projectStorageKey: string | null,
-): Promise<boolean> {
+): Promise<KeychainDeleteResult> {
 	const backend = await getBackend();
-	if (!backend) return false;
-	return backend.delete(KEYCHAIN_SERVICE_NAME, buildKeychainFlaggedKey(projectStorageKey));
+	if (!backend) return { deleted: false, error: "backend unavailable" };
+	const account = buildKeychainFlaggedKey(projectStorageKey);
+	try {
+		return { deleted: await backend.delete(KEYCHAIN_SERVICE_NAME, account) };
+	} catch (err) {
+		const message = (err as Error).message;
+		log.warn("keychain: flagged delete failed", {
+			service: KEYCHAIN_SERVICE_NAME,
+			account,
+			error: message,
+		});
+		return { deleted: false, error: message };
+	}
 }
 
 /**

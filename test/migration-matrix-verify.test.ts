@@ -299,7 +299,7 @@ describe("NEW CELL: keychain migrate idempotency + rollback race", () => {
 });
 
 describe("NEW CELL: flagged store under keychain opt-out", () => {
-	it("flagged migrated to keychain; opt-out without rollback reads EMPTY flagged pool", async () => {
+	it("flagged migrated to keychain; opt-out without rollback adopts the flagged marker", async () => {
 		const d = await dirOf("kf");
 		setStoragePathDirect(join(d, "accounts.json"));
 		setOptIn(false);
@@ -310,9 +310,10 @@ describe("NEW CELL: flagged store under keychain opt-out", () => {
 		await saveFlaggedAccounts({ version: 1, accounts: [{ refreshToken: "rt-fl", addedAt: 1, lastUsed: 1, flaggedAt: 1 }] });
 		setOptIn(false);
 		const flagged = await loadFlaggedAccounts();
-		// [KNOWN-ISSUE] same gap as the main store: the marker is not
-		// auto-restored on opt-out, so the flagged pool reads EMPTY.
-		expect(flagged.accounts.length).toBe(0);
+		// FIXED: same as the main store — the flagged .migrated-to-keychain
+		// marker is a load fallback, so opt-out no longer reads EMPTY.
+		expect(flagged.accounts.length).toBe(1);
+		expect(flagged.accounts[0]?.refreshToken).toBe("rt-fl");
 	});
 });
 

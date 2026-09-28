@@ -169,6 +169,15 @@ interface RotationCommitOutcome {
 	readonly rotatedAt?: number;
 	/** Resolved seat identity used for the same-grant sibling filter. */
 	readonly memberId?: string;
+	/**
+	 * True when the target record already carried a NEWER refresh token than
+	 * the one we exchanged — a serial rotation committed by another process
+	 * while our provider call was in flight (i.e. the refresh lease was lost
+	 * mid-exchange). Nothing was written in that case; `adoptedRefreshToken`
+	 * is the live token now on disk.
+	 */
+	readonly adopted?: boolean;
+	readonly adoptedRefreshToken?: string;
 }
 
 type TransactionRunner<T extends StorageShape> = <R>(
@@ -415,13 +424,20 @@ async function readPendingRotationJournal(
  * lease — the same lease that serialized the exchange — so no other process
  * can be mid-exchange on the recorded token while we heal it. Any record in
  * either store still holding the consumed token is stamped with the rotated
- * replacement, then the journal is removed. A failure leaves the journal for
- * the next lease holder rather than letting one bad store block recovery.
+ * replacement, then the journal is removed.
+ *
+ * @returns `true` when no journal remains (absent or fully replayed);
+ *   `false` when a journal exists but could not be fully applied. The caller
+ *   MUST NOT proceed to a fresh exchange in the `false` case: the journal is
+ *   the only durable record of a consumed token's replacement, and the new
+ *   exchange's journal write is a single slot — it would overwrite and lose
+ *   the earlier rotation while the consumed records it was healing still
+ *   point at a dead token.
  */
-async function recoverPendingRotation(storagePath: string): Promise<void> {
+async function recoverPendingRotation(storagePath: string): Promise<boolean> {
 	const journalPath = pendingRotationJournalPath(storagePath);
 	const journal = await readPendingRotationJournal(journalPath);
-	if (!journal) return;
+	if (!journal) return true;
 
 	for (const store of ["accounts", "flagged"] as const) {
 		try {
@@ -442,10 +458,11 @@ async function recoverPendingRotation(storagePath: string): Promise<void> {
 					error instanceof Error ? error.message : String(error)
 				}`,
 			);
-			return;
+			return false;
 		}
 	}
 	await deletePendingRotationJournal(journalPath);
+	return true;
 }
 
 /**
@@ -467,6 +484,28 @@ function commitRotation(
 	const target = current.accounts[index];
 	if (!target) {
 		throw new Error("Account was removed before its token could refresh");
+	}
+
+	if (
+		target.refreshToken !== exchangedToken &&
+		target.refreshToken !== refreshResult.refresh
+	) {
+		// The persisted record already carries a NEWER refresh token than the
+		// one we just exchanged: another lease holder rotated serially while
+		// our provider call was in flight (the refresh lease was lost
+		// mid-exchange). Writing `refreshResult.refresh` now would clobber a
+		// live token with one the provider has already consumed — the exact
+		// dead-account outcome the rotation journal exists to prevent. Adopt
+		// the persisted token instead; the caller rewrites the journal to it so
+		// records still holding `exchangedToken` get healed with a LIVE token.
+		return {
+			adopted: true,
+			adoptedRefreshToken: target.refreshToken,
+			memberId:
+				identity.accountUserId?.trim() || target.accountUserId?.trim() ||
+				undefined,
+			rotatedAt: target.tokenRotatedAt,
+		};
 	}
 
 	const rotated = refreshResult.refresh !== exchangedToken;
@@ -640,7 +679,19 @@ async function coordinateRefresh<T extends StorageShape>(
 		// before committing (or the commit may have missed a record that moved
 		// stores). The journal, if any, is replayed first so this refresh never
 		// spends a token that is already consumed.
-		await recoverPendingRotation(storagePath);
+		const journalClear = await recoverPendingRotation(storagePath);
+		if (!journalClear) {
+			// A pending journal could not be fully replayed (one of the stores
+			// is unreachable). Its rotated token is the only live credential
+			// for the records it is healing — proceeding to our own exchange
+			// would overwrite the single journal slot with a NEW pending entry
+			// and strand that rotation permanently. Surface a retryable
+			// contention error instead: the next lease holder retries the
+			// replay before spending anything.
+			throw new StorageTransactionContentionError(
+				`${storagePath} (pending rotation journal replay incomplete)`,
+			);
+		}
 
 		// Probed INSIDE the lease, not before it: whoever held the lease may have
 		// just committed a rotation, and reading first would race with them. The
@@ -679,6 +730,25 @@ async function coordinateRefresh<T extends StorageShape>(
 			});
 		}
 
+		// Post-exchange lease re-verification. The provider round trip can
+		// outlast the stale window — especially on a starved event loop — and
+		// let another holder take the lease and complete its own exchange+commit
+		// while ours was in flight. A loss is logged, NOT raised: aborting now
+		// would strand the rotated token, while the durable commit remains
+		// safe — the commit-time adopt guard refuses to overwrite a newer
+		// persisted token and the storage transaction serializes the write
+		// itself. The pre-exchange check remains the gate on SPENDING the
+		// token; this one only shapes the commit's view of the world.
+		try {
+			lease.assertValid();
+		} catch (error) {
+			logWarn(
+				`Refresh lease was lost while the provider exchange was in flight; the journal is written and the commit adopts rather than clobbers a newer persisted token: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+
 		// Contention is the one failure worth retrying here: a real I/O error
 		// (a full disk, a read-only volume) will not resolve itself, and
 		// swallowing it behind retries would just delay reporting it.
@@ -695,7 +765,11 @@ async function coordinateRefresh<T extends StorageShape>(
 							refreshResult,
 							persistAccessToken,
 						);
-						await persist(current);
+						// An adopted outcome mutated nothing — persisting would
+						// rewrite identical bytes.
+						if (!outcome.adopted) {
+							await persist(current);
+						}
 						return outcome;
 					},
 				);
@@ -752,6 +826,34 @@ async function coordinateRefresh<T extends StorageShape>(
 				}); salvaged the rotated refresh token onto ${healed} record(s) and left the journal for follow-up healing`,
 			);
 			return { ...refreshResult, adopted: false };
+		}
+
+		if (commit.adopted) {
+			// A serial rotation committed while our exchange was in flight (the
+			// lease was lost and another holder rotated again). Our replacement
+			// token is now consumed as well, so the journal must point at the
+			// ADOPTED token — the only live one — or replay would stamp a dead
+			// credential onto records still holding `exchangedToken`. Leave the
+			// journal in place: the next lease holder replays it and finishes
+			// healing the stragglers.
+			if (rotated && commit.adoptedRefreshToken) {
+				await writePendingRotationJournal(journalPath, {
+					version: 1,
+					consumedRefreshToken: exchangedToken,
+					rotatedRefreshToken: commit.adoptedRefreshToken,
+					memberId: commit.memberId ?? probed.memberId,
+					recordedAt: Date.now(),
+				});
+				logWarn(
+					"A serial rotation committed while this refresh was in flight; adopted the persisted token and retargeted the pending-rotation journal at it",
+				);
+			}
+			return {
+				...refreshResult,
+				refresh: commit.adoptedRefreshToken ?? refreshResult.refresh,
+				adopted: true,
+				rotatedAt: commit.rotatedAt,
+			};
 		}
 
 		// The sibling store may still carry the consumed token for this same

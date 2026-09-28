@@ -10,9 +10,9 @@ import { logWarn } from "../logger.js";
 import { getWorkspaceIdentityKey } from "../storage/identity.js";
 import {
 	rethrowIfRetryable,
-	stripControlCharacters,
 	withToolErrorEnvelope,
 } from "./output.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
@@ -73,13 +73,12 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 			if (!account) return `Account ${resolvedIndex} not found.`;
 			const identityKey = getWorkspaceIdentityKey(account);
 
-			// Notes carry free-form user text into tool output and logs — strip
-			// control characters (incl. terminal escape introducers) so the value
-			// cannot corrupt the rendered tool result, then fold whitespace to a
-			// single line like codex-label does.
-			const normalizedNote = stripControlCharacters(note ?? "")
-				.replace(/\s+/g, " ")
-				.trim();
+			// Notes persist and are later rendered — strip the full escape
+			// sequence (not just the ESC byte) at write time so a note cannot
+			// carry concealment or cursor movement. Cap at 241 so the
+			// over-length check below still fires.
+			const normalizedNote =
+				sanitizeDisplayText((note ?? "").trim(), { maxLength: 241 }) ?? "";
 			if (normalizedNote.length > 240) {
 				return "Note is too long (max 240 characters).";
 			}

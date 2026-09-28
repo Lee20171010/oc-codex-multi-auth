@@ -89,9 +89,12 @@ describe("codex-note", () => {
 		)) as string;
 
 		expect(output).toContain("Saved note for Account 1");
-		expect(output).toContain("check every monday[31m");
+		// The whole escape sequence is stripped — stripping only the ESC byte
+		// would persist "[31m" as literal text in the stored note.
+		expect(output).toContain("check every monday");
+		expect(output).not.toContain("[31m");
 		expect(output).not.toMatch(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/);
-		expect(storage.accounts[0]?.accountNote).toBe("check every monday[31m");
+		expect(storage.accounts[0]?.accountNote).toBe("check every monday");
 	});
 
 	it("clears the note on an empty string", async () => {

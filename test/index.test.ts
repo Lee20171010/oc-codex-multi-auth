@@ -2365,34 +2365,41 @@ describe("OpenAIOAuthPlugin", () => {
 					expiresAt: Date.now() - 1000,
 				},
 			];
-			vi.mocked(withAccountStorageTransaction).mockImplementationOnce(
-				async (
-					handler: (
-						current: typeof mockStorage | null,
-						persist: (storage: typeof mockStorage) => Promise<void>,
-					) => Promise<boolean>,
-				) =>
-					await handler(
-						{
-							version: 3,
-							accounts: [
-								{
-									refreshToken: "different-refresh",
-									accountId: "acc-1",
-									email: "solo@test.com",
-								},
-							],
-							activeIndex: 0,
-							activeIndexByFamily: {},
-						},
-						async (nextStorage) => {
-							mockStorage.version = nextStorage.version;
-							mockStorage.accounts = nextStorage.accounts.map((account) => structuredClone(account));
-							mockStorage.activeIndex = nextStorage.activeIndex;
-							mockStorage.activeIndexByFamily = { ...nextStorage.activeIndexByFamily };
-						},
-					),
-			);
+			// The coordinator runs TWO transactions — probe, then commit. Both must
+			// see the same drifted snapshot: the commit's adopt guard treats a
+			// disk token that matches neither the exchanged nor the rotated value
+			// as a serial rotation committed by another holder and declines to
+			// clobber it. Serving the drifted world to both calls is what makes
+			// the simulated exchange→commit coherent.
+			const driftedTransaction = async (
+				handler: (
+					current: typeof mockStorage | null,
+					persist: (storage: typeof mockStorage) => Promise<void>,
+				) => Promise<boolean>,
+			) =>
+				await handler(
+					{
+						version: 3,
+						accounts: [
+							{
+								refreshToken: "different-refresh",
+								accountId: "acc-1",
+								email: "solo@test.com",
+							},
+						],
+						activeIndex: 0,
+						activeIndexByFamily: {},
+					},
+					async (nextStorage) => {
+						mockStorage.version = nextStorage.version;
+						mockStorage.accounts = nextStorage.accounts.map((account) => structuredClone(account));
+						mockStorage.activeIndex = nextStorage.activeIndex;
+						mockStorage.activeIndexByFamily = { ...nextStorage.activeIndexByFamily };
+					},
+				);
+			vi.mocked(withAccountStorageTransaction)
+				.mockImplementationOnce(driftedTransaction)
+				.mockImplementationOnce(driftedTransaction);
 			globalThis.fetch = vi.fn().mockImplementation(async () =>
 				new Response(
 					JSON.stringify({

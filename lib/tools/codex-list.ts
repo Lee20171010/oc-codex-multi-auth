@@ -23,7 +23,8 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
-import { stripControlCharacters, withToolErrorEnvelope } from "./output.js";
+import { withToolErrorEnvelope } from "./output.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexListTool(ctx: ToolContext): ToolDefinition {
@@ -69,9 +70,9 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 			const outputFormat = normalizeToolOutputFormat(format);
 			const includeSensitiveOutput = includeSensitive === true;
 			// The tag is echoed into `filterTag` and the "No accounts found"
-			// message — strip control characters so it cannot inject escapes.
+			// message — strip whole escape sequences, not just control bytes.
 			const normalizedTag = tag
-				? stripControlCharacters(tag).trim().toLowerCase()
+				? (sanitizeDisplayText(tag.trim().toLowerCase()) ?? "")
 				: "";
 			const commandHints = [
 				"opencode auth login",
@@ -254,7 +255,12 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 					if (plan) badges.push(formatUiBadge(ui, plan, "muted"));
 
 					lines.push(
-						formatUiItem(ui, `${label} ${badges.join(" ")}`.trim()),
+						formatUiItem(
+							ui,
+							label,
+							"normal",
+							badges.length > 0 ? ` ${badges.join(" ")}` : "",
+						),
 					);
 					if (rateLimit) {
 						lines.push(

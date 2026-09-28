@@ -160,16 +160,21 @@ describe("storage I/O: artifact retention", () => {
 		expect(existsSync(`${storagePath}.transaction.lock`)).toBe(false);
 	});
 
-	it("clearAccounts preserves the keychain marker files' sibling backups dir", async () => {
-		// Clearing must never sweep unrelated artifacts — a marker is the only
-		// rollback path for a keychain migration.
+	it("clearAccounts retires keychain migration markers but leaves unrelated artifacts alone", async () => {
+		// A `.migrated-to-keychain` marker holds a plaintext copy of the same
+		// token set — a "delete all credentials" request that leaves it behind
+		// has not actually cleared the credentials. Other artifact families
+		// (snapshots, pre-import backups) must still be preserved.
 		await saveAccounts(makeStorage("acct-x"));
 		const marker = `${storagePath}.migrated-to-keychain.2024-01-01T00-00-00-000Z`;
 		await fs.writeFile(marker, "{}", "utf-8");
+		const unrelated = `${storagePath}.unrelated-artifact`;
+		await fs.writeFile(unrelated, "{}", "utf-8");
 
 		await clearAccounts();
 
 		expect(existsSync(storagePath)).toBe(false);
-		expect(existsSync(marker)).toBe(true);
+		expect(existsSync(marker)).toBe(false);
+		expect(existsSync(unrelated)).toBe(true);
 	});
 });

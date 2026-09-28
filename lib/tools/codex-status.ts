@@ -259,7 +259,12 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 					if (plan) badges.push(formatUiBadge(ui, plan, "muted"));
 
 					lines.push(
-						formatUiItem(ui, `${label} ${badges.join(" ")}`.trim()),
+						formatUiItem(
+							ui,
+							label,
+							"normal",
+							badges.length > 0 ? ` ${badges.join(" ")}` : "",
+						),
 					);
 					lines.push(
 						`  ${formatUiKeyValue(ui, "rate limit", rateLimit, rateLimit === "none" ? "muted" : "warning")}`,

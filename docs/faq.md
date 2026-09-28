@@ -44,10 +44,11 @@ Manage them with `codex-list`, `codex-switch`, `codex-warm`, and `codex-pool`.
 ## Where is my data stored?
 
 Locally, under `~/.opencode` — account JSON, plugin config, quota caches, and
-optional request logs. Nothing leaves the machine except OAuth and inference
-traffic to OpenAI. To store accounts in the OS keychain instead, set
-`CODEX_KEYCHAIN=1`. Exact paths and deletion steps:
-[Privacy](privacy.md).
+optional request logs. Outbound traffic goes to OpenAI (OAuth and inference),
+plus GitHub for prompt-template sync and the npm registry for the daily update
+check (both documented in [Privacy](privacy.md)). To store accounts in the OS
+keychain instead, set `CODEX_KEYCHAIN=1`. Exact paths and deletion steps are
+on the same page.
 
 ## What do the quota percentages mean?
 

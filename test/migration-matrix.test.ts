@@ -467,7 +467,7 @@ describe("CELL3: CODEX_KEYCHAIN flips", () => {
 		expect(markerMode).toBe(0o600);
 	});
 
-	it("3b. opt-out WITHOUT rollback -> pool reads EMPTY (marker not auto-restored)", async () => {
+	it("3b. opt-out WITHOUT rollback -> pool adopts the .migrated-to-keychain marker", async () => {
 		const d = await dirOf("kc2");
 		const f = join(d, "accounts.json");
 		setStoragePathDirect(f);
@@ -480,9 +480,12 @@ describe("CELL3: CODEX_KEYCHAIN flips", () => {
 
 		setOptIn(false); // toggle off, no rollback command
 		const loaded = await loadAccounts();
-		// [KNOWN-ISSUE] the .migrated-to-keychain file is not auto-restored on
-		// opt-out: the pool reads EMPTY until `codex-keychain rollback` runs.
-		expect(loaded).toBeNull();
+		// FIXED: a same-UID-interrupted or plain opt-out migration no longer
+		// reads an empty pool — the marker preserved beside the store is a
+		// load fallback, so the last JSON state still serves. The newer
+		// keychain-only blob is untouched and re-reads on the next opt-in.
+		expect(loaded).not.toBeNull();
+		expect(loaded?.accounts.map((a) => a.refreshToken)).toEqual(["rt-A", "rt-B"]);
 	});
 
 	it("3c. codex-keychain rollback restores main+flagged, deletes keychain entries", async () => {

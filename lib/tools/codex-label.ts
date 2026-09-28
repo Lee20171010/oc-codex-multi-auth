@@ -7,6 +7,7 @@ import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
 import { AccountManager } from "../accounts.js";
 import { logWarn } from "../logger.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import {
 	formatUiHeader,
 	formatUiItem,
@@ -14,7 +15,6 @@ import {
 } from "../ui/format.js";
 import {
 	rethrowIfRetryable,
-	stripControlCharacters,
 	withToolErrorEnvelope,
 } from "./output.js";
 import type { ToolContext } from "./index.js";
@@ -106,11 +106,14 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 				resolvedIndex = selectedIndex + 1;
 			}
 
-			// Strip control characters before whitespace folding so a label
-			// cannot smuggle terminal escape sequences into tool output or logs.
-			const normalizedLabel = stripControlCharacters(label ?? "")
-				.replace(/\s+/g, " ")
-				.trim();
+			// The label is persisted and later rendered into terminals by
+			// several paths — strip the full escape sequence (not just the
+			// ESC byte, which would leave "[8m" literal text) at write time
+			// so a label cannot store concealment or cursor movement at all.
+			// Cap at 61, not 60: the length check below must still reject
+			// over-limit labels rather than seeing a pre-truncated value.
+			const normalizedLabel =
+				sanitizeDisplayText((label ?? "").trim(), { maxLength: 61 }) ?? "";
 			if (normalizedLabel.length > 60) {
 				if (ui.v2Enabled) {
 					return [

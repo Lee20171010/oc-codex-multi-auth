@@ -15,9 +15,14 @@ import path from "node:path";
 const FAKE_HOME = path.resolve("/fake-storage-paths-home");
 const FAKE_TMPDIR = path.resolve("/fake-storage-paths-tmp");
 
-vi.mock("node:fs", () => ({
-	existsSync: vi.fn(),
-}));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		existsSync: vi.fn(),
+		realpathSync: vi.fn(actual.realpathSync),
+	};
+});
 
 vi.mock("node:os", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:os")>()),
@@ -25,7 +30,7 @@ vi.mock("node:os", async (importOriginal) => ({
 	tmpdir: () => FAKE_TMPDIR,
 }));
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import {
 	getConfigDir,
 	getProjectConfigDir,
@@ -84,6 +89,57 @@ describe("Storage Paths Module", () => {
 			const result = getProjectGlobalConfigDir(projectPath);
 			expect(result).toContain(path.join(homedir(), ".opencode", "projects"));
 			expect(result).toContain("myproject-");
+		});
+
+		it("adopts a lexical-keyed pool dir when the canonical-keyed one does not exist", async () => {
+			// A project reached through a symlink: realpath collapses
+			// /link/repo onto /real/repo, so the canonical storage key differs
+			// from the lexical key a pre-canonicalization pool was stored under.
+			vi.mocked(realpathSync).mockImplementation((p) =>
+				String(p).includes("/link/") || String(p).endsWith("/link")
+					? String(p).replace("/link/", "/real/")
+					: String(p),
+			);
+			const { createHash } = await import("node:crypto");
+			const lexical = path.resolve("/link/repo").replace(/\\/g, "/");
+			const legacyKey = `repo-${createHash("sha256").update(lexical).digest("hex").slice(0, 12)}`;
+			const projectsDir = path.join(FAKE_HOME, ".opencode", "projects");
+			const legacyDir = path.join(projectsDir, legacyKey);
+			// Only the lexical-keyed directory exists on disk.
+			mockedExistsSync.mockImplementation((p) => p === legacyDir);
+
+			const result = getProjectGlobalConfigDir("/link/repo");
+			expect(result).toBe(legacyDir);
+			// The canonical key really is different (otherwise the test is a no-op).
+			expect(getProjectStorageKey("/link/repo")).not.toBe(legacyKey);
+		});
+
+		it("prefers the canonical-keyed dir when both exist", () => {
+			vi.mocked(realpathSync).mockImplementation((p) =>
+				String(p).includes("/link/")
+					? String(p).replace("/link/", "/real/")
+					: String(p),
+			);
+			mockedExistsSync.mockReturnValue(true);
+			const canonicalKey = getProjectStorageKey("/link/repo");
+			const result = getProjectGlobalConfigDir("/link/repo");
+			expect(result).toBe(
+				path.join(FAKE_HOME, ".opencode", "projects", canonicalKey),
+			);
+		});
+
+		it("returns the canonical-keyed dir for a fresh project when nothing exists", () => {
+			mockedExistsSync.mockReturnValue(false);
+			const projectPath = "/home/user/brand-new";
+			const result = getProjectGlobalConfigDir(projectPath);
+			expect(result).toBe(
+				path.join(
+					FAKE_HOME,
+					".opencode",
+					"projects",
+					getProjectStorageKey(projectPath),
+				),
+			);
 		});
 	});
 
@@ -197,6 +253,22 @@ describe("Storage Paths Module", () => {
 			const parent = path.dirname(home);
 			const outsideLookalike = path.join(parent, `${path.basename(home)}-outside`, "file.json");
 			expect(() => resolvePath(outsideLookalike)).toThrow("Access denied");
+		});
+
+		it("rejects nested targets whose not-yet-existing parent sits under a symlinked escape", () => {
+			// `~/link -> /escape-root`; the export target `~/link/newdir/out.json`
+			// exists nowhere, so realpath on it AND on its immediate parent both
+			// fail. The containment check must still resolve the symlinked
+			// ancestor, or the lexical path under home sneaks the write out.
+			const linkPath = path.join(FAKE_HOME, "link");
+			const mockedRealpath = vi.mocked(realpathSync);
+			mockedRealpath.mockImplementation((candidate) => {
+				if (String(candidate) === linkPath) return "/escape-root";
+				throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+			});
+			expect(() =>
+				resolvePath(path.join(linkPath, "newdir", "out.json")),
+			).toThrow("Access denied");
 		});
 
 		it("rejects lookalike prefix paths outside current working directory", () => {

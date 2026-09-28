@@ -15,9 +15,9 @@ import {
 } from "../ui/format.js";
 import {
 	rethrowIfRetryable,
-	stripControlCharacters,
 	withToolErrorEnvelope,
 } from "./output.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
@@ -96,10 +96,11 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 
 			const account = storage.accounts[targetIndex];
 			if (!account) return `Account ${resolvedIndex} not found.`;
-			// Tags are echoed back into tool output — drop control characters so a
-			// crafted tag cannot inject escape sequences (or empty-remainder tags).
+			// Tags are echoed back into tool output — strip whole escape
+			// sequences (not just control bytes, which would leave "[8m"
+			// literal text) so a crafted tag cannot persist concealment.
 			const normalizedTags = normalizeAccountTags(tags ?? "")
-				.map((entry) => stripControlCharacters(entry).trim())
+				.map((entry) => sanitizeDisplayText(entry.trim()) ?? "")
 				.filter((entry) => entry.length > 0);
 			const identityKey = getWorkspaceIdentityKey(account);
 			let previousTags: string[] = [];
