@@ -54,6 +54,51 @@ export function setupV2Tui(context: Plugin.Context) {
 						await context.ui.dialog.alert({ title: "Codex quota", message: details });
 					},
 				}, {
+					id: "codex.logout", title: "Codex logout", group: "Codex", palette: true,
+					slash: { name: "codex-logout" },
+					description: "Remove the OpenAI OAuth connection stored in OpenCode",
+					async run() {
+						const integration = (await context.client.integration.list().catch(() => undefined))?.data
+							.find((item) => item.id === "openai");
+						const credentials = (integration?.connections ?? []).flatMap((connection) =>
+							connection.type === "credential" && connection.method === "oauth" ? [connection] : [],
+						);
+						if (credentials.length === 0) {
+							await context.ui.dialog.alert({
+								title: "Codex logout",
+								message:
+									"No OpenAI OAuth connection is stored in OpenCode. The Codex account pool is managed separately — see /codex-accounts.",
+							});
+							return;
+						}
+						const confirmed = await context.ui.dialog.confirm({
+							title: "Codex logout",
+							message:
+								credentials.length === 1
+									? `Remove the OpenAI OAuth connection (${credentials[0]?.label || credentials[0]?.id})? The Codex account pool is kept — reconnect any account with opencode auth login.`
+									: `Remove ${credentials.length} OpenAI OAuth connections (${credentials.map((connection) => connection.label || connection.id).join(", ")})? The Codex account pool is kept — reconnect any account with opencode auth login.`,
+							label: { confirm: "Log out" },
+						});
+						if (confirmed !== true) return;
+						let removed = 0;
+						for (const connection of credentials) {
+							try {
+								await context.client.credential.remove({ credentialID: connection.id });
+								removed += 1;
+							} catch {
+								// Counted below so a partial failure surfaces in the result alert.
+							}
+						}
+						await refresh();
+						await context.ui.dialog.alert({
+							title: "Codex logout",
+							message:
+								removed === credentials.length
+									? "Signed out of OpenAI. The Codex account pool is unchanged — remove pool accounts from /codex-accounts if needed."
+									: `Removed ${removed} of ${credentials.length} OpenAI OAuth connection(s). Check opencode auth list and retry the rest.`,
+						});
+					},
+				}, {
 					id: "codex.accounts", title: "Codex accounts", group: "Codex", palette: true,
 					slash: { name: "codex-accounts" },
 					async run() {

@@ -222,6 +222,7 @@ import {
 	type BeginnerRuntimeSnapshot,
 } from "./lib/ui/beginner.js";
 import {
+	ensureInstructionIdentity,
 	getModelFamily,
 	getCodexInstructions,
 	MODEL_FAMILIES,
@@ -392,7 +393,13 @@ function resolveOpenAIBaseURL(): string | undefined {
  * ```
  */
  
-export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => createPluginRuntime({ client });
+// `directory` (falling back to `worktree`) binds per-project account storage,
+// so it must come from the host, not the process: under `opencode serve` and
+// other multi-project daemons the process cwd is the launch directory and
+// every project would otherwise share one pool. When the host supplies
+// neither, `createPluginRuntime` still defaults to `process.cwd()`.
+export const OpenAIOAuthPlugin: Plugin = async ({ client, directory, worktree }: PluginInput) =>
+	createPluginRuntime({ client, directory: directory ?? worktree });
 
 /**
  * Shared request/account runtime; V2 has no V1 client or host auth.json.
@@ -425,6 +432,12 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 	const UPSTREAM_REPROBE_MIN_WAIT_MS = 60_000;
 	const UPSTREAM_REPROBE_FIRST_DELAY_MS = 60_000;
 	const UPSTREAM_REPROBE_MAX_DELAY_MS = 15 * 60_000;
+	// `retryAllAccountsMaxWaitMs: 0` lets an all-accounts rate-limit wait run as
+	// long as the backend asks — and quota blocks can stretch for days, which an
+	// interactive request must not sit through. `0` therefore means "bounded by
+	// this ceiling" unless the operator restores truly unbounded waits with
+	// CODEX_RETRY_ALL_UNBOUNDED=1.
+	const INTERACTIVE_ALL_LIMITED_CEILING_MS = 10 * 60_000;
 
 	const runtimeMetrics: RuntimeMetrics = {
 		startedAt: Date.now(),
@@ -2464,6 +2477,15 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							const rateLimitToastDebounceMs = getRateLimitToastDebounceMs(pluginConfig);
 							const retryAllAccountsRateLimited = beginnerSafeMode ? false : getRetryAllAccountsRateLimited(pluginConfig);
 							const retryAllAccountsMaxWaitMs = getRetryAllAccountsMaxWaitMs(pluginConfig);
+							// See INTERACTIVE_ALL_LIMITED_CEILING_MS: configured `0`
+							// (wait as long as the backend asks) is only honored when the
+							// operator opts in with CODEX_RETRY_ALL_UNBOUNDED=1; any
+							// positive configured bound applies unchanged.
+							const effectiveRetryAllMaxWaitMs =
+								retryAllAccountsMaxWaitMs > 0 ||
+								process.env.CODEX_RETRY_ALL_UNBOUNDED === "1"
+									? retryAllAccountsMaxWaitMs
+									: INTERACTIVE_ALL_LIMITED_CEILING_MS;
 							const retryAllAccountsMaxRetries = beginnerSafeMode
 								? Math.min(1, getRetryAllAccountsMaxRetries(pluginConfig))
 								: getRetryAllAccountsMaxRetries(pluginConfig);
@@ -2768,7 +2790,15 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								fallbackFrom = previousModel;
 								fallbackTo = model;
 								fallbackReason = reason;
-								const fallbackInstructions = await getCodexInstructions(model);
+								// Mirror the live transform path: the instructions handed
+								// to the body always carry the backend identity line for the
+								// serving model. `getCodexInstructions` only rewrites an
+								// existing Codex identity line, so a fallback-served prompt
+								// without one would silently drop it.
+								const fallbackInstructions = ensureInstructionIdentity(
+									await getCodexInstructions(model),
+									model,
+								);
 
 								if (transformedBody && typeof transformedBody === "object") {
 									transformedBody = {
@@ -4049,8 +4079,8 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 									retryAllAccountsRateLimited &&
 									count > 0 &&
 									waitMs > 0 &&
-									(retryAllAccountsMaxWaitMs === 0 ||
-										waitMs <= retryAllAccountsMaxWaitMs) &&
+									(effectiveRetryAllMaxWaitMs === 0 ||
+										waitMs <= effectiveRetryAllMaxWaitMs) &&
 									allRateLimitedRetries < retryAllAccountsMaxRetries &&
 									consumeRetryBudget(
 										"rateLimitGlobal",
@@ -5151,6 +5181,12 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 	};
 };
 
+// Backward-compat alias for the pre-rename export. Both names resolve to the
+// same function, but they are still two exports: hosts that invoke every
+// exported plugin-shaped value call it twice and boot two runtimes — two
+// account managers and two storage watchers racing on one accounts file.
+// Import only `OpenAIOAuthPlugin` (or the default export's `server` field,
+// which is how `PluginModule` advertises the single entry point), never both.
 export const OpenAIAuthPlugin = OpenAIOAuthPlugin;
 
 export default {

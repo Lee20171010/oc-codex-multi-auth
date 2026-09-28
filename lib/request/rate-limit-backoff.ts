@@ -18,6 +18,24 @@ const RATE_LIMIT_DEDUP_WINDOW_MS = 2000;
 const RATE_LIMIT_STATE_RESET_MS = 120_000;
 const MAX_BACKOFF_MS = 60_000;
 
+// Bounded jitter: the computed exponential delay is scaled by
+// [0.75, 1.25] so a fleet of accounts throttled together does not retry in
+// lock-step on the next window edge. `() => 0.5` lands exactly on factor
+// 1.0, which is what deterministic tests and the reason-adjusted inner call
+// inject to keep the single jitter application on the outer layer.
+const BACKOFF_JITTER_MIN_FACTOR = 0.75;
+const BACKOFF_JITTER_SPREAD = 0.5;
+const NO_JITTER = () => 0.5;
+
+function applyBackoffJitter(delayMs: number, random: () => number): number {
+	// Clamp the roll defensively: a broken injected RNG must not grow the
+	// factor past the documented bound (or drive it negative).
+	const roll = Math.min(Math.max(random(), 0), 1);
+	return Math.floor(
+		delayMs * (BACKOFF_JITTER_MIN_FACTOR + roll * BACKOFF_JITTER_SPREAD),
+	);
+}
+
 export const RATE_LIMIT_SHORT_RETRY_THRESHOLD_MS = 5000;
 
 interface RateLimitState {
@@ -44,11 +62,20 @@ function pruneStaleRateLimitState(): void {
 
 /**
  * Compute rate-limit backoff for an account+quota key.
+ *
+ * The exponential component is jittered (±25%) to decorrelate retries; the
+ * server-provided `serverRetryAfterMs` stays an absolute floor applied AFTER
+ * jitter, so honoring it can never be undercut by a low roll. The 60s cap is
+ * enforced after jitter as well.
+ *
+ * @param random - RNG driving the jitter factor; inject `() => 0.5` for the
+ *   deterministic pre-jitter values.
  */
 export function getRateLimitBackoff(
 	accountIndex: number,
 	quotaKey: string,
 	serverRetryAfterMs: number | null | undefined,
+	random: () => number = Math.random,
 ): RateLimitBackoffResult {
 	pruneStaleRateLimitState();
 	const now = Date.now();
@@ -58,13 +85,16 @@ export function getRateLimitBackoff(
 	const baseDelay = normalizeDelayMs(serverRetryAfterMs, 1000);
 
 	if (previous && now - previous.lastAt < RATE_LIMIT_DEDUP_WINDOW_MS) {
-		const backoffDelay = Math.min(
-			baseDelay * Math.pow(2, previous.consecutive429 - 1),
-			MAX_BACKOFF_MS,
+		const backoffDelay = applyBackoffJitter(
+			Math.min(
+				baseDelay * Math.pow(2, previous.consecutive429 - 1),
+				MAX_BACKOFF_MS,
+			),
+			random,
 		);
 		return {
 			attempt: previous.consecutive429,
-			delayMs: Math.max(baseDelay, backoffDelay),
+			delayMs: Math.max(baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
 			isDuplicate: true,
 		};
 	}
@@ -80,10 +110,13 @@ export function getRateLimitBackoff(
 		quotaKey,
 	});
 
-	const backoffDelay = Math.min(baseDelay * Math.pow(2, attempt - 1), MAX_BACKOFF_MS);
+	const backoffDelay = applyBackoffJitter(
+		Math.min(baseDelay * Math.pow(2, attempt - 1), MAX_BACKOFF_MS),
+		random,
+	);
 	return {
 		attempt,
-		delayMs: Math.max(baseDelay, backoffDelay),
+		delayMs: Math.max(baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
 		isDuplicate: false,
 	};
 }
@@ -131,10 +164,14 @@ export function calculateBackoffMs(
 	baseDelayMs: number,
 	attempt: number,
 	reason: RateLimitReason = "unknown",
+	random: () => number = Math.random,
 ): number {
 	const multiplier = BACKOFF_MULTIPLIERS[reason] ?? 1.0;
 	const exponentialDelay = baseDelayMs * Math.pow(2, attempt - 1);
-	return Math.min(Math.floor(exponentialDelay * multiplier), MAX_BACKOFF_MS);
+	return Math.min(
+		applyBackoffJitter(exponentialDelay * multiplier, random),
+		MAX_BACKOFF_MS,
+	);
 }
 
 export function getRateLimitBackoffWithReason(
@@ -142,9 +179,22 @@ export function getRateLimitBackoffWithReason(
 	quotaKey: string,
 	serverRetryAfterMs: number | null | undefined,
 	reason: RateLimitReason = "unknown",
+	random: () => number = Math.random,
 ): RateLimitBackoffResult {
-	const result = getRateLimitBackoff(accountIndex, quotaKey, serverRetryAfterMs);
-	const adjustedDelay = calculateBackoffMs(result.delayMs, result.attempt, reason);
+	// The inner call resolves dedup/state and the server floor; jitter lands
+	// exactly once, inside calculateBackoffMs on the reason-adjusted value.
+	const result = getRateLimitBackoff(
+		accountIndex,
+		quotaKey,
+		serverRetryAfterMs,
+		NO_JITTER,
+	);
+	const adjustedDelay = calculateBackoffMs(
+		result.delayMs,
+		result.attempt,
+		reason,
+		random,
+	);
 	return {
 		...result,
 		delayMs: adjustedDelay,
