@@ -1,9 +1,10 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { PromptError } from "../errors.js";
+import { CodexNetworkError, CodexTimeoutError, PromptError } from "../errors.js";
 import type { CacheMetadata, GitHubRelease } from "../types.js";
 import { logWarn, logError, logDebug } from "../logger.js";
+import { writeFileAtomic } from "../storage/atomic-write.js";
 import { BUNDLED_CODEX_INSTRUCTIONS } from "./codex-instructions.js";
 
 const GITHUB_API_RELEASES =
@@ -12,6 +13,147 @@ const GITHUB_HTML_RELEASES =
 	"https://github.com/openai/codex/releases/latest";
 const CACHE_DIR = join(homedir(), ".opencode", "cache");
 const CACHE_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Every prompt-path fetch gets a bounded, unref'd timeout. Without one a hung
+ * upstream connection would stall the request pipeline forever; the value
+ * matches the update-checker's 5s pattern scaled up for the ~300KB catalog.
+ */
+const PROMPT_FETCH_TIMEOUT_MS = 10_000;
+
+function classifyFetchError(error: unknown, aborted: boolean): Error {
+	if (aborted) {
+		return new CodexTimeoutError(
+			`Prompt fetch timed out after ${PROMPT_FETCH_TIMEOUT_MS}ms`,
+			{ cause: error, timeoutMs: PROMPT_FETCH_TIMEOUT_MS },
+		);
+	}
+	return new CodexNetworkError(
+		`Prompt fetch failed: ${(error as Error)?.message ?? String(error)}`,
+		{ cause: error },
+	);
+}
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), PROMPT_FETCH_TIMEOUT_MS);
+	timeout.unref();
+	try {
+		return await fetch(url, { ...init, signal: controller.signal });
+	} catch (error) {
+		throw classifyFetchError(error, controller.signal.aborted);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/**
+ * `fetch()` resolves when response headers arrive — its abort signal stops
+ * guarding the moment it resolves, so a connection that stalls mid-body would
+ * hang `response.text()`/`response.json()` forever. This races the body read
+ * against the same bound so the whole fetch window is covered.
+ */
+async function readBodyWithTimeout<T>(read: () => Promise<T>): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			read(),
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(
+						new CodexTimeoutError(
+							`Prompt body read timed out after ${PROMPT_FETCH_TIMEOUT_MS}ms`,
+							{ timeoutMs: PROMPT_FETCH_TIMEOUT_MS },
+						),
+					);
+				}, PROMPT_FETCH_TIMEOUT_MS);
+				timer.unref();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+/**
+ * The release tag is interpolated into a `raw.githubusercontent.com` path.
+ * A tag carrying `/`, `%`, `?`, or `#` — or one made of nothing but dots —
+ * escapes the pinned repo path under WHATWG URL normalization
+ * (`/openai/codex/../x` collapses to `/openai/x`), letting a compromised or
+ * spoofed response redirect the prompt fetch into an arbitrary repository.
+ */
+const RELEASE_TAG_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const ALL_DOTS_PATTERN = /^\.+$/;
+
+function isValidReleaseTag(tag: string): boolean {
+	return RELEASE_TAG_PATTERN.test(tag) && !ALL_DOTS_PATTERN.test(tag);
+}
+
+/**
+ * Minimum believable size for fetched instructions. Every real prompt file
+ * and catalog entry is multi-KB; a shorter body is an error page, an empty
+ * 200, or a truncated download — none of which may shadow the bundled
+ * instructions or be persisted into the cache.
+ */
+const MIN_INSTRUCTIONS_LENGTH = 128;
+
+/**
+ * HTML document openers. A captive portal, proxy error page, or GitHub HTML
+ * response must never be served as a system prompt — the check looks at the
+ * document start so XML-ish tags inside a real prompt (`<user_instructions>`)
+ * are not false-flagged.
+ */
+const HTML_DOCUMENT_MARKER = /^\s*<(?:!doctype|html|head|body|\?xml)\b/i;
+
+function isUsableInstructions(text: string): boolean {
+	const trimmed = text.trim();
+	if (trimmed.length < MIN_INSTRUCTIONS_LENGTH) return false;
+	return !HTML_DOCUMENT_MARKER.test(trimmed.slice(0, 512));
+}
+
+/**
+ * `lastChecked` is written by a local cache file — same-UID writable, so it
+ * is not trustworthy. A stamp in the future (or a non-finite one) would make
+ * `now - lastChecked < TTL` hold forever: the planted cache would be served
+ * indefinitely with zero network fetches, which is exactly what made the
+ * poisoning PoC silent. Non-finite or future stamps mean "can't reason about
+ * freshness" and force a real fetch.
+ */
+function isUsableCacheTimestamp(lastChecked: unknown, now: number): lastChecked is number {
+	return (
+		typeof lastChecked === "number" &&
+		Number.isFinite(lastChecked) &&
+		lastChecked >= 0 &&
+		lastChecked <= now
+	);
+}
+
+function parseCacheMetadata(metaContent: string, now: number): CacheMetadata | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(metaContent);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== "object" || parsed === null) return null;
+	const candidate = parsed as Partial<CacheMetadata>;
+	if (typeof candidate.tag !== "string" || typeof candidate.url !== "string") {
+		return null;
+	}
+	if (!isUsableCacheTimestamp(candidate.lastChecked, now)) {
+		return null;
+	}
+	const etag = candidate.etag;
+	if (etag !== null && etag !== undefined && typeof etag !== "string") {
+		return null;
+	}
+	return {
+		etag: etag ?? null,
+		tag: candidate.tag,
+		lastChecked: candidate.lastChecked,
+		url: candidate.url,
+	};
+}
 
 const MAX_CACHE_SIZE = 50;
 const memoryCache = new Map<string, { content: string; timestamp: number }>();
@@ -248,14 +390,14 @@ async function fetchCatalogText(tag: string): Promise<string> {
 
 	const url = `https://raw.githubusercontent.com/openai/codex/${tag}/${CATALOG_PATH}`;
 	const promise = (async () => {
-		const response = await fetch(url);
+		const response = await fetchWithTimeout(url);
 		if (!response.ok) {
 			throw new PromptError(`HTTP ${response.status}`, {
 				code: "HTTP_ERROR",
 				context: { status: response.status },
 			});
 		}
-		const text = await response.text();
+		const text = await readBodyWithTimeout(() => response.text());
 		// Only a successful fetch populates the memo; a failure leaves any prior
 		// value untouched and lets the next caller retry.
 		catalogMemo = { tag, text, timestamp: Date.now() };
@@ -481,22 +623,29 @@ async function getLatestReleaseTag(): Promise<string> {
 	}
 
 	try {
-		const response = await fetch(GITHUB_API_RELEASES);
+		const response = await fetchWithTimeout(GITHUB_API_RELEASES);
 		if (response.ok) {
-			const data = (await response.json()) as GitHubRelease;
-			if (data.tag_name) {
+			const data = (await readBodyWithTimeout(() =>
+				response.json(),
+			)) as GitHubRelease;
+			if (typeof data.tag_name === "string" && isValidReleaseTag(data.tag_name)) {
 				latestReleaseTagCache = {
 					tag: data.tag_name,
 					checkedAt: Date.now(),
 				};
 				return data.tag_name;
 			}
+			if (data.tag_name) {
+				logWarn("Ignoring malformed GitHub release tag_name", {
+					tagName: String(data.tag_name).slice(0, 64),
+				});
+			}
 		}
 	} catch {
 		// Fall through to HTML fallback
 	}
 
-	const htmlResponse = await fetch(GITHUB_HTML_RELEASES);
+	const htmlResponse = await fetchWithTimeout(GITHUB_HTML_RELEASES);
 	if (!htmlResponse.ok) {
 		throw new PromptError(
 			`Failed to fetch latest release: ${htmlResponse.status}`,
@@ -511,7 +660,7 @@ async function getLatestReleaseTag(): Promise<string> {
 	if (finalUrl) {
 		const parts = finalUrl.split("/tag/");
 		const last = parts[parts.length - 1];
-		if (last && !last.includes("/")) {
+		if (last && isValidReleaseTag(last)) {
 			latestReleaseTagCache = {
 				tag: last,
 				checkedAt: Date.now(),
@@ -520,9 +669,9 @@ async function getLatestReleaseTag(): Promise<string> {
 		}
 	}
 
-	const html = await htmlResponse.text();
+	const html = await readBodyWithTimeout(() => htmlResponse.text());
 	const match = html.match(/\/openai\/codex\/releases\/tag\/([^"]+)/);
-	if (match && match[1]) {
+	if (match && match[1] && isValidReleaseTag(match[1])) {
 		const tag = match[1];
 		latestReleaseTagCache = {
 			tag,
@@ -564,22 +713,28 @@ export async function getCodexInstructions(
 	]);
 
 	if (metaContent) {
-		try {
-			cachedMetadata = JSON.parse(metaContent) as CacheMetadata;
-		} catch {
-			cachedMetadata = null;
-		}
+		// A meta file whose `lastChecked` is missing, non-finite, or in the
+		// future is treated as absent: the cache cannot prove freshness, so the
+		// only honest path is a real fetch rather than indefinite cache service.
+		cachedMetadata = parseCacheMetadata(metaContent, now);
 	}
 
-	if (diskContent && cachedMetadata?.lastChecked) {
+	// The cache file is same-UID writable and an earlier version could have
+	// persisted an empty/error-page body, so disk content gets the same
+	// sanity check as a fresh fetch. A file that fails is treated as absent:
+	// it must not be served, and it must not shield a bundled fallback.
+	const usableDiskContent =
+		diskContent && isUsableInstructions(diskContent) ? diskContent : null;
+
+	if (usableDiskContent && cachedMetadata) {
 		if (now - cachedMetadata.lastChecked < CACHE_TTL_MS) {
-			setCacheEntry(key, { content: diskContent, timestamp: now });
-			return rewriteInstructionIdentity(diskContent, normalizedModel);
+			setCacheEntry(key, { content: usableDiskContent, timestamp: now });
+			return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
 		}
 		// Stale-while-revalidate: return stale cache immediately and refresh in background.
-		setCacheEntry(key, { content: diskContent, timestamp: now });
+		setCacheEntry(key, { content: usableDiskContent, timestamp: now });
 		void refreshInstructionsInBackground(source, cachedMetadata);
-		return rewriteInstructionIdentity(diskContent, normalizedModel);
+		return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
 	}
 
 	if (cached && now - cached.timestamp >= CACHE_TTL_MS) {
@@ -596,10 +751,10 @@ export async function getCodexInstructions(
 		const err = error as Error;
 		logError(`Failed to fetch ${key} instructions from GitHub: ${err.message}`);
 
-		if (diskContent) {
+		if (usableDiskContent) {
 			logWarn(`Using cached ${key} instructions`);
-			setCacheEntry(key, { content: diskContent, timestamp: now });
-			return rewriteInstructionIdentity(diskContent, normalizedModel);
+			setCacheEntry(key, { content: usableDiskContent, timestamp: now });
+			return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
 		}
 
 		// Last resort is the vendored copy, not a sibling file: the bundled
@@ -623,10 +778,13 @@ async function persistInstructions(
 	instructions: string,
 	meta: CacheMetadata,
 ): Promise<string> {
-	await fs.mkdir(CACHE_DIR, { recursive: true });
+	// 0700 dir + 0600 atomic writes: the cache is consumed verbatim as a
+	// system prompt, so it must not be world-readable or replaceable mid-read
+	// by a same-UID process racing the write.
+	await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
 	await Promise.all([
-		fs.writeFile(source.cacheFile, instructions, "utf8"),
-		fs.writeFile(source.cacheMetaFile, JSON.stringify(meta), "utf8"),
+		writeFileAtomic(source.cacheFile, instructions),
+		writeFileAtomic(source.cacheMetaFile, JSON.stringify(meta)),
 	]);
 	setCacheEntry(source.key, { content: instructions, timestamp: Date.now() });
 	return instructions;
@@ -641,10 +799,28 @@ async function fetchAndPersistInstructions(
 
 	if (catalogSlug) {
 		const catalogUrl = `https://raw.githubusercontent.com/openai/codex/${latestTag}/${CATALOG_PATH}`;
-		const fromCatalog = extractCatalogInstructions(
-			await fetchCatalogText(latestTag),
-			catalogSlug,
-		);
+		// A catalog transport failure must fall through to the prompt-file
+		// source rather than propagate: the file is the documented fallback and
+		// propagating would turn a flaky raw.githubusercontent.com into a total
+		// instructions outage even though the prompt file may still download.
+		let fromCatalog: string | null = null;
+		try {
+			fromCatalog = extractCatalogInstructions(
+				await fetchCatalogText(latestTag),
+				catalogSlug,
+			);
+		} catch (error) {
+			logWarn(
+				`Catalog fetch failed for ${catalogSlug} at ${latestTag}; falling back to ${promptFile}`,
+				{ error: String(error) },
+			);
+		}
+		if (fromCatalog !== null && !isUsableInstructions(fromCatalog)) {
+			logWarn(
+				`Catalog instructions for ${catalogSlug} at ${latestTag} failed sanity checks; falling back to ${promptFile}`,
+			);
+			fromCatalog = null;
+		}
 		if (fromCatalog) {
 			return persistInstructions(source, fromCatalog, {
 				etag: null,
@@ -653,10 +829,13 @@ async function fetchAndPersistInstructions(
 				url: catalogUrl,
 			});
 		}
-		// The pinned release predates this model; fall through to the prompt file.
-		logWarn(
-			`No catalog entry for ${catalogSlug} at ${latestTag}; falling back to ${promptFile}`,
-		);
+		if (fromCatalog === null) {
+			// The pinned release predates this model (or the catalog payload was
+			// unusable); fall through to the prompt file.
+			logWarn(
+				`No usable catalog entry for ${catalogSlug} at ${latestTag}; falling back to ${promptFile}`,
+			);
+		}
 	}
 
 	let cachedETag = cachedMetadata?.etag ?? null;
@@ -672,13 +851,13 @@ async function fetchAndPersistInstructions(
 		headers["If-None-Match"] = cachedETag;
 	}
 
-	const response = await fetch(instructionsUrl, { headers });
+	const response = await fetchWithTimeout(instructionsUrl, { headers });
 	if (response.status === 304) {
 		const diskContent = await readFileOrNull(cacheFile);
-		if (diskContent) {
+		if (diskContent && isUsableInstructions(diskContent)) {
 			setCacheEntry(key, { content: diskContent, timestamp: Date.now() });
-			await fs.mkdir(CACHE_DIR, { recursive: true });
-			await fs.writeFile(
+			await fs.mkdir(CACHE_DIR, { recursive: true, mode: 0o700 });
+			await writeFileAtomic(
 				source.cacheMetaFile,
 				JSON.stringify(
 					{
@@ -688,7 +867,6 @@ async function fetchAndPersistInstructions(
 						url: instructionsUrl,
 					} satisfies CacheMetadata,
 				),
-				"utf8",
 			);
 			return diskContent;
 		}
@@ -701,7 +879,19 @@ async function fetchAndPersistInstructions(
 		});
 	}
 
-	return persistInstructions(source, await response.text(), {
+	const fetchedText = await readBodyWithTimeout(() => response.text());
+	// An empty/whitespace 200 (or an HTML error page that slipped past the
+	// status check) must never shadow the bundled prompt or be persisted —
+	// reject it here so the caller degrades to the disk cache or the vendored
+	// instructions instead of serving junk as a system prompt.
+	if (!isUsableInstructions(fetchedText)) {
+		throw new PromptError(
+			`Fetched instructions for ${key} failed sanity checks (${fetchedText.trim().length} chars)`,
+			{ code: "INSTRUCTIONS_UNUSABLE" },
+		);
+	}
+
+	return persistInstructions(source, fetchedText, {
 		etag: response.headers.get("etag"),
 		tag: latestTag,
 		lastChecked: Date.now(),

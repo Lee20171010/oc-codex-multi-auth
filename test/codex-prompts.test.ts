@@ -10,15 +10,25 @@ vi.mock("node:fs", () => ({
 	},
 }));
 
+vi.mock("../lib/storage/atomic-write.js", () => ({
+	writeFileAtomic: vi.fn(async () => undefined),
+}));
+
 const originalFetch = global.fetch;
 let mockFetch: ReturnType<typeof vi.fn>;
 
 import { getModelFamily, getCodexInstructions, ensureInstructionIdentity, MODEL_FAMILIES, TOOL_REMAP_MESSAGE, __clearCacheForTesting } from "../lib/prompts/codex.js";
 import { BUNDLED_CODEX_INSTRUCTIONS } from "../lib/prompts/codex-instructions.js";
+import { writeFileAtomic } from "../lib/storage/atomic-write.js";
 
 const mockedReadFile = vi.mocked(fs.readFile);
-const mockedWriteFile = vi.mocked(fs.writeFile);
+const mockedWriteFileAtomic = vi.mocked(writeFileAtomic);
 const mockedMkdir = vi.mocked(fs.mkdir);
+
+// Fixture bodies must clear the 128-char minimum-length sanity check real
+// prompts are held to — pad a recognizable label with filler so assertions
+// can still `toContain` the label.
+const padPrompt = (label: string): string => `${label}\n\n${"x".repeat(200)}`;
 
 describe("Codex Prompts Module", () => {
 	beforeEach(() => {
@@ -133,13 +143,13 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("cached instructions");
+					return Promise.resolve(padPrompt("cached instructions"));
 				});
 
 				const first = await getCodexInstructions("gpt-5.1-codex");
 				const second = await getCodexInstructions("gpt-5.1-codex");
 				
-				expect(first).toBe("cached instructions");
+				expect(first).toContain("cached instructions");
 				expect(second).toBe(first);
 			});
 		});
@@ -156,11 +166,11 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("disk cached instructions");
+					return Promise.resolve(padPrompt("disk cached instructions"));
 				});
 
 				const result = await getCodexInstructions("gpt-5.2");
-				expect(result).toBe("disk cached instructions");
+				expect(result).toContain("disk cached instructions");
 			});
 
 			it("prepends backend identity when native instructions have no model identity", () => {
@@ -187,7 +197,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -210,7 +220,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -243,7 +253,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant.\n\nRest of prompt.",
+						padPrompt("You are GPT-5.2 running in the Codex CLI, a terminal-based coding assistant."),
 					);
 				});
 
@@ -266,7 +276,7 @@ describe("Codex Prompts Module", () => {
 						}));
 					}
 					return Promise.resolve(
-						"You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.\n\nRest of prompt.",
+						padPrompt("You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer."),
 					);
 				});
 
@@ -287,14 +297,14 @@ describe("Codex Prompts Module", () => {
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
-					text: () => Promise.resolve("new instructions from github"),
+					text: () => Promise.resolve(padPrompt("new instructions from github")),
 					headers: { get: () => "new-etag" },
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("codex-max");
-				expect(result).toBe("new instructions from github");
+				expect(result).toContain("new instructions from github");
 				expect(mockFetch).toHaveBeenCalledTimes(2);
 			});
 
@@ -309,7 +319,7 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("disk cached content");
+					return Promise.resolve(padPrompt("disk cached content"));
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
@@ -321,7 +331,7 @@ describe("Codex Prompts Module", () => {
 				});
 
 				const result = await getCodexInstructions("gpt-5.1");
-				expect(result).toBe("disk cached content");
+				expect(result).toContain("disk cached content");
 			});
 
 			it("should refresh stale cache in background when release tag changes", async () => {
@@ -335,7 +345,7 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("old content");
+					return Promise.resolve(padPrompt("old content"));
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
@@ -343,17 +353,17 @@ describe("Codex Prompts Module", () => {
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
-					text: () => Promise.resolve("new version content"),
+					text: () => Promise.resolve(padPrompt("new version content")),
 					headers: { get: () => "new-etag" },
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const first = await getCodexInstructions("gpt-5.1-codex");
-				expect(first).toBe("old content");
+				expect(first).toContain("old content");
 				await new Promise((resolve) => setTimeout(resolve, 0));
 				const second = await getCodexInstructions("gpt-5.1-codex");
-				expect(second).toBe("new version content");
+				expect(second).toContain("new version content");
 			});
 		});
 
@@ -371,14 +381,14 @@ describe("Codex Prompts Module", () => {
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
-					text: () => Promise.resolve("fallback instructions"),
+					text: () => Promise.resolve(padPrompt("fallback instructions")),
 					headers: { get: () => "fallback-etag" },
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("gpt-5.2-codex");
-				expect(result).toBe("fallback instructions");
+				expect(result).toContain("fallback instructions");
 			});
 
 			it("should parse tag from HTML content if URL parsing fails", async () => {
@@ -394,14 +404,14 @@ describe("Codex Prompts Module", () => {
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
-					text: () => Promise.resolve("html parsed instructions"),
+					text: () => Promise.resolve(padPrompt("html parsed instructions")),
 					headers: { get: () => "html-etag" },
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				const result = await getCodexInstructions("codex");
-				expect(result).toBe("html parsed instructions");
+				expect(result).toContain("html parsed instructions");
 			});
 
 		it("should fall back to bundled when HTML fallback page request fails", async () => {
@@ -458,12 +468,12 @@ describe("Codex Prompts Module", () => {
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve("fallback disk content");
+					return Promise.resolve(padPrompt("fallback disk content"));
 				});
 				mockFetch.mockRejectedValue(new Error("Network error"));
 
 				const result = await getCodexInstructions("gpt-5.1");
-				expect(result).toBe("fallback disk content");
+				expect(result).toContain("fallback disk content");
 			});
 
 			it("should fall back to disk cache on HTTP error response", async () => {
@@ -476,7 +486,7 @@ describe("Codex Prompts Module", () => {
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve("disk cache fallback");
+					return Promise.resolve(padPrompt("disk cache fallback"));
 				});
 				mockFetch.mockResolvedValueOnce({
 					ok: true,
@@ -488,7 +498,7 @@ describe("Codex Prompts Module", () => {
 				});
 
 				const result = await getCodexInstructions("gpt-5.2");
-				expect(result).toBe("disk cache fallback");
+				expect(result).toContain("disk cache fallback");
 			});
 
 			it("should fall back to bundled instructions when all else fails", async () => {
@@ -517,6 +527,128 @@ describe("Codex Prompts Module", () => {
 			});
 		});
 
+		describe("Cache poisoning defenses", () => {
+			it("treats a future lastChecked as absent and fetches fresh", async () => {
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"planted"',
+							tag: "rust-v0.43.0",
+							url: "https://raw.githubusercontent.com/openai/codex/rust-v0.43.0/codex-rs/core/gpt_5_codex_prompt.md",
+							// A stamp in the future satisfies `now - lastChecked < TTL`
+							// forever; it must not pin the planted body in place.
+							lastChecked: Date.now() + 60 * 60 * 1000,
+						}));
+					}
+					return Promise.resolve(padPrompt("planted disk content"));
+				});
+				mockFetch.mockResolvedValue({
+					ok: true,
+					json: () => Promise.resolve({ tag_name: "rust-v0.99.0" }),
+					text: () => Promise.resolve(padPrompt("freshly fetched")),
+					headers: { get: () => '"new-etag"' },
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				expect(mockFetch).toHaveBeenCalled();
+				expect(result).toContain("freshly fetched");
+			});
+
+			it("never interpolates a malformed release tag into the prompt URL", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				mockFetch.mockImplementation((url) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							// A tag with path separators would escape the pinned
+							// openai/codex path via WHATWG URL normalization.
+							json: () => Promise.resolve({ tag_name: "../../evil/repo" }),
+						});
+					}
+					if (href.includes("github.com/openai/codex/releases")) {
+						return Promise.resolve({
+							ok: true,
+							url: "https://github.com/openai/codex/releases/tag/rust-v0.99.0",
+							text: () => Promise.resolve("<html></html>"),
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						text: () => Promise.resolve(padPrompt("freshly fetched")),
+						headers: { get: () => '"etag"' },
+					});
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				const fetchedUrls = mockFetch.mock.calls.map((call) => String(call[0]));
+				expect(fetchedUrls.some((u) => u.includes("evil") || u.includes(".."))).toBe(false);
+				expect(result).toContain("freshly fetched");
+			});
+
+			it("rejects an HTML error page served as the prompt body", async () => {
+				mockedReadFile.mockRejectedValue(new Error("ENOENT"));
+				const htmlErrorPage =
+					"<!DOCTYPE html><html><body>404 Not Found" + "x".repeat(200) + "</body></html>";
+				mockFetch.mockImplementation((url) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							json: () => Promise.resolve({ tag_name: "rust-v0.99.0" }),
+						});
+					}
+					return Promise.resolve({
+						ok: true,
+						text: () => Promise.resolve(htmlErrorPage),
+						headers: { get: () => '"etag"' },
+					});
+				});
+				mockedMkdir.mockResolvedValue(undefined);
+
+				const result = await getCodexInstructions("gpt-5-codex");
+
+				expect(result).not.toContain("404 Not Found");
+				expect(result).toContain(
+					"You are the model identified to the backend as gpt-5-codex",
+				);
+				// The rejected body must never reach the cache.
+				expect(
+					mockedWriteFileAtomic.mock.calls.some(([, contents]) =>
+						String(contents).includes("404 Not Found"),
+					),
+				).toBe(false);
+			});
+
+			it("does not serve a too-short or HTML disk cache body", async () => {
+				mockedReadFile.mockImplementation((filePath) => {
+					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
+						return Promise.resolve(JSON.stringify({
+							etag: '"e"',
+							tag: "rust-v0.43.0",
+							url: "https://example.com/prompt.md",
+							lastChecked: Date.now() - 60 * 1000,
+						}));
+					}
+					// Fresh meta over a stub body: the stub would otherwise be served
+					// verbatim as a system prompt.
+					return Promise.resolve("short");
+				});
+				mockFetch.mockRejectedValue(new Error("offline"));
+
+				const result = await getCodexInstructions("gpt-5.1");
+
+				expect(result).not.toBe("short");
+				expect(result).toContain(
+					"You are the model identified to the backend as gpt-5.1",
+				);
+			});
+		});
+
 		describe("Cache size management", () => {
 			it("should handle multiple model families without exceeding cache size", async () => {
 				mockedReadFile.mockResolvedValue("instructions");
@@ -538,7 +670,7 @@ describe("Codex Prompts Module", () => {
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve("cached instructions");
+					return Promise.resolve(padPrompt("cached instructions"));
 				});
 
 				for (let i = 0; i < 55; i++) {
@@ -546,7 +678,7 @@ describe("Codex Prompts Module", () => {
 				}
 				
 				const result = await getCodexInstructions("gpt-5.1-codex");
-				expect(result).toBe("cached instructions");
+				expect(result).toContain("cached instructions");
 			});
 		});
 
@@ -556,11 +688,11 @@ describe("Codex Prompts Module", () => {
 				mockFetch.mockResolvedValue({
 					ok: true,
 					json: () => Promise.resolve({ tag_name: "rust-v0.43.0" }),
-					text: () => Promise.resolve("content"),
+					text: () => Promise.resolve(padPrompt("content")),
 					headers: { get: () => "etag" },
 				});
 				mockedMkdir.mockResolvedValue(undefined);
-				mockedWriteFile.mockResolvedValue(undefined);
+				mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 				await getCodexInstructions("gpt-5-codex");
 				
@@ -576,11 +708,11 @@ describe("Codex Prompts Module", () => {
 					mockFetch.mockResolvedValue({
 						ok: true,
 						json: () => Promise.resolve({ tag_name: "rust-v0.98.0" }),
-						text: () => Promise.resolve("content"),
+						text: () => Promise.resolve(padPrompt("content")),
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.3-codex");
 					const fetchCalls = mockFetch.mock.calls;
@@ -597,9 +729,9 @@ describe("Codex Prompts Module", () => {
 				// the Codex CLI", which is not what the backend expects for 5.4/5.5.
 				const catalogPayload = JSON.stringify({
 					models: [
-						{ slug: "gpt-5.4", base_instructions: "GPT54 CATALOG PROMPT" },
-						{ slug: "gpt-5.4-mini", base_instructions: "GPT54MINI CATALOG PROMPT" },
-						{ slug: "gpt-5.5", base_instructions: "GPT55 CATALOG PROMPT" },
+						{ slug: "gpt-5.4", base_instructions: padPrompt("GPT54 CATALOG PROMPT") },
+						{ slug: "gpt-5.4-mini", base_instructions: padPrompt("GPT54MINI CATALOG PROMPT") },
+						{ slug: "gpt-5.5", base_instructions: padPrompt("GPT55 CATALOG PROMPT") },
 					],
 				});
 
@@ -612,7 +744,7 @@ describe("Codex Prompts Module", () => {
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const result = await getCodexInstructions("gpt-5.4");
 					const fetchCalls = mockFetch.mock.calls;
@@ -641,7 +773,7 @@ describe("Codex Prompts Module", () => {
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// gpt-5.5 and gpt-5.4 share the `gpt-5.4` model family, so a
 					// family-keyed cache would let one serve the other's prompt.
@@ -649,7 +781,7 @@ describe("Codex Prompts Module", () => {
 					expect(result).toContain("GPT55 CATALOG PROMPT");
 					expect(result).not.toContain("GPT54 CATALOG PROMPT");
 
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) =>
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) =>
 						String(target),
 					);
 					expect(
@@ -674,7 +806,7 @@ describe("Codex Prompts Module", () => {
 						const href = String(url);
 						const body = href.includes("models.json")
 							? catalogPayload
-							: "PROMPT FILE CONTENT";
+							: padPrompt("PROMPT FILE CONTENT");
 						return Promise.resolve({
 							ok: true,
 							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
@@ -683,7 +815,7 @@ describe("Codex Prompts Module", () => {
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// Warm the catalog entry first, exactly as prewarmCodexInstructions does.
 					const catalogResult = await getCodexInstructions("gpt-5.4");
@@ -691,7 +823,7 @@ describe("Codex Prompts Module", () => {
 
 					// nano must NOT pick up the memory-cached catalog text.
 					const nanoResult = await getCodexInstructions("gpt-5.4-nano");
-					expect(nanoResult).toContain("PROMPT FILE CONTENT");
+					expect(nanoResult).toContain(padPrompt("PROMPT FILE CONTENT"));
 					expect(nanoResult).not.toContain("GPT54 CATALOG PROMPT");
 				});
 
@@ -701,7 +833,7 @@ describe("Codex Prompts Module", () => {
 						const href = String(url);
 						const body = href.includes("models.json")
 							? catalogPayload
-							: "PROMPT FILE CONTENT";
+							: padPrompt("PROMPT FILE CONTENT");
 						return Promise.resolve({
 							ok: true,
 							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
@@ -710,15 +842,15 @@ describe("Codex Prompts Module", () => {
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// Reverse order: nano first, then gpt-5.4.
 					const nanoResult = await getCodexInstructions("gpt-5.4-nano");
-					expect(nanoResult).toContain("PROMPT FILE CONTENT");
+					expect(nanoResult).toContain(padPrompt("PROMPT FILE CONTENT"));
 
 					const catalogResult = await getCodexInstructions("gpt-5.4");
 					expect(catalogResult).toContain("GPT54 CATALOG PROMPT");
-					expect(catalogResult).not.toContain("PROMPT FILE CONTENT");
+					expect(catalogResult).not.toContain(padPrompt("PROMPT FILE CONTENT"));
 				});
 
 				// prewarmCodexInstructions fires every catalog model concurrently, so a
@@ -745,12 +877,12 @@ describe("Codex Prompts Module", () => {
 						return Promise.resolve({
 							ok: true,
 							json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-							text: () => Promise.resolve("PROMPT FILE CONTENT"),
+							text: () => Promise.resolve(padPrompt("PROMPT FILE CONTENT")),
 							headers: { get: () => "etag" },
 						});
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const pending = Promise.all([
 						getCodexInstructions("gpt-5.4"),
@@ -782,7 +914,7 @@ describe("Codex Prompts Module", () => {
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.4");
 					const fetchCalls = mockFetch.mock.calls;
@@ -799,11 +931,11 @@ describe("Codex Prompts Module", () => {
 					mockFetch.mockResolvedValue({
 						ok: true,
 						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve("content"),
+						text: () => Promise.resolve(padPrompt("content")),
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					// gpt-5.1 has no catalog entry; it must not fetch models.json at all.
 					await getCodexInstructions("gpt-5.1");
@@ -827,11 +959,11 @@ describe("Codex Prompts Module", () => {
 					mockFetch.mockResolvedValue({
 						ok: true,
 						json: () => Promise.resolve({ tag_name: "rust-v0.111.0" }),
-						text: () => Promise.resolve("content"),
+						text: () => Promise.resolve(padPrompt("content")),
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.4-pro");
 					const fetchCalls = mockFetch.mock.calls;
@@ -840,7 +972,7 @@ describe("Codex Prompts Module", () => {
 							typeof call[0] === "string" &&
 							call[0].includes("raw.githubusercontent.com"),
 					);
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) => String(target));
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) => String(target));
 					expect(rawGitHubCall?.[0]).toContain("gpt_5_2_prompt.md");
 					expect(writeTargets.some((target) => target.includes("gpt-5.4-pro-instructions.md"))).toBe(true);
 					expect(
@@ -857,7 +989,7 @@ describe("Codex Prompts Module", () => {
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					const result = await getCodexInstructions("gpt-5.4-mini");
 					const fetchCalls = mockFetch.mock.calls;
@@ -866,7 +998,7 @@ describe("Codex Prompts Module", () => {
 							typeof call[0] === "string" &&
 							call[0].includes("raw.githubusercontent.com"),
 					);
-					const writeTargets = mockedWriteFile.mock.calls.map(([target]) => String(target));
+					const writeTargets = mockedWriteFileAtomic.mock.calls.map(([target]) => String(target));
 					expect(rawGitHubCall?.[0]).toContain("models-manager/models.json");
 					expect(result).toContain("GPT54MINI CATALOG PROMPT");
 					expect(
@@ -887,11 +1019,11 @@ describe("Codex Prompts Module", () => {
 					mockFetch.mockResolvedValue({
 						ok: true,
 						json: () => Promise.resolve({ tag_name: "rust-v0.101.0" }),
-						text: () => Promise.resolve("content"),
+						text: () => Promise.resolve(padPrompt("content")),
 						headers: { get: () => "etag" },
 					});
 					mockedMkdir.mockResolvedValue(undefined);
-					mockedWriteFile.mockResolvedValue(undefined);
+					mockedWriteFileAtomic.mockResolvedValue(undefined);
 
 					await getCodexInstructions("gpt-5.3-codex-spark");
 					const fetchCalls = mockFetch.mock.calls;
