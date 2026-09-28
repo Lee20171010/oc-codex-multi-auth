@@ -9,11 +9,12 @@ import {
 	formatUiItem,
 	formatUiSection,
 } from "../ui/format.js";
+import { withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexHelpTool(ctx: ToolContext): ToolDefinition {
 	const { resolveUiRuntime } = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Beginner-friendly command guide with quickstart and troubleshooting flows.",
 		args: {
@@ -165,4 +166,5 @@ export function createCodexHelpTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-help", definition);
 }

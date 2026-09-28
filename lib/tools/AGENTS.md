@@ -10,6 +10,7 @@ its factory.
 ```text
 index.ts            # ToolContext type + createToolRegistry(ctx); also re-exports the codex-diag/codex-diff/codex-keychain factories
 args.ts             # shared format/includeSensitive constants (values + descriptions)
+output.ts           # shared tool-output contract: error envelope, sanitizers, withToolErrorEnvelope wrapper
 doctor-repair.ts    # shared doctor repair pass (refresh + stale-state clear); used by codex-doctor and CLI --fix
 refresh-account.ts  # shared single-use refresh-token persistence; used by account-management tools
 codex-<name>.ts     # one file per tool: list, switch, warm, status, limits, reset, metrics, help, setup,
@@ -45,9 +46,53 @@ plugin's bundled `zod` copy (TS2742), so each tool inlines its own
 so the emitted JSON Schema constrains the value. `codex-pool` scopes its
 `includeSensitive` wording to account IDs and passes its own string.
 
+## output.ts: the shared tool-output contract
+
+Every tool factory builds its `tool({...})` definition, then returns it wrapped
+in `withToolErrorEnvelope("codex-<name>", definition)` — `codex-keychain.ts` is
+the one exception (its contract is owned by the storage-layer lease work).
+
+The tool API has no `isError` flag, so failures have exactly two honest shapes:
+
+- `format:"json"` calls (or `alwaysJson` tools — `codex-diag`, `codex-diff`)
+  resolve to the stable envelope `{ ok:false, tool, error, message, retryable,
+  nextAction, path }`: `error` is the `CodexError.code` (else
+  `CODEX_TOOL_ERROR`), `message` is masked + newline-collapsed + truncated,
+  `nextAction` carries `StorageError.hint`, `path` is home-redacted.
+- Text calls reject with an enriched error — the wrapper preserves synchronous
+  throws for pre-await arg validation, so `expect(fn).toThrow` keeps working.
+
+Other shared helpers in `output.ts`:
+
+- `sanitizeToolErrorMessage` — maskString + newline collapse + 160-char cap;
+  use on any upstream error text before it reaches tool output.
+- `stripControlCharacters` — drops C0/C1/DEL control chars (keeps \t \n); run
+  it on user text (`label`/`tags`/`note`) before storing or echoing.
+- `redactHomePaths` — `<HOME>` for the real homedir AND generic
+  `/home/<name>`, `/Users/<name>`, `X:\Users\<name>` prefixes.
+- `redactPluginOrigin` — the above applied to `PluginOrigin.root`.
+- `rethrowIfRetryable` — call it inside a `persist()` catch before mapping the
+  failure to an outcome: lease compromise (`StorageTransactionContentionError`,
+  `ConfigLockContentionError`) surfaces through `persist()`, and folding it
+  into a "failed to persist" string would hide the retryable signal.
+- `toToolCallError("Import failed", err)` — the honest-failure throw for
+  text-only tools that previously returned `"X failed: ..."` strings.
+
+JSON output conventions:
+
+- User-facing account indexes are **1-based** (`index`, `activeIndex`, pool
+  `accounts[].index` inputs). A technical 0-based field is allowed only under
+  an explicit name like `zeroBasedIndex` (see `codex-warm.results[]`).
+- Emit stable keys: populate every schema field with `null`/`[]` rather than
+  omitting it (`codex-reset`'s `emptyConsumeJsonPayload` is the template), and
+  keep filtered counts separate from pool totals (`totalAccounts` = full pool,
+  `shownAccounts` = filtered rows).
+
 ## Adding a tool
 
-1. Create `lib/tools/codex-<name>.ts` exporting `createCodex<Name>Tool(ctx)`.
+1. Create `lib/tools/codex-<name>.ts` exporting `createCodex<Name>Tool(ctx)`,
+   and return the definition wrapped in `withToolErrorEnvelope` (see
+   output.ts above).
 2. Import it in `lib/tools/index.ts` and add the
    `"codex-<name>": createCodex<Name>Tool(ctx)` entry in `createToolRegistry` —
    the registry is checked against the file list by `test/doc-parity.test.ts`.

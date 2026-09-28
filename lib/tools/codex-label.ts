@@ -12,6 +12,11 @@ import {
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
+import {
+	rethrowIfRetryable,
+	stripControlCharacters,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
@@ -25,7 +30,7 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Set or clear a beginner-friendly display label for an account (interactive picker when index is omitted).",
 		args: {
@@ -101,7 +106,11 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 				resolvedIndex = selectedIndex + 1;
 			}
 
-			const normalizedLabel = (label ?? "").trim().replace(/\s+/g, " ");
+			// Strip control characters before whitespace folding so a label
+			// cannot smuggle terminal escape sequences into tool output or logs.
+			const normalizedLabel = stripControlCharacters(label ?? "")
+				.replace(/\s+/g, " ")
+				.trim();
 			if (normalizedLabel.length > 60) {
 				if (ui.v2Enabled) {
 					return [
@@ -155,6 +164,9 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 					try {
 						await persist(storage);
 					} catch (saveError) {
+						// Lease compromise surfaces through persist() — let it escape
+						// so the wrapper reports a retryable contention error.
+						rethrowIfRetryable(saveError);
 						logWarn("Failed to save account label update", {
 							error: String(saveError),
 						});
@@ -248,4 +260,5 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 			return `Set label for ${accountLabel} to "${normalizedLabel}"`;
 		},
 	});
+	return withToolErrorEnvelope("codex-label", definition);
 }

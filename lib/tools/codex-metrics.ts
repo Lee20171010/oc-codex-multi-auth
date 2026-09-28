@@ -15,6 +15,10 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import {
+	sanitizeToolErrorMessage,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
@@ -26,7 +30,7 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 		appendRoutingVisibilityText,
 		appendRoutingVisibilityUi,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description: "Show runtime request metrics for this plugin process.",
 		args: {
 			format: tool.schema
@@ -52,6 +56,12 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 				runtimeMetrics.lastRequestAt !== null
 					? `${formatWaitTime(now - runtimeMetrics.lastRequestAt)} ago`
 					: "never";
+			// `lastError` carries an upstream failure message — mask + truncate it
+			// once so every emit site (JSON, text, v2) renders the safe form.
+			const lastErrorMessage =
+				runtimeMetrics.lastError === null
+					? null
+					: sanitizeToolErrorMessage(runtimeMetrics.lastError);
 			const routingVisibility = buildRoutingVisibilitySnapshot();
 			const beginnerSafeModeEnabled = beginnerSafeModeRef.current;
 			if (outputFormat === "json") {
@@ -80,7 +90,7 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 							runtimeMetrics.lastRequestAt !== null
 								? Math.max(0, now - runtimeMetrics.lastRequestAt)
 								: null,
-						lastError: runtimeMetrics.lastError,
+						lastError: lastErrorMessage,
 						lastErrorCategory: runtimeMetrics.lastErrorCategory,
 						lastSelectedAccountIndex:
 							runtimeMetrics.lastSelectedAccountIndex === null
@@ -133,8 +143,8 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 				`Last upstream request: ${lastRequest}`,
 			];
 
-			if (runtimeMetrics.lastError) {
-				lines.push(`Last error: ${runtimeMetrics.lastError}`);
+			if (lastErrorMessage) {
+				lines.push(`Last error: ${lastErrorMessage}`);
 			}
 			if (runtimeMetrics.lastErrorCategory) {
 				lines.push(`Last error category: ${runtimeMetrics.lastErrorCategory}`);
@@ -257,12 +267,12 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 					),
 					formatUiKeyValue(ui, "Last upstream request", lastRequest, "muted"),
 				];
-				if (runtimeMetrics.lastError) {
+				if (lastErrorMessage) {
 					styled.push(
 						formatUiKeyValue(
 							ui,
 							"Last error",
-							runtimeMetrics.lastError,
+							lastErrorMessage,
 							"danger",
 						),
 					);
@@ -319,4 +329,5 @@ export function createCodexMetricsTool(ctx: ToolContext): ToolDefinition {
 			return Promise.resolve(lines.join("\n"));
 		},
 	});
+	return withToolErrorEnvelope("codex-metrics", definition);
 }

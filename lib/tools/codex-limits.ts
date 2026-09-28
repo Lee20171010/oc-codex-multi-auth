@@ -41,6 +41,7 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { sanitizeToolErrorMessage, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 /**
@@ -80,7 +81,7 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 		buildJsonAccountIdentity,
 		invalidateAccountManagerCache,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Show live 5-hour and weekly Codex usage limits for all accounts.",
 		args: {
@@ -367,8 +368,11 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 						}
 					}
 				} catch (error) {
-					const message =
-						error instanceof Error ? error.message : String(error);
+					// Upstream usage-endpoint errors can carry account-identifying or
+					// credential-shaped text — mask and truncate before output.
+					const message = sanitizeToolErrorMessage(
+						error instanceof Error ? error.message : String(error),
+					);
 					jsonAccounts.push({
 						...buildJsonAccountIdentity(displayIndex, {
 							includeSensitive: includeSensitiveOutput,
@@ -378,16 +382,16 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 						}),
 						isActive,
 						sharesActiveCredential,
-						error: message.slice(0, 160),
+						error: message,
 					});
 					if (ui.v2Enabled) {
 						lines.push(formatUiItem(ui, `${displayLabel}${activeSuffix}`));
 						lines.push(
-							`  ${formatUiKeyValue(ui, "Error", message.slice(0, 160), "danger")}`,
+							`  ${formatUiKeyValue(ui, "Error", message, "danger")}`,
 						);
 					} else {
 						lines.push(`${displayLabel}${activeSuffix}:`);
-						lines.push(`  Error: ${message.slice(0, 160)}`);
+						lines.push(`  Error: ${message}`);
 					}
 				}
 
@@ -434,4 +438,5 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-limits", definition);
 }
