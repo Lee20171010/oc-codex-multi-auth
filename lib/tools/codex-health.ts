@@ -18,6 +18,11 @@ import {
 	buildRefreshInputs,
 	refreshAndPersistAccount,
 } from "./refresh-account.js";
+import {
+	TOOL_INCLUDE_SENSITIVE_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
@@ -34,15 +39,13 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 			"Check health of all Codex accounts by validating refresh tokens.",
 		args: {
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 			includeSensitive: tool.schema
 				.boolean()
 				.optional()
-				.describe(
-					"Include raw account labels, emails, and account IDs in JSON output. Defaults to false.",
-				),
+				.describe(TOOL_INCLUDE_SENSITIVE_DESCRIPTION),
 		},
 		async execute({
 			format,

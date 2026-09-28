@@ -20,6 +20,10 @@ import {
 	matchesModelPoolAccountKey,
 } from "../accounts/pool-identity.js";
 import { getCurrentProjectRoot, getCurrentStoragePath } from "../storage/state.js";
+import {
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 type CodexPoolAction = "status" | ModelAccountPoolMutation;
@@ -242,9 +246,9 @@ export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
 				.optional()
 				.describe('Pool routing mode used by "set-mode": "preferred" or "strict".'),
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 			includeSensitive: tool.schema
 				.boolean()
 				.optional()
@@ -375,7 +379,11 @@ export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
 				changed: result.changed,
 				applied,
 				dryRun: result.dryRun,
-				restartRequired: applied,
+				// Pool config is re-read from disk per request
+				// (`loadPluginConfig()` inside the fetch path), so an applied
+				// mutation takes effect on the next request — no restart. The
+				// field stays on the wire shape for consumers that read it.
+				restartRequired: false,
 				previousConfiguredCount: result.previousAccountIds.length,
 				previousPoolMode: result.previousPoolMode,
 				pool,
@@ -389,7 +397,7 @@ export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
 				`Current accounts: ${result.accountIds.length}`,
 				`Pool mode: ${result.poolMode}`,
 			];
-			if (applied) lines.push("Restart OpenCode to apply this routing change.");
+			if (applied) lines.push("Applies on the next request; no restart needed.");
 			return lines.join("\n");
 		},
 	});

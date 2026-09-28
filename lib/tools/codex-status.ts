@@ -24,6 +24,11 @@ import {
 import { normalizeToolOutputFormat, renderJsonOutput } from "../runtime.js";
 import { describePluginOrigin, getPluginOrigin } from "../plugin-origin.js";
 import { formatPlanType } from "../auth/plan-tier.js";
+import {
+	TOOL_INCLUDE_SENSITIVE_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
@@ -49,15 +54,13 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 			"Show detailed status of Codex accounts and rate limits.",
 		args: {
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 			includeSensitive: tool.schema
 				.boolean()
 				.optional()
-				.describe(
-					"Include raw account labels, emails, and account IDs in JSON output. Defaults to false.",
-				),
+				.describe(TOOL_INCLUDE_SENSITIVE_DESCRIPTION),
 		},
 		async execute({
 			format,

@@ -14,6 +14,7 @@ and passes it to `createToolRegistry(ctx)` from `./index.ts`, which wires every
 lib/tools/
   AGENTS.md
   index.ts                # ToolContext type + createToolRegistry(ctx) barrel
+  args.ts                 # shared format/includeSensitive constants (values + descriptions)
   doctor-repair.ts        # shared doctor repair pass (refresh + stale-state clear); used by codex-doctor and CLI --fix
   refresh-account.ts      # shared single-use refresh-token persistence; used by account-management tools
   codex-list.ts           # one file per tool
@@ -76,11 +77,15 @@ export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
   (`resolveUiRuntime`, `formatCommandAccountLabel`,
   `promptAccountIndexSelection`, `buildRoutingVisibilitySnapshot`, …).
 
-Tool schema factories (`toolOutputFormatSchema`, `toolSensitiveJsonSchema`)
-are **inlined** in each tool that needs them rather than threaded through
-`ToolContext`, because their inferred Zod return type cannot be named
-across the module boundary without leaking the plugin's bundled `zod`
-copy (TS2742).
+Shared argument metadata lives in `lib/tools/args.ts`
+(`TOOL_OUTPUT_FORMAT_VALUES`, `TOOL_OUTPUT_FORMAT_DESCRIPTION`,
+`TOOL_INCLUDE_SENSITIVE_DESCRIPTION`). Only plain constants cross the module
+boundary: the actual `tool.schema` calls stay **inlined** in each tool that
+needs them, because a shared schema *factory*'s inferred Zod return type
+cannot be named across the module boundary without leaking the plugin's
+bundled `zod` copy (TS2742). `format` fields are
+`tool.schema.enum(TOOL_OUTPUT_FORMAT_VALUES).optional()` — never
+`.string()` — so the emitted tool-call JSON Schema constrains the value.
 
 ## Adding a new codex-* tool
 

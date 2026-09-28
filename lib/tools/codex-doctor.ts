@@ -48,6 +48,10 @@ import {
 	type RefreshAccountIdentity,
 } from "./refresh-account.js";
 import { repairDoctorAccounts } from "./doctor-repair.js";
+import {
+	TOOL_OUTPUT_FORMAT_DESCRIPTION,
+	TOOL_OUTPUT_FORMAT_VALUES,
+} from "./args.js";
 import type { ToolContext } from "./index.js";
 
 interface DoctorDiagnostics {
@@ -190,9 +194,9 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 					"Apply safe automated fixes (refresh tokens and switch to healthiest eligible account).",
 				),
 			format: tool.schema
-				.string()
+				.enum(TOOL_OUTPUT_FORMAT_VALUES)
 				.optional()
-				.describe('Output format: "text" (default) or "json".'),
+				.describe(TOOL_OUTPUT_FORMAT_DESCRIPTION),
 		},
 		async execute({
 			deep,
