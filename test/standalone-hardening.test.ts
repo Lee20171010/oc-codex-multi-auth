@@ -95,6 +95,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 		// would park every account under `projects/<home-key>/` instead.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{ accountId: "acct1234567890", email: "user-one@example.com", refreshToken: "rt-1" },
 		]);
@@ -115,6 +117,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("still resolves a real project root below $HOME", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const projDir = join(tempHome, "myproj");
 		await mkdir(join(projDir, ".git"), { recursive: true });
 		const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -140,6 +144,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("a keychain-migrated pool reports an error instead of 'No accounts configured'", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		// codex-keychain migrate renamed the live file to this sibling backup.
@@ -169,6 +175,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 		// treat it as writable live storage.
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const migrated = join(tempHome, "accounts.migrated-to-keychain.20260101000000.json");
 		await writeFile(migrated, VALID_V3, "utf-8");
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -196,6 +204,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("a migrated sibling's message points at rollback, not at an empty pool", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(
@@ -226,6 +236,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	])("storage schema parity: %s", async (_name, contents, pattern) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(join(opencodeDir, "oc-codex-multi-auth-accounts.json"), contents, "utf-8");
@@ -243,6 +255,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("storage errors carry snapshot/doctor remediation guidance", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(join(opencodeDir, "oc-codex-multi-auth-accounts.json"), "{ broken", "utf-8");
@@ -262,6 +276,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("a BOM-prefixed accounts file reads exactly like the runtime accepts it", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(
@@ -283,6 +299,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("a FIFO accounts file fails fast instead of hanging the read", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await makeFifo(join(opencodeDir, "oc-codex-multi-auth-accounts.json"));
@@ -302,6 +320,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("text-mode failures write Error:/Repair failed:/Flagged pool error: to stderr only", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const opencodeDir = join(tempHome, ".opencode");
 		await mkdir(opencodeDir, { recursive: true });
 		await writeFile(join(opencodeDir, "oc-codex-multi-auth-accounts.json"), "{ broken", "utf-8");
@@ -323,6 +343,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("diag --json reports command:\"diag\", not doctor", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, []);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -340,6 +362,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("an argument-parse failure under --json sends usage to stderr, keeping stdout clean", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -364,6 +388,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	])("a flag that requires a value errors clearly: %s", async (args, pattern) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -378,6 +404,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("--config-path \"\" is refused rather than resolving the default pool", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
@@ -392,6 +420,8 @@ describe("standalone CLI hardening (fuzz corpus regressions)", () => {
 	it("warm masks refresh-error bodies like limits does", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		await seedPool(tempHome, [
 			{
 				accountId: "acct1234567890",
