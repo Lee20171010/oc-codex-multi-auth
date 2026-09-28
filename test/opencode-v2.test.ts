@@ -282,6 +282,36 @@ describe("V2 compatibility adapter", () => {
 		await cleanup();
 	});
 
+	it("does not let an in-flight credential-event reload outlive teardown", async () => {
+		const h = host();
+		// The credential event fires once, then the stream idles — the consumer
+		// is then parked inside reload() while cleanup aborts the subscription.
+		(h.context as { event: unknown }).event = {
+			subscribe: vi.fn(async function* () {
+				yield { type: "credential.updated", location: h.context.location };
+				await new Promise(() => {});
+			}),
+		};
+		let releasePool: (value: unknown) => void = () => {};
+		const poolGate = new Promise((resolve) => { releasePool = resolve; });
+		mocks.loadAccounts
+			// setup's own hasOAuth() probe resolves normally…
+			.mockResolvedValueOnce({ activeIndex: 0, accounts: [{ refreshToken: "seed" }] })
+			// …but the credential-event reload parks inside hasOAuth() until the
+			// test releases it — i.e. teardown lands mid-reload.
+			.mockImplementationOnce(() => poolGate);
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		await vi.waitFor(() =>
+			expect(mocks.loadAccounts.mock.calls.length).toBeGreaterThanOrEqual(2),
+		);
+		const teardown = cleanup();
+		releasePool({ activeIndex: 0, accounts: [{ refreshToken: "fresh" }] });
+		await teardown;
+		// Abort landed before provider.reload(): the in-flight handler must be
+		// awaited and must not reload the provider post-teardown.
+		expect(h.context.provider.reload).not.toHaveBeenCalled();
+	});
+
 	it("hands the V1 loader a real model-keyed provider record", async () => {
 		const h = host();
 		const cleanup = await setupV2(h.context, mocks.runtime);
