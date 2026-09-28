@@ -268,6 +268,60 @@ describe("RefreshQueue", () => {
       
       vi.useRealTimers();
     });
+
+    it("keeps a replacement entry when the evicted stale refresh settles", async () => {
+      // An entry evicted as stale can be replaced by a newer refresh on the
+      // same token while the original exchange is still in flight. When the
+      // original promise finally settles its finally-block must delete by
+      // identity — `pending.get(token) === ownEntry` — or it silently removes
+      // the replacement and a third caller would start a third concurrent
+      // exchange of the same single-use token.
+      vi.useFakeTimers();
+      try {
+        let resolveStale: (result: { type: "success"; access: string; refresh: string; expires: number }) => void;
+        let resolveReplacement: (result: { type: "success"; access: string; refresh: string; expires: number }) => void;
+        vi.mocked(authModule.refreshAccessToken)
+          .mockImplementationOnce(
+            () => new Promise((resolve) => { resolveStale = resolve; }),
+          )
+          .mockImplementationOnce(
+            () => new Promise((resolve) => { resolveReplacement = resolve; }),
+          );
+
+        const queue = new RefreshQueue(1_000);
+
+        const staleRefresh = queue.refresh("shared-token");
+        expect(queue.isRefreshing("shared-token")).toBe(true);
+
+        // The first entry ages out and a new caller replaces it.
+        vi.advanceTimersByTime(1_500);
+        const replacement = queue.refresh("shared-token");
+        expect(authModule.refreshAccessToken).toHaveBeenCalledTimes(2);
+        expect(queue.isRefreshing("shared-token")).toBe(true);
+
+        // The stale refresh settles: its cleanup must leave the live entry.
+        resolveStale!({
+          type: "success",
+          access: "access-stale",
+          refresh: "stale-rotated",
+          expires: Date.now() + 3600000,
+        });
+        await staleRefresh;
+        expect(queue.isRefreshing("shared-token")).toBe(true);
+
+        resolveReplacement!({
+          type: "success",
+          access: "access-new",
+          refresh: "shared-token",
+          expires: Date.now() + 3600000,
+        });
+        await replacement;
+        expect(queue.isRefreshing("shared-token")).toBe(false);
+        expect(queue.pendingCount).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("singleton functions", () => {

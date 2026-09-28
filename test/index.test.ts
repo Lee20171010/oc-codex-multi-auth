@@ -3568,8 +3568,10 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "old-r1", email: "one@example.com" },
 			];
 			const { withAccountStorageTransaction } = await import("../lib/storage.js");
-			// Probe + commit: only the commit persists, so the failing persist has to
-			// be in place for both calls of the coordinated refresh.
+			// Every transaction shares a persist that always fails: probe reads
+			// never persist, so this simulates a storage outage across the commit
+			// AND the post-commit salvage the coordinated refresh now attempts.
+			const originalTransaction = vi.mocked(withAccountStorageTransaction).getMockImplementation();
 			const failingTransaction = async <T>(
 				callback: (
 					loadedStorage: typeof mockStorage,
@@ -3582,9 +3584,7 @@ describe("OpenAIOAuthPlugin", () => {
 				};
 				return callback(loadedStorage, persist);
 			};
-			vi.mocked(withAccountStorageTransaction)
-				.mockImplementationOnce(failingTransaction)
-				.mockImplementationOnce(failingTransaction);
+			vi.mocked(withAccountStorageTransaction).mockImplementation(failingTransaction);
 
 			const result = parseJsonOutput<{
 				healthyCount: number;
@@ -3597,6 +3597,7 @@ describe("OpenAIOAuthPlugin", () => {
 			expect(result.accounts[0]?.status).toBe("unhealthy");
 			expect(result.accounts[0]?.error).toContain("disk full");
 			expect(mockStorage.accounts[0]?.refreshToken).toBe("old-r1");
+			vi.mocked(withAccountStorageTransaction).mockImplementation(originalTransaction);
 		});
 
 		it("surfaces stale-state and duplicate findings (issue #171)", async () => {
