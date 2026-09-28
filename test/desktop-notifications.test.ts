@@ -20,7 +20,10 @@ describe("desktop notifications", () => {
 		const [file, args, options] = executeFile.mock.calls[0] ?? [];
 		expect(file).toBe("/usr/bin/osascript");
 		expect(args?.slice(0, 4)).toEqual(["-l", "JavaScript", "-e", expect.any(String)]);
-		expect(args?.slice(4)).toEqual([title, message]);
+		// Shell metacharacters survive (argv passing makes them inert), but the
+		// notification text is display-sanitized: the newline collapses so the
+		// message stays a single line.
+		expect(args?.slice(4)).toEqual([title, "10% left `unsafe`"]);
 		expect(args?.[3]).not.toContain(title);
 		expect(args?.[3]).not.toContain(message);
 		expect(options).toEqual({ timeout: 10_000, windowsHide: true });

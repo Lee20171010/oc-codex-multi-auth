@@ -3,6 +3,7 @@ import type { Event } from "@opencode-ai/sdk/v2";
 import type { JSX } from "@opentui/solid";
 
 import {
+	getCodexTuiGlyphMode,
 	getCodexTuiMaskEmail,
 	getCodexTuiMaskEmailInQuotaDetails,
 	getQuotaDisplay,
@@ -57,6 +58,8 @@ import {
 } from "./lib/tui-quota-cache.js";
 import { loadAccounts } from "./lib/storage.js";
 import { protectQuotaStatusSlot } from "./lib/tui-status-slot.js";
+import { sanitizeDisplayText } from "./lib/ui/display-text.js";
+import type { UiGlyphMode } from "./lib/ui/theme.js";
 export { protectQuotaStatusSlot } from "./lib/tui-status-slot.js";
 
 const CACHE_KEY = "oc-codex-multi-auth:tui-status:v2";
@@ -220,10 +223,13 @@ function formatTuiAccountLabel(
 	account: { email?: string; accountId?: string; organizationId?: string },
 	index: number,
 ): string {
+	// Every field is text the credential snapshot or an upstream response
+	// supplied; it lands in the shared cache and then on the prompt line, so
+	// escapes, controls, and bidi marks are stripped before anything reads it.
 	return (
-		account.email?.trim() ||
-		account.accountId?.trim() ||
-		account.organizationId?.trim() ||
+		sanitizeDisplayText(account.email) ??
+		sanitizeDisplayText(account.accountId) ??
+		sanitizeDisplayText(account.organizationId) ??
 		`Account ${index + 1}`
 	);
 }
@@ -394,6 +400,7 @@ type PromptStatusOptions = {
 	maskEmailInQuotaDetails: boolean;
 	quotaDisplay: QuotaDisplayMode;
 	quotaStatus: QuotaStatusConfig;
+	glyphMode: UiGlyphMode;
 };
 
 export function readPromptStatusOptions(): PromptStatusOptions {
@@ -403,6 +410,7 @@ export function readPromptStatusOptions(): PromptStatusOptions {
 		maskEmailInQuotaDetails: getCodexTuiMaskEmailInQuotaDetails(pluginConfig),
 		quotaDisplay: getQuotaDisplay(pluginConfig),
 		quotaStatus: getQuotaStatus(pluginConfig),
+		glyphMode: getCodexTuiGlyphMode(pluginConfig),
 	};
 }
 
@@ -423,6 +431,7 @@ export function samePromptStatusOptions(
 		left.maskEmail === right.maskEmail &&
 		left.maskEmailInQuotaDetails === right.maskEmailInQuotaDetails &&
 		left.quotaDisplay === right.quotaDisplay &&
+		left.glyphMode === right.glyphMode &&
 		leftStatus.screens.length === rightStatus.screens.length &&
 		leftStatus.screens.every(
 			(screen, position) => screen === rightStatus.screens[position],
@@ -768,12 +777,17 @@ function createActiveQuotaController(
 	});
 	return {
 		screens: ["active"],
-		lines(_screen, options) {
+		lines(_screen, options, layout) {
 			const text = formatPromptStatusText({
 				quota: quota(),
 				width: api.renderer.width,
+				// A measured slot beats the terminal-width heuristic: when the
+				// prompt row is narrower than the terminal (sidebar open, wide
+				// model label) the tier table would over-budget the line.
+				availableChars: layout.availableChars,
 				maskEmail: options.maskEmail,
 				quotaDisplay: options.quotaDisplay,
+				glyphMode: options.glyphMode,
 			});
 			return text ? [text] : [];
 		},

@@ -123,6 +123,19 @@ describe("V2 compatibility adapter", () => {
 			"integration.connection.resolve",
 			"integration.connection",
 		]);
+		// An intermediate member that is a *callable* namespace (a function
+		// carrying properties, e.g. `event` with `event.subscribe`) must still
+		// be walked — it is not "missing" merely for being a function.
+		const callableIntegration = {
+			...h.context,
+			integration: Object.assign(() => undefined, h.context.integration),
+		} as unknown as Plugin.Context;
+		expect(missingV2SdkSurface(callableIntegration)).toEqual([]);
+		const callableEvent = {
+			...h.context,
+			event: Object.assign(() => undefined, h.context.event),
+		} as unknown as Plugin.Context;
+		expect(missingV2SdkSurface(callableEvent)).toEqual([]);
 	});
 
 	it("uses a distinct provider package so V2 cannot rewrite the transport to native OpenAI", async () => {

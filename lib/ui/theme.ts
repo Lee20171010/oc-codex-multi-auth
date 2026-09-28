@@ -13,7 +13,11 @@
  *   2. `FORCE_COLOR` — if set to any value other than `"0"` / `"false"`,
  *      colors are forced on even without a TTY. `"0"` or `"false"`
  *      forces colors OFF regardless of TTY.
- *   3. Fallback: enable colors when the stream is a TTY.
+ *   3. `TERM=dumb` (and equally limited terminals) cannot render color;
+ *      this check sits after `FORCE_COLOR` because a positive force is an
+ *      explicit operator override.
+ *   4. Fallback: enable colors when the stream is a TTY. Non-TTY output —
+ *      pipes, files, and CI logs — therefore gets plain text automatically.
  *
  * The helper takes its dependencies as parameters so it is trivially
  * testable and can be reused from non-process contexts.
@@ -28,7 +32,40 @@ export function shouldUseColor(
 		if (force === "0" || force === "false") return false;
 		return true;
 	}
+	if (!hasAnsiCapableTerm(env)) return false;
 	return Boolean(stdout.isTTY);
+}
+
+/**
+ * Whether `TERM` describes a terminal that understands ANSI escape
+ * sequences at all. `dumb`, `cons25`, and `emacs` (shell buffers) do not.
+ * An unset `TERM` is treated as capable: on a real TTY every mainstream
+ * terminal sets it, and silently disabling capability on odd setups would
+ * remove styling users asked for via `FORCE_COLOR`/`codexTuiV2`.
+ */
+function hasAnsiCapableTerm(env: NodeJS.ProcessEnv): boolean {
+	const term = env.TERM?.toLowerCase();
+	if (term === undefined || term === "") return true;
+	return term !== "dumb" && term !== "cons25" && term !== "emacs";
+}
+
+/**
+ * Resolve whether the terminal accepts ANSI *control* sequences — cursor
+ * movement, screen clearing, hide/show cursor. This is a separate, stricter
+ * question than {@link shouldUseColor}: `FORCE_COLOR` can force styling on
+ * but must never unlock cursor controls, because a positive FORCE_COLOR
+ * does not prove the terminal can move the cursor (e.g. `TERM=dumb` with
+ * `FORCE_COLOR=1` still cannot reposition). Conversely `NO_COLOR` does not
+ * disable cursor movement.
+ *
+ * Requirement: the stream is a TTY *and* `TERM` is ANSI-capable.
+ */
+export function terminalSupportsAnsi(
+	stdout: { isTTY?: boolean } = process.stdout,
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	if (!stdout.isTTY) return false;
+	return hasAnsiCapableTerm(env);
 }
 
 export type UiColorProfile = "ansi16" | "ansi256" | "truecolor";
@@ -40,6 +77,18 @@ export interface UiGlyphSet {
 	bullet: string;
 	check: string;
 	cross: string;
+	/** Inline separator between status segments: `·` / `-`. */
+	separator: string;
+	/** Truncation marker: `…` / `...`. */
+	ellipsis: string;
+	/** Filled marker for the active entry: `●` / `*`. */
+	active: string;
+	/** Hollow marker for inactive entries: `○` / `o`. */
+	inactive: string;
+	/** Directional marker: `→` / `->`. */
+	arrow: string;
+	/** Sentence-level dash: `—` / `-`. */
+	emDash: string;
 }
 
 export interface UiThemeColors {
@@ -65,7 +114,15 @@ const ansi16 = (code: number): string => `\x1b[${code}m`;
 const ansi256 = (code: number): string => `\x1b[38;5;${code}m`;
 const truecolor = (r: number, g: number, b: number): string => `\x1b[38;2;${r};${g};${b}m`;
 
-function resolveGlyphMode(mode: UiGlyphMode): Exclude<UiGlyphMode, "auto"> {
+/**
+ * Resolves an `auto` glyph mode against the current environment, leaving
+ * explicit `ascii`/`unicode` untouched. Exported so surfaces outside the
+ * {@link UiTheme} carrier (status lines, V2 slots, tables) can honour
+ * `codexTuiGlyphMode` as well.
+ */
+export function resolveUiGlyphMode(
+	mode: UiGlyphMode,
+): Exclude<UiGlyphMode, "auto"> {
 	if (mode !== "auto") return mode;
 	const isLikelyUnicodeSafe =
 		process.env.WT_SESSION !== undefined ||
@@ -82,6 +139,12 @@ function getGlyphs(mode: Exclude<UiGlyphMode, "auto">): UiGlyphSet {
 			bullet: "•",
 			check: "✓",
 			cross: "✗",
+			separator: "·",
+			ellipsis: "…",
+			active: "●",
+			inactive: "○",
+			arrow: "→",
+			emDash: "—",
 		};
 	}
 	return {
@@ -90,7 +153,18 @@ function getGlyphs(mode: Exclude<UiGlyphMode, "auto">): UiGlyphSet {
 		bullet: "-",
 		check: "+",
 		cross: "x",
+		separator: "-",
+		ellipsis: "...",
+		active: "*",
+		inactive: "o",
+		arrow: "->",
+		emDash: "-",
 	};
+}
+
+/** Glyph set for a (possibly `auto`) glyph mode, resolved once. */
+export function resolveUiGlyphs(mode: UiGlyphMode): UiGlyphSet {
+	return getGlyphs(resolveUiGlyphMode(mode));
 }
 
 function getColors(profile: UiColorProfile): UiThemeColors {
@@ -140,7 +214,7 @@ export function createUiTheme(options?: {
 }): UiTheme {
 	const profile = options?.profile ?? "truecolor";
 	const glyphMode = options?.glyphMode ?? "ascii";
-	const resolvedGlyphMode = resolveGlyphMode(glyphMode);
+	const resolvedGlyphMode = resolveUiGlyphMode(glyphMode);
 	return {
 		profile,
 		glyphMode,

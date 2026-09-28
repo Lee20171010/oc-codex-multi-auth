@@ -3,6 +3,14 @@
  * Generates consistent, aligned table output.
  */
 
+import {
+	displayWidth,
+	padEndDisplay,
+	padStartDisplay,
+	sanitizeDisplayText,
+	truncateToDisplayWidth,
+} from "./ui/display-text.js";
+
 export interface TableColumn {
 	/** Column header text */
 	header: string;
@@ -21,10 +29,23 @@ export interface TableOptions {
 
 /**
  * Format a value to fit within a column width.
+ *
+ * `width` is a column budget in *display* columns: the value is sanitized
+ * (escape sequences and control characters out), truncated on grapheme
+ * boundaries so CJK and emoji never split mid-cluster, and padded by measured
+ * width so a two-column cell still lines up with its ASCII neighbours.
  */
 function formatCell(value: string, width: number, align: "left" | "right" = "left"): string {
-	const truncated = value.length > width ? value.slice(0, width - 1) + "…" : value;
-	return align === "right" ? truncated.padStart(width) : truncated.padEnd(width);
+	const cols = Math.max(0, Math.floor(width));
+	if (cols === 0) return "";
+	const clean = sanitizeDisplayText(value) ?? "";
+	const truncated =
+		displayWidth(clean) > cols
+			? truncateToDisplayWidth(clean, cols, "…")
+			: clean;
+	return align === "right"
+		? padStartDisplay(truncated, cols)
+		: padEndDisplay(truncated, cols);
 }
 
 /**
@@ -35,7 +56,9 @@ export function buildTableHeader(options: TableOptions): string[] {
 
 	const headerRow = columns.map((col) => formatCell(col.header, col.width, col.align)).join(" ");
 
-	const separatorRow = columns.map((col) => separatorChar.repeat(col.width)).join(" ");
+	const separatorRow = columns
+		.map((col) => separatorChar.repeat(Math.max(0, Math.floor(col.width))))
+		.join(" ");
 
 	return [headerRow, separatorRow];
 }

@@ -29,6 +29,7 @@
  */
 
 import { maskEmailForDisplay } from "./account-display.js";
+import { sanitizeDisplayText } from "./ui/display-text.js";
 import { computeWeightedLeftPercent, resolveGoverningWindow } from "./quota-capacity.js";
 import { resolveNextQuotaRecovery, resolveQuotaRecoveryEvents } from "./quota-recovery.js";
 export { computeWeightedLeftPercent, resolveGoverningWindow } from "./quota-capacity.js";
@@ -318,7 +319,7 @@ function formatEmailLocalPart(
 	email: string,
 	maskEmail: boolean,
 ): string | undefined {
-	const trimmed = email.trim();
+	const trimmed = sanitizeDisplayText(email);
 	if (!trimmed) return undefined;
 	const local = trimmed.split("@")[0]?.trim();
 	if (!local) return undefined;
@@ -342,7 +343,10 @@ export function resolveAccountName(
 ): string | undefined {
 	if (names === "none") return undefined;
 	if (names === "number") return `#${account.index}`;
-	const label = account.label?.trim();
+	// Labels and emails come from account storage and `/wham` responses —
+	// untrusted text that is interpolated straight onto the status line, so
+	// control characters, escapes, and bidi marks are stripped first.
+	const label = sanitizeDisplayText(account.label);
 	if (label && !EMAIL_LIKE.test(label)) return label;
 	const email = label && EMAIL_LIKE.test(label) ? label : account.email;
 	const local = email ? formatEmailLocalPart(email, maskEmail) : undefined;
@@ -354,9 +358,10 @@ function resolveAccountEmail(
 	account: QuotaOverviewAccount,
 	maskEmail: boolean,
 ): string | undefined {
-	const label = account.label?.trim();
+	const label = sanitizeDisplayText(account.label);
 	const email =
-		account.email?.trim() || (label && EMAIL_LIKE.test(label) ? label : undefined);
+		sanitizeDisplayText(account.email) ??
+		(label && EMAIL_LIKE.test(label) ? label : undefined);
 	if (!email) return undefined;
 	return maskEmail ? maskEmailForDisplay(email) : email;
 }

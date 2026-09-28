@@ -8,6 +8,10 @@ vi.mock("node:readline/promises", () => ({
 const mockRl = {
   question: vi.fn(),
   close: vi.fn(),
+  // `askLine` in lib/cli.ts races `question` against the interface's `close`
+  // event so EOF settles the prompt; the real Interface is an EventEmitter.
+  once: vi.fn(),
+  off: vi.fn(),
 };
 
 describe("CLI Module", () => {
@@ -16,6 +20,8 @@ describe("CLI Module", () => {
     process.env.FORCE_INTERACTIVE_MODE = "1";
     mockRl.question.mockReset();
     mockRl.close.mockReset();
+    mockRl.once.mockReset();
+    mockRl.off.mockReset();
     vi.mocked(createInterface).mockReturnValue(mockRl as any);
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
@@ -98,6 +104,24 @@ describe("CLI Module", () => {
       const { promptAddAnotherAccount } = await import("../lib/cli.js");
       
       await expect(promptAddAnotherAccount(1)).rejects.toThrow("test error");
+      expect(mockRl.close).toHaveBeenCalled();
+    });
+
+    it("settles a pending question as an empty answer when stdin closes (EOF)", async () => {
+      // `rl.question` never resolves on stream EOF in some Node versions; the
+      // prompt must not hang — EOF answers like an empty line would.
+      mockRl.question.mockReturnValueOnce(new Promise<string>(() => {}));
+
+      const { promptAddAnotherAccount } = await import("../lib/cli.js");
+      const promise = promptAddAnotherAccount(1);
+
+      const onClose = mockRl.once.mock.calls.find(
+        ([event]) => event === "close",
+      )?.[1] as (() => void) | undefined;
+      expect(onClose).toBeDefined();
+      onClose!();
+
+      await expect(promise).resolves.toBe(false);
       expect(mockRl.close).toHaveBeenCalled();
     });
   });

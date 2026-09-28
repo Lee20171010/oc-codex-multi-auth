@@ -1,4 +1,4 @@
-import { getCodexTuiMaskEmail, getCodexTuiMaskEmailInQuotaDetails, getQuotaDisplay, getQuotaStatus, loadPluginConfig } from "./config.js";
+import { getCodexTuiGlyphMode, getCodexTuiMaskEmail, getCodexTuiMaskEmailInQuotaDetails, getQuotaDisplay, getQuotaStatus, loadPluginConfig } from "./config.js";
 import { fetchTuiQuotaOverview, toQuotaOverviewAccounts } from "./tui-quota-overview.js";
 import { readTuiQuotaSnapshot, readTuiQuotaOverviewSnapshot, isFreshTuiQuotaSnapshot, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "./tui-quota-cache.js";
 import { formatPromptStatusText, formatQuotaDetailsText, formatQuotaOverviewStatusLines, formatQuotaResetsStatusLines, type CompactQuotaStatus } from "./tui-status.js";
@@ -7,6 +7,7 @@ import { getStoragePath, loadAccounts } from "./storage.js";
 import { getCurrentProjectRoot } from "./storage/state.js";
 import { createUsageAccountFingerprint } from "./codex-usage.js";
 import { resolveDisplayEmail } from "./account-display.js";
+import { sanitizeDisplayText } from "./ui/display-text.js";
 
 /** Same cadence as the V1 prompt status poll. */
 const OVERVIEW_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -46,6 +47,7 @@ export async function readV2Status({ width }: { width: number }) {
 	const status = getQuotaStatus(config);
 	const quotaDisplay = getQuotaDisplay(config);
 	const maskEmail = getCodexTuiMaskEmail(config);
+	const glyphMode = getCodexTuiGlyphMode(config);
 	const snapshot = await readTuiQuotaSnapshot();
 	const pool = await loadAccounts();
 	// The headers cache is global: project pools seeded from the same accounts
@@ -69,12 +71,16 @@ export async function readV2Status({ width }: { width: number }) {
 			accountCount: pool?.accounts.length, accountEmail: active.email, accountLabel: active.accountLabel,
 			planType: usage.planType };
 	}
-	const activeText = formatPromptStatusText({ quota, width, quotaDisplay, maskEmail });
+	// `width` is the raw terminal width the TUI reported; the formatters apply
+	// their own single discount (`maxStatusChars` tiers, `maxOverviewStatusChars`
+	// reserve), so it is passed through unadjusted — discounting it again here
+	// would shrink the line twice.
+	const activeText = formatPromptStatusText({ quota, width, quotaDisplay, maskEmail, glyphMode });
 	const renderScreen = (screen: (typeof status.screens)[number]): string => {
 		if (screen === "active" || !overview) return activeText;
 		const format = screen === "resets" ? formatQuotaResetsStatusLines : formatQuotaOverviewStatusLines;
 		return format({
-			accounts: toQuotaOverviewAccounts(overview), width, availableChars: width, maxRows: status.rows,
+			accounts: toQuotaOverviewAccounts(overview), width, maxRows: status.rows,
 			resetsMinUsedPercent: status.resetsMinUsedPercent,
 			options: { ...status, names: status.accountNames, mode: quotaDisplay, maskEmail },
 		}).join("\n");
@@ -87,10 +93,14 @@ export async function readV2Status({ width }: { width: number }) {
 		: "";
 	return {
 		text,
+		glyphMode,
 		accountStorage: getCurrentProjectRoot() ? "project" as const : "global" as const,
 		accounts: (pool?.accounts ?? []).map((account, index) => ({
 			index: index + 1,
-			label: account.accountLabel?.trim() || resolveDisplayEmail(account.email, maskEmail) || `Account ${index + 1}`,
+			label:
+				sanitizeDisplayText(account.accountLabel) ??
+				sanitizeDisplayText(resolveDisplayEmail(account.email, maskEmail)) ??
+				`Account ${index + 1}`,
 			active: index === (servingIndex !== undefined && servingIndex >= 0 ? servingIndex : pool?.activeIndex),
 			enabled: account.enabled !== false,
 		})),

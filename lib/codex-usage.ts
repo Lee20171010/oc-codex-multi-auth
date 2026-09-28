@@ -32,6 +32,13 @@ import {
 	isInvalidatedAuthTokenError,
 } from "./request/fetch-helpers.js";
 import {
+	displayWidth,
+	formatClockTime,
+	formatShortDate,
+	sanitizeDisplayText,
+	truncateToDisplayWidth,
+} from "./ui/display-text.js";
+import {
 	withAccountStorageTransaction,
 	type AccountMetadataV3,
 	type AccountStorageV3,
@@ -164,17 +171,10 @@ export function formatUsageReset(
 		now.getFullYear() === date.getFullYear() &&
 		now.getMonth() === date.getMonth() &&
 		now.getDate() === date.getDate();
-	const time = date.toLocaleTimeString(undefined, {
-		hour: "2-digit",
-		minute: "2-digit",
-		hour12: false,
-	});
+	// Fixed formatters — the status line must not drift with the host locale.
+	const time = formatClockTime(date);
 	if (sameDay) return time;
-	const day = date.toLocaleDateString(undefined, {
-		month: "short",
-		day: "2-digit",
-	});
-	return `${time} on ${day}`;
+	return `${time} on ${formatShortDate(date)}`;
 }
 
 /**
@@ -715,7 +715,11 @@ export function sanitizeCodexApiErrorMessage(
 	status: number,
 	bodyText: string,
 ): string {
-	const normalized = bodyText.replace(/\s+/g, " ").trim();
+	// The body is attacker/server-controlled text: strip escape sequences and
+	// control characters before it can reach a terminal or log sink, then
+	// redact anything that looks like a credential.
+	const normalized =
+		sanitizeDisplayText(bodyText, { maxLength: usageErrorBodyMaxChars }) ?? "";
 	const redacted = normalized
 		.replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
 		.replace(
@@ -859,12 +863,19 @@ export async function fetchCodexWorkspaceNames(params: {
 			const { id, name, structure } = entry as Record<string, unknown>;
 			if (typeof id !== "string" || typeof name !== "string") continue;
 			if (structure !== undefined && structure !== "workspace") continue;
-			const cleaned = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+			// Shared display-text sanitizer: escape sequences, bidi marks, and
+			// controls out in addition to the C0/C1 collapse this did by hand —
+			// the name is chosen by the workspace owner and printed verbatim.
+			const cleaned = sanitizeDisplayText(name, {
+				maxLength: MAX_WORKSPACE_NAME_LENGTH * 4,
+			});
 			if (!cleaned) continue;
 			names.set(
 				id,
-				cleaned.length > MAX_WORKSPACE_NAME_LENGTH
-					? `${cleaned.slice(0, MAX_WORKSPACE_NAME_LENGTH - 1)}…`
+				// Bounded in display columns, not code units — a CJK workspace
+				// name cannot overrun the line it lands on.
+				displayWidth(cleaned) > MAX_WORKSPACE_NAME_LENGTH
+					? truncateToDisplayWidth(cleaned, MAX_WORKSPACE_NAME_LENGTH)
 					: cleaned,
 			);
 		}

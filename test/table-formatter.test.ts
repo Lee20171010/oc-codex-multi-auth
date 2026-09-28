@@ -61,6 +61,28 @@ describe("table-formatter", () => {
 			const row = buildTableRow(["42", "abc"], options);
 			expect(row).toBe("   42 abc  ");
 		});
+
+		it("pads wide characters by display columns, not code units", () => {
+			const options: TableOptions = {
+				columns: [{ header: "Name", width: 8 }],
+			};
+			// "日本語" is 6 columns: two spaces of padding, not five.
+			expect(buildTableRow(["日本語"], options)).toBe("日本語  ");
+		});
+
+		it("truncates on grapheme boundaries instead of splitting a wide char", () => {
+			const options: TableOptions = {
+				columns: [{ header: "Name", width: 6 }],
+			};
+			// 日本語x is 7 columns in a 6-column cell: keep 日本 (4) + ellipsis.
+			expect(buildTableRow(["日本語x"], options)).toBe("日本… ");
+		});
+
+		it("strips escape sequences out of cell values", () => {
+			const row = buildTableRow(["\x1b[31mevil\x1b[0m", "ok", "1"], simpleOptions);
+			expect(row).not.toContain("\x1b");
+			expect(row).toContain("evil");
+		});
 	});
 
 	describe("buildTable", () => {

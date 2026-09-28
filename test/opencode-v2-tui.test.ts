@@ -53,7 +53,9 @@ describe("V2 accounts UI", () => {
 		const sidebar = slots.get("sidebar.content")!.render({})!;
 		expect(sidebar.children).toContain("● 1. First");
 		expect(sidebar.children).toContain("○ 2. Second (disabled)");
-		expect(status).toHaveBeenCalledWith({ width: 60 }, expect.objectContaining({ location: context.location }));
+		// The raw renderer width is sent — the status formatter owns the single
+		// reserve discount, so subtracting it here would double-count.
+		expect(status).toHaveBeenCalledWith({ width: 100 }, expect.objectContaining({ location: context.location }));
 		await commands.find((command) => command.id === "codex.accounts")!.run();
 		expect(alert).toHaveBeenCalledWith(expect.objectContaining({ title: "Codex accounts", message: expect.stringContaining("opencode auth login") }));
 		expect(alert.mock.calls[0]?.[0].message).toContain("this project uses its own pool");
@@ -141,6 +143,62 @@ describe("V2 accounts UI", () => {
 			title: "Codex logout",
 			message: expect.stringContaining("account pool is unchanged"),
 		}));
+	});
+
+	it("sanitizes RPC text and account labels, and honours the returned glyph mode", async () => {
+		vi.useFakeTimers();
+		const slots = new Map<string, { render: (props: object) => { children: string } | null }>();
+		const status = vi.fn().mockResolvedValue({
+			// Escape sequences and bidi marks must not reach the renderer; the
+			// newline in `text` is preserved (multi-line status is supported).
+			text: "quota\x1b[31m ready\nline two\u202e",
+			details: "details \x1bPq\x1b\\ here",
+			showFor: "always",
+			accountStorage: "global",
+			glyphMode: "ascii",
+			accounts: [
+				{ index: 1, label: "Fi\trst", active: true, enabled: true },
+				{ index: 2, label: "\x1b[7mSecond\x1b[0m", active: false, enabled: true },
+			],
+		});
+		const context = {
+			location: { directory: "/tmp/opencode/project" }, renderer: { width: 100 },
+			client: { rpc: () => ({ status }) },
+			theme: { text: { base: "white" } },
+			data: { session: { get: () => undefined, message: { list: () => [] } }, location: { default: () => ({ directory: "/tmp/opencode/project" }) } },
+			keymap: { layer: (factory: () => { commands: Array<{ id: string }> }) => void factory() },
+			ui: { dialog: { alert: vi.fn(), confirm: vi.fn() }, slot: (claim: { append: string }) => { slots.set(claim.append, claim as never); return vi.fn(); } },
+		} as unknown as Plugin.Context;
+		setupV2Tui(context);
+		slots.get("app")!.render({});
+		await vi.advanceTimersByTimeAsync(0);
+		const sidebar = slots.get("sidebar.content")!.render({})!;
+		// ASCII glyph mode swaps ●/○ for */o, and every label is sanitized.
+		expect(sidebar.children).toContain("* 1. Fi rst");
+		expect(sidebar.children).toContain("o 2. Second");
+		expect(sidebar.children).not.toContain("\x1b");
+		expect(slots.get("prompt.footer.status")!.render({})!.children).toBe("quota ready\nline two");
+	});
+
+	it("falls back to an 80-column budget when the renderer reports no width", async () => {
+		vi.useFakeTimers();
+		const slots = new Map<string, { render: (props: object) => { children: string } | null }>();
+		const status = vi.fn().mockResolvedValue({
+			text: "quota ready", details: "d", showFor: "always",
+			accountStorage: "global", accounts: [],
+		});
+		const context = {
+			location: { directory: "/tmp/opencode/project" }, renderer: { width: 0 },
+			client: { rpc: () => ({ status }) },
+			theme: { text: { base: "white" } },
+			data: { session: { get: () => undefined, message: { list: () => [] } }, location: { default: () => ({ directory: "/tmp/opencode/project" }) } },
+			keymap: { layer: (factory: () => { commands: Array<{ id: string }> }) => void factory() },
+			ui: { dialog: { alert: vi.fn(), confirm: vi.fn() }, slot: (claim: { append: string }) => { slots.set(claim.append, claim as never); return vi.fn(); } },
+		} as unknown as Plugin.Context;
+		setupV2Tui(context);
+		slots.get("app")!.render({});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status).toHaveBeenCalledWith({ width: 80 }, expect.objectContaining({ location: context.location }));
 	});
 
 	it("aborts codex.logout when the user declines the confirmation", async () => {

@@ -1654,8 +1654,11 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 
 		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
 		expect(printed).toMatch(/- \[0\] .*\n  Business account: dh\n/);
-		// Owner-chosen text cannot smuggle a terminal escape or a fake line in.
-		expect(printed).toMatch(/- \[1\] .*\n  Business account: Virtkick \[31m 1 Business\n/);
+		// Owner-chosen text cannot smuggle a terminal escape or a fake line in:
+		// the whole `\x1b[31m` sequence is stripped, not just the ESC byte, and
+		// the embedded newline collapses to a space.
+		expect(printed).toMatch(/- \[1\] .*\n  Business account: Virtkick 1 Business\n/);
+		expect(printed).not.toContain("[31m");
 		expect(printed).toMatch(/- \[2\] .*\n  Weekly limit/);
 		// The first answer names both workspaces, so only the personal account
 		// (which no answer names) is asked about again.
