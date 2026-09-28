@@ -151,6 +151,11 @@ export async function writeFileAtomic(filePath: string, content: string): Promis
 export async function writeFileWithTimeout(filePath: string, content: string, timeoutMs: number): Promise<void> {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  // The handle is hoisted to function scope so the catch path can close it:
+  // a wedged fsync cannot be cancelled, but leaving the fd open makes the
+  // caller's temp-file unlink fail outright on Windows — and the file it
+  // pins can contain refresh tokens.
+  let flushHandle: FileHandle | undefined;
   try {
     await fs.writeFile(filePath, content, {
       encoding: "utf-8",
@@ -164,12 +169,13 @@ export async function writeFileWithTimeout(filePath: string, content: string, ti
     // abort signal and surfaces as ETIMEDOUT instead of outliving the
     // caller's deadline.
     const flushExisting = (async () => {
-      let handle: FileHandle | undefined;
       try {
-        handle = await fs.open(filePath, "r+");
-        await handle.sync();
+        flushHandle = await fs.open(filePath, "r+");
+        await flushHandle.sync();
       } finally {
-        if (handle) {
+        if (flushHandle) {
+          const handle = flushHandle;
+          flushHandle = undefined;
           try {
             await handle.close();
           } catch {
@@ -195,6 +201,17 @@ export async function writeFileWithTimeout(filePath: string, content: string, ti
     await Promise.race([flushExisting, aborted]);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
+      // The fsync may still hold the file open — on Windows that alone
+      // blocks the caller's temp-file cleanup. Close it ourselves under a
+      // short bound; if even close() hangs we must not wait on it.
+      if (flushHandle) {
+        const handle = flushHandle;
+        flushHandle = undefined;
+        await Promise.race([
+          handle.close().catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 250)),
+        ]);
+      }
       const timeoutError = Object.assign(
         new Error(`Timed out writing file after ${timeoutMs}ms`),
         { code: "ETIMEDOUT" },
