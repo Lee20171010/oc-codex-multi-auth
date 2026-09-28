@@ -59,14 +59,16 @@ With `autoUpdate` on (default; off via `autoUpdate: false` or `CODEX_AUTH_AUTO_U
 
 ## Local data storage
 
-Everything below lives on your machine. POSIX modes are applied where noted.
+Everything below lives on your machine. Mode bits (`0o600`/`0o700`) are applied
+**on POSIX only**; on Windows the files inherit the user profile's ACLs instead.
 
-| Item | Path | Mode |
+| Item | Path | Mode (POSIX) |
 |------|------|------|
 | Global account pool | `~/.opencode/oc-codex-multi-auth-accounts.json` | file `0o600`, dir `0o700` |
 | Per-project pool (default on) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | `0o600` / `0o700` |
 | Flagged (quarantined) accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active accounts file | `0o600` / `0o700` |
 | Credential snapshots (pre-write backups) | `backups/codex-credential-snapshot-*.json` beside the active accounts file | `0o600` / `0o700` |
+| Rotation journal | `*.pending-rotation.json` beside the active accounts file — a refresh committed upstream but not yet saved to the pool | `0o600` / `0o700` |
 | Storage locks | `<storage>.transaction.lock`, `<storage>.refresh.lock` beside the active accounts file | — |
 | Plugin config | `~/.opencode/openai-codex-auth-config.json` | — |
 | Quota notification state | `oc-codex-multi-auth-quota-notifications.json` beside the active accounts file | `0o600` / `0o700` |
@@ -78,6 +80,8 @@ Everything below lives on your machine. POSIX modes are applied where noted.
 | OS keychain (opt-in) | `CODEX_KEYCHAIN=1` → OS credential store, service `oc-codex-multi-auth`; JSON renamed `*.migrated-to-keychain.<ts>` | OS-managed |
 
 Account pools hold OAuth access/refresh tokens, account IDs, labels/tags/notes, rate-limit reset times, and rotation state. Legacy `openai-codex-*.json` files are read once for migration only.
+
+**Windows keychain size limit.** Windows Credential Manager caps a stored credential blob far below the size of a multi-account pool. With `CODEX_KEYCHAIN=1` on `win32`, writes are size-checked up front: an oversized blob stays on the JSON path (never deleted) instead of failing mid-write.
 
 ### Request logging is opt-in
 
