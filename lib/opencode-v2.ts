@@ -246,8 +246,26 @@ async function setupScopedV2(
 		return connection ? (await context.integration.connection.resolve(connection))?.type === "oauth" : false;
 	};
 	let enabled = false;
-	const reload = async () => { enabled = await hasOAuth(); await context.provider.reload(); };
 	const controller = new AbortController();
+	// Aborting the subscription stops NEW credential events, but an event can
+	// already be inside `reload()` when cleanup runs — teardown must not let
+	// that handler finish a provider.reload() after disposal began. The guard
+	// below blocks the provider call once aborted, and `inFlightReload` lets
+	// cleanup await the handler it interrupted rather than racing it.
+	let inFlightReload: Promise<void> | undefined;
+	const reload = async () => {
+		if (controller.signal.aborted) return;
+		const current = (async () => {
+			enabled = await hasOAuth();
+			if (!controller.signal.aborted) await context.provider.reload();
+		})();
+		inFlightReload = current;
+		try {
+			await current;
+		} finally {
+			if (inFlightReload === current) inFlightReload = undefined;
+		}
+	};
 	// Every SDK registration (transforms, hooks, the status RPC) is released on
 	// unload with the event subscription and the runtime teardown.
 	const registrations: { dispose: () => Promise<void> }[] = [];
@@ -256,6 +274,7 @@ async function setupScopedV2(
 	};
 	const cleanup = () => run(async () => {
 		controller.abort();
+		await inFlightReload?.catch(() => {});
 		await Promise.all(registrations.map((registration) => registration.dispose().catch(() => {})));
 		await runtime.event?.({ event: { type: "server.instance.disposed", properties: { directory: context.location.directory } } });
 	});
