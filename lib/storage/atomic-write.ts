@@ -148,7 +148,12 @@ export async function writeFileAtomic(filePath: string, content: string): Promis
  * cannot block the import transaction forever; every other write path uses
  * {@link writeFileAtomic} or the normal, untimed `fs.writeFile`.
  */
-export async function writeFileWithTimeout(filePath: string, content: string, timeoutMs: number): Promise<void> {
+export async function writeFileWithTimeout(
+  filePath: string,
+  content: string,
+  timeoutMs: number,
+  onHandleAbandoned?: (closed: Promise<void>) => void,
+): Promise<void> {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
   // The handle is hoisted to function scope so the catch path can close it:
@@ -207,10 +212,21 @@ export async function writeFileWithTimeout(filePath: string, content: string, ti
       if (flushHandle) {
         const handle = flushHandle;
         flushHandle = undefined;
-        await Promise.race([
-          handle.close().catch(() => {}),
-          new Promise<void>((resolve) => setTimeout(resolve, 250)),
+        const closed = handle.close().then(
+          () => {},
+          () => {},
+        );
+        const closedInTime = await Promise.race([
+          closed.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(resolve, 250, false)),
         ]);
+        if (!closedInTime) {
+          // close() is still pending on the wedged fsync — the temp file may
+          // stay undeletable until the fd actually releases (Windows). Hand
+          // the eventual close to the caller so its cleanup can retry then;
+          // we do not wait on it, so the caller's timeout bound is unchanged.
+          onHandleAbandoned?.(closed);
+        }
       }
       const timeoutError = Object.assign(
         new Error(`Timed out writing file after ${timeoutMs}ms`),
