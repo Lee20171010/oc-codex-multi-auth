@@ -197,7 +197,11 @@ export function getRateLimitBackoffWithReason(
 	);
 	return {
 		...result,
-		delayMs: adjustedDelay,
+		// Re-apply the server-mandated floor after reason jitter: Retry-After
+		// is a minimum, and a low jitter roll must not schedule a retry before
+		// it elapses. When no server delay was supplied the floor is zero and
+		// jitter decorrelates freely.
+		delayMs: Math.max(adjustedDelay, normalizeDelayMs(serverRetryAfterMs, 0)),
 		reason,
 	};
 }
