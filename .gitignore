@@ -80,3 +80,7 @@ __pycache__/
 
 # oh-my-claudecode agent state
 .omc/
+
+# Agent worktrees are full checkouts of this repo, not symlinks to one.
+# Without this they show as untracked and eslint lints every file twice.
+.worktrees/

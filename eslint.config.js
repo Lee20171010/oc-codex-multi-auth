@@ -6,10 +6,17 @@ export default [
     // `coverage/` holds vitest's generated HTML report, including vendored JS.
     // It is gitignored but was still being linted, so `npm run lint` reported
     // warnings from generated files after any `npm run test:coverage`.
+    //
+    // `.worktrees/**` holds full CHECKOUTS of this repository -- a worktree is
+    // not a symlink to a checkout, it is a second one, so it contains a
+    // complete copy of `lib/`, `test/` and `scripts/`. Linting it produced 312
+    // errors, none of which belong to the tree being worked on, and the gate
+    // was unusable in practice. `.worktrees/` is now gitignored as well.
     ignores: [
       "dist/**",
       "coverage/**",
       "node_modules/**",
+      ".worktrees/**",
       "winston/**",
       "*.cjs",
       "*.mjs",
