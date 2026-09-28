@@ -1,307 +1,115 @@
 # Privacy & Data Handling
 
-This page explains how `oc-codex-multi-auth` handles local data, upstream requests, and debugging artifacts.
-
-**Last updated:** 2026-09-14
-
-## Overview
-
-This plugin prioritizes local control and transparency. It does not ship product telemetry or analytics to third parties. Network traffic is limited to the OpenAI/ChatGPT auth and API endpoints you are actively using, optional Codex instruction/catalog fetches from GitHub, and an optional daily npm version check when auto-update is enabled.
+How `oc-codex-multi-auth` handles local data, upstream requests, and debugging artifacts — verified against the current source.
 
 > [!CAUTION]
 > This plugin is for personal development use with your own ChatGPT Plus/Pro subscription. You are responsible for your prompts, exports, and OpenAI policy compliance.
 
----
+## What we collect
 
-## What We Collect
+**No first-party telemetry.** No analytics product, no usage tracking, no crash reports, and no endpoint that uploads account data to the package maintainers. The only network calls are the ones enumerated below, all of which you initiate or configure.
 
-**No first-party telemetry.** This plugin does not send usage analytics, crash reports, or account inventories to the package maintainers.
+## Network endpoints
 
-- No analytics product
-- No usage tracking service
-- No remote logging of prompts to maintainers
+All traffic is HTTPS, direct from your machine — there is no maintainer proxy.
 
-Local logs, caches, and config files on **your** machine are separate; see [Data Storage](#data-storage).
+| Endpoint | Used for | Credentials? |
+|----------|----------|--------------|
+| `https://auth.openai.com/oauth/authorize` | Browser OAuth (PKCE) — opened in your browser | — |
+| `https://auth.openai.com/oauth/token` | Code exchange + token refresh (`lib/auth/auth.ts`) | OAuth code / refresh token |
+| `https://auth.openai.com/api/accounts/deviceauth/usercode` | Device-code login: request a user code | OAuth `client_id` (public) |
+| `https://auth.openai.com/api/accounts/deviceauth/token` | Device-code login: poll for authorization | `device_auth_id` + `user_code` |
+| `https://auth.openai.com/codex/device` | Device-code verification page — opened in your browser | — |
+| `https://auth.openai.com/deviceauth/callback` | Device-flow OAuth redirect URI | — |
+| `https://chatgpt.com/backend-api/codex/responses` | Model requests (`CODEX_BASE_URL` in `lib/constants.ts`) | Bearer token + `chatgpt-account-id` |
+| `https://chatgpt.com/backend-api/wham/usage` | Quota windows for `codex-limits`, `limits`, TUI status, and the background poller | Bearer token + `chatgpt-account-id` |
+| `https://chatgpt.com/backend-api/wham/accounts/check` | Business workspace names for `limits` output | Bearer token + `chatgpt-account-id` |
+| `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits` | `codex-reset` credit listing | Bearer token + `chatgpt-account-id` |
+| `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume` | `codex-reset` redemption (explicit confirm) | Bearer token + `chatgpt-account-id` |
+| `https://api.github.com/repos/openai/codex/releases/latest` (+ `https://github.com/openai/codex/releases/latest` HTML fallback) | Resolve the latest Codex CLI release tag | — |
+| `https://raw.githubusercontent.com/openai/codex/<tag>/codex-rs/models-manager/models.json` | Model catalog / instructions for GPT-5.6+ models | — |
+| `https://raw.githubusercontent.com/openai/codex/<tag>/codex-rs/core/<prompt>.md` | Per-family Codex prompt files (ETag cached) | — |
+| `https://raw.githubusercontent.com/{sst,anomalyco}/opencode/{main,dev}/packages/opencode/src/session/prompt/codex.{txt,md}` | OpenCode bridge prompt (`OPENCODE_CODEX_PROMPT_URL` overrides the source list) | — |
+| `https://registry.npmjs.org/oc-codex-multi-auth/latest` | Optional daily update check | — |
 
----
+The `wham` endpoints are the same undocumented endpoints official Codex clients use; they are reached only from quota-facing surfaces, never on the model request path.
 
-## Data Storage
+Two deliberate overrides can change where traffic goes:
 
-All plugin state is stored **locally on your machine** unless you export it or opt into OS keychain storage.
+- `OPENAI_BASE_URL` + `CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1` retargets the model-request base URL away from `chatgpt.com/backend-api` (off by default).
+- `CODEX_AUTH_SYNC_CODEX_CLI=0` disables the local read of `~/.codex/accounts.json` used to hydrate the pool from Codex CLI (local filesystem only, never uploaded).
 
-### Account storage (V3)
+### What a model request sends
 
-| Item | Default path |
-|------|----------------|
-| Global account pool | `~/.opencode/oc-codex-multi-auth-accounts.json` |
-| Per-project account pool | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` |
-| Flagged accounts | `~/.opencode/oc-codex-multi-auth-flagged-accounts.json` |
+- Prompts and conversation history as supplied by OpenCode; `store: false` and `include: ["reasoning.encrypted_content"]` on every request.
+- `Authorization: Bearer <access-token>`, `chatgpt-account-id`, `OpenAI-Beta: responses=experimental`, `accept: text/event-stream`.
+- `originator` + `user-agent`: `codex_cli_rs/<version> (<os> <release>; <arch>)` for standard models, or `opencode/<version> (<platform> <release>; <arch>)` for responses-lite models (GPT-5.6, GPT-6, Daybreak). `CODEX_AUTH_CLIENT_IDENTITY=codex|opencode` forces one identity; `CODEX_AUTH_DISABLE_CODEX_USER_AGENT=1` suppresses the UA rewrite.
+- `x-openai-internal-codex-responses-lite: true` on responses-lite models.
+- `conversation_id` / `session_id` when a prompt-cache key is active.
+- `openai-organization` only when `CODEX_AUTH_SEND_ORGANIZATION_HEADER=1` (off by default).
+- Any inbound `x-api-key` header is deleted, not forwarded.
 
-Contents typically include OAuth access/refresh material, account IDs, labels/tags/notes, rate-limit reset metadata, and rotation state. Per-project pools are enabled by default (`perProjectAccounts: true`).
+### Background quota poller
 
-### Codex CLI hydrate (optional source)
+`autoProtectCredits` (default **on**) and `quotaNotifications.enabled` (default off) drive an unattended poll of `/wham/usage` every `intervalMs` (default **30 min**, min 30 s). Each poll reads only quota windows for pooled accounts — no prompt content — so an exhausted account can be blocked before the next request instead of after a 429. Set `quotaNotifications.autoProtectCredits: false` (or `CODEX_AUTH_AUTO_PROTECT_CREDITS=0`) and leave notifications off to stop unattended polls; `codex-limits` and the TUI still fetch on demand.
 
-On startup the plugin may also read Codex CLI account material under `~/.codex` (for example `accounts.json`) to help bootstrap the local pool. Disable with `CODEX_AUTH_SYNC_CODEX_CLI=0`. This is local filesystem access only; nothing is uploaded to the package maintainers.
+### npm auto-update check
 
-### Legacy account filenames (migration only)
+With `autoUpdate` on (default; off via `autoUpdate: false` or `CODEX_AUTH_AUTO_UPDATE=0`), the plugin GETs `registry.npmjs.org/oc-codex-multi-auth/latest` at most once per 24 h (cache: `~/.opencode/cache/update-check-cache.json`) and, when a newer version exists, clears the OpenCode-managed plugin cache so a restart picks it up. No tokens or prompts are sent.
 
-Older installs may still have migration sources under `~/.opencode/` or a project tree:
+## Local data storage
 
-| Legacy file | Role |
-|-------------|------|
-| `openai-codex-accounts.json` | Pre-rename account pool seed |
-| `openai-codex-flagged-accounts.json` | Pre-rename flagged metadata |
-| `openai-codex-blocked-accounts.json` | Older blocked-account list (migrated into flagged handling) |
-| `<project>/.opencode/openai-codex-accounts.json` | In-repo legacy pool (read for migration; current pools live under `~/.opencode/projects/…`) |
+Everything below lives on your machine. POSIX modes are applied where noted.
 
-Current canonical names use the `oc-codex-multi-auth-*.json` prefix. Do not hand-edit legacy files unless you are recovering an old backup.
+| Item | Path | Mode |
+|------|------|------|
+| Global account pool | `~/.opencode/oc-codex-multi-auth-accounts.json` | file `0o600`, dir `0o700` |
+| Per-project pool (default on) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | `0o600` / `0o700` |
+| Flagged (quarantined) accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active accounts file | `0o600` / `0o700` |
+| Credential snapshots (pre-write backups) | `backups/codex-credential-snapshot-*.json` beside the active accounts file | `0o600` / `0o700` |
+| Storage locks | `<storage>.transaction.lock`, `<storage>.refresh.lock` beside the active accounts file | — |
+| Plugin config | `~/.opencode/openai-codex-auth-config.json` | — |
+| Quota notification state | `oc-codex-multi-auth-quota-notifications.json` beside the active accounts file | `0o600` / `0o700` |
+| Plugin origin history | `~/.opencode/oc-codex-multi-auth-origin.json` | — |
+| Prompt/catalog caches | `~/.opencode/cache/` (`catalog-*-instructions.md`, `*-meta.json`, `opencode-codex.txt`, `update-check-cache.json`) | — |
+| TUI quota caches | `oc-codex-multi-auth-tui-quota.json`, `oc-codex-multi-auth-tui-quota-overview.json`, `oc-codex-multi-auth-workspace-names.json` under `$OPENCODE_STATE_DIR` or `~/.local/state/opencode` | `0o600` |
+| Request logs (opt-in) | `~/.opencode/logs/codex-plugin/request-<n>-<stage>.json` | file `0o600`, dir `0o700` |
+| OpenCode host files | `~/.config/opencode/opencode.json`, `~/.config/opencode/tui.json`, `~/.opencode/auth/openai.json` | host-managed |
+| OS keychain (opt-in) | `CODEX_KEYCHAIN=1` → OS credential store, service `oc-codex-multi-auth`; JSON renamed `*.migrated-to-keychain.<ts>` | OS-managed |
 
-### Plugin configuration
+Account pools hold OAuth access/refresh tokens, account IDs, labels/tags/notes, rate-limit reset times, and rotation state. Legacy `openai-codex-*.json` files are read once for migration only.
 
-| Item | Default path |
-|------|----------------|
-| Plugin config | `~/.opencode/openai-codex-auth-config.json` |
+### Request logging is opt-in
 
-Includes runtime options such as retry profile, rotation strategy, model account pools, TUI preferences, and beginner-safe mode.
+Nothing is written to `~/.opencode/logs/codex-plugin/` unless `ENABLE_PLUGIN_REQUEST_LOGGING=1`. Even then, request/response **bodies are omitted** unless you also set `CODEX_PLUGIN_LOG_BODIES=1` (raw prompts and model output — enable only while debugging). `DEBUG_CODEX_PLUGIN=1` and `CODEX_PLUGIN_LOG_LEVEL` control verbosity; `CODEX_CONSOLE_LOG=1` mirrors to the console.
 
-### OpenCode host files
+### Redaction
 
-| Item | Default path |
-|------|----------------|
-| OpenCode config | `~/.config/opencode/opencode.json` |
-| OpenCode TUI config | `~/.config/opencode/tui.json` |
-| OpenCode auth tokens | `~/.opencode/auth/openai.json` |
+`lib/logger.ts` scrubs everything that reaches a log sink, in both directions:
 
-### Optional OS keychain
+- `SENSITIVE_KEYS` — any object field named like a credential (`access_token`, `refresh_token`, `id_token`, `authorization`, `api_key`, `secret`, `password`, `cookie`, `account_id`, `email`, …) is masked before serialization.
+- Token-shaped strings — JWTs, `sk-*` keys, `Bearer …`, hex digests, and `*_token=…` values embedded in free-form text are masked by regex.
+- Emails mask to `us***@***.tld`; tokens mask to `prefix…suffix`.
+- `codex-diag` and `codex-diff` output is redacted by construction (no tokens, emails, account IDs, or home paths).
 
-When `CODEX_KEYCHAIN=1` is set, account pools can be stored in the OS credential store (macOS Keychain, Windows Credential Manager, Linux libsecret) under service name `oc-codex-multi-auth`. JSON files may be renamed with a `.migrated-to-keychain.<timestamp>` suffix for rollback. Keychain failures fall back to JSON without silently deleting credentials.
+`--include-sensitive` / `includeSensitive: true` and `maskEmail: false` are the only opt-ins that unmask account identity in output.
 
-### TUI quota cache
-
-| Item | Default path |
-|------|----------------|
-| TUI quota cache | `~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json`; the caller's state directory or `OPENCODE_STATE_DIR` overrides the directory |
-
-Caches recent quota/usage snapshots for prompt status display.
-
-### Session recovery storage (host OpenCode)
-
-When `sessionRecovery` is enabled (default), recoverable session repairs read/write OpenCode's on-disk message/part store:
-
-| Item | Default path |
-|------|----------------|
-| OpenCode storage root | `$XDG_DATA_HOME/opencode/storage` (macOS/Linux default `~/.local/share/opencode/storage`; Windows `%APPDATA%/opencode/storage`) |
-| Messages | `…/message/{sessionID}/…` |
-| Parts | `…/part/{messageID}/*.json` |
-
-Only known structural recovery cases are patched (missing tool results, thinking-block order, thinking-disabled violations). Tokens are not written here.
-
-### Catalog and instruction caches
-
-| Item | Default path |
-|------|----------------|
-| Cache directory | `~/.opencode/cache/` |
-
-May include Codex system instructions, catalog-derived instruction files, ETag/meta files, and the auto-update check cache (`update-check-cache.json`).
-
-### Debug logs
-
-| Item | Default path |
-|------|----------------|
-| Request logs | `~/.opencode/logs/codex-plugin/` |
-
-Written only when request logging is enabled (`ENABLE_PLUGIN_REQUEST_LOGGING=1`). Metadata logs omit raw bodies by default; set `CODEX_PLUGIN_LOG_BODIES=1` only when you need raw request/response payloads (sensitive: may include prompts and model output).
-
-### Backups and exports
-
-Export/import and installer backups may create files under `~/.opencode/backups/` or project-scoped backup directories. Treat exports as credential-bearing data.
-
----
-
-## Data Transmission
-
-### Direct to OpenAI / ChatGPT
-
-API and auth traffic go **directly from your machine** to OpenAI/ChatGPT endpoints over HTTPS. There is no maintainer proxy.
-
-| Service | Endpoint |
-|---------|----------|
-| OAuth authorize / token | `https://auth.openai.com/...` (e.g. `/oauth/authorize`, `/oauth/token`) |
-| Device-code login | `https://auth.openai.com/api/accounts/deviceauth/usercode` (request code) and `https://auth.openai.com/api/accounts/deviceauth/token` (poll); the browser verification page is `https://auth.openai.com/codex/device` and the OAuth redirect URI is `https://auth.openai.com/deviceauth/callback` |
-| Codex API | `https://chatgpt.com/backend-api/codex/responses` |
-| Usage / quota window | `https://chatgpt.com/backend-api/wham/usage` |
-| Workspace names | `https://chatgpt.com/backend-api/wham/accounts/check` |
-| Reset-credit listing (`codex-reset`) | `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits` |
-| Reset-credit redemption (`codex-reset`) | `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume` |
-
-The `wham` endpoints are the same undocumented endpoints the official Codex
-clients use for the `/usage` screen, the workspace list, and reset-credit
-redemption. They are reached only from quota-facing surfaces — `codex-limits`,
-`codex-reset`, the "Check quotas" action in the interactive auth dashboard, the
-TUI quota status refresh, the standalone CLI quota commands (which use
-`/wham/accounts/check` to attach workspace names to account output), and the
-background quota monitor below. The model request path does not call them.
-
-### Background quota polling
-
-The plugin runs a quota monitor that polls `/wham/usage` **by default**: the
-poll is unattended whenever `autoProtectCredits` is on (default `true`) or
-`quotaNotifications.enabled` is on (default `false`), at the configured
-interval (default 30 minutes, minimum 30 seconds). Each poll reads only quota
-windows for the pooled accounts — no prompt content is involved. An exhausted
-reading lets `autoProtectCredits` block that account before the next model
-request instead of waiting for a 429. Set `autoProtectCredits: false` (or
-`CODEX_AUTH_AUTO_PROTECT_CREDITS=0`) and leave notifications off to stop the
-unattended polls; `codex-limits` and the TUI status still hit the endpoint on
-demand.
-
-### What gets sent on a normal model request
-
-When you use the plugin, a request can include:
-
-- Your prompts and conversation history (as supplied by OpenCode)
-- OAuth access token (for authentication)
-- ChatGPT account/workspace identifiers used for routing
-- Model selection, reasoning effort, verbosity, and related options
-- **Client identity headers**: `originator` and a product `User-Agent` (Codex CLI style or host/opencode style, depending on model and config). These **are** sent; they are not suppressed by default.
-- For GPT-5.6: responses-lite markers such as `x-openai-internal-codex-responses-lite`
-
-This is analogous to what official Codex-style clients send when talking to the same backend. Exact fields vary by model family and transform mode.
-
-### What does not get sent to maintainers
-
-- No automatic upload of account lists, tokens, or logs to the plugin authors
-- No remote analytics endpoint for this package
-
-### Optional npm auto-update check
-
-When `autoUpdate` is enabled (default `true`; disable with `autoUpdate: false` or `CODEX_AUTH_AUTO_UPDATE=0`), the plugin may query the public npm registry (`registry.npmjs.org/oc-codex-multi-auth/latest`) about once per day to detect a newer version, cache the result under `~/.opencode/cache/`, and clear the OpenCode-managed plugin cache so a restart can pick up the update. That request does not send your ChatGPT tokens or prompts.
-
----
-
-## Third-Party Services
-
-### GitHub API
-
-The plugin may fetch Codex instructions / model catalog material from GitHub (for example release metadata under `openai/codex`) with local caching and ETag reuse. Requests are ordinary HTTPS GETs without your ChatGPT credentials.
-
-### OpenAI Services
-
-All auth and inference go through OpenAI/ChatGPT as listed above. See [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy/) for how OpenAI handles data.
-
----
-
-## Your Data Rights
-
-You have complete control over local data:
-
-### Delete OAuth Tokens
+## Deleting your data
 
 ```bash
-opencode auth logout
-# Or manually:
-rm ~/.opencode/auth/openai.json
+opencode auth logout                                            # host token
+rm -f ~/.opencode/oc-codex-multi-auth-accounts.json \
+      ~/.opencode/oc-codex-multi-auth-flagged-accounts.json \
+      ~/.opencode/openai-codex-auth-config.json \
+      ~/.opencode/oc-codex-multi-auth-origin.json
+rm -rf ~/.opencode/projects/ ~/.opencode/cache/ ~/.opencode/logs/codex-plugin/
+rm -f  ~/.local/state/opencode/oc-codex-multi-auth-*.json
 ```
 
-### Delete Account Pools and Flagged State
+Also remove keychain entries if you used `CODEX_KEYCHAIN=1` (`codex-keychain rollback` first, then delete the entry via the OS). To revoke the OAuth grant itself: [ChatGPT Settings → Apps](https://chatgpt.com/settings/apps).
 
-```bash
-rm ~/.opencode/oc-codex-multi-auth-accounts.json
-rm ~/.opencode/oc-codex-multi-auth-flagged-accounts.json
-rm -rf ~/.opencode/projects/
-```
+## Scope
 
-Also remove any project-scoped account files and keychain entries if you migrated with `CODEX_KEYCHAIN=1` (see `codex-keychain`).
-
-### Delete Plugin Config, Caches, Logs, Quota Cache
-
-```bash
-rm ~/.opencode/openai-codex-auth-config.json
-rm -rf ~/.opencode/cache/
-rm -rf ~/.opencode/logs/codex-plugin/
-rm -f ~/.local/state/opencode/oc-codex-multi-auth-tui-quota.json
-```
-
-### Revoke OAuth Access
-
-1. Visit [ChatGPT Settings → Authorized Apps](https://chatgpt.com/settings/apps)
-2. Find the app entry used for login (OpenCode / Codex-related)
-3. Click Revoke
-
-This invalidates access tokens for that authorization.
-
----
-
-## Security Measures
-
-### Token Protection
-
-- Tokens stay local except when sent to OpenAI/ChatGPT for authentication and API calls
-- Auth and account files should remain user-readable only where the OS allows
-- Diagnostic tools redact tokens and sensitive identifiers by default
-- Expired tokens are refreshed automatically; refresh is queued to avoid races
-
-### PKCE Flow
-
-The plugin uses **PKCE** for the browser OAuth flow (same class of flow used by official Codex CLI login).
-
-### HTTPS Encryption
-
-OAuth, token refresh, and API requests use HTTPS.
-
-### Email Masking in Account Displays
-
-Account emails can appear in screenshots or shared TUI sessions. To reduce exposure:
-
-- Set a non-identifying label with `codex-label` (labels are preferred over emails)
-- Enable `maskEmail` in `~/.opencode/openai-codex-auth-config.json` (or `CODEX_TUI_MASK_EMAIL=1`) so remaining emails render as forms like `us***@example.com`
-- Raw emails appear in `--includeSensitive` / `includeSensitive` JSON output only when you opt in
-
----
-
-## Compliance
-
-### OpenAI Policies
-
-When using this plugin, you are subject to:
-
-- [OpenAI Privacy Policy](https://openai.com/policies/privacy-policy/)
-- [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/)
-
-Your responsibility: ensure usage complies with OpenAI's policies and your subscription terms.
-
-### Local Data Control
-
-This plugin:
-
-- Does not operate a maintainer-side personal data processing service
-- Stores operational state locally under your control
-- Provides deletion steps for local files and OAuth revocation
-
-Data sent to OpenAI remains subject to OpenAI's practices.
-
----
-
-## Transparency
-
-### Open Source
-
-Source: [https://github.com/ndycode/oc-codex-multi-auth](https://github.com/ndycode/oc-codex-multi-auth)
-
-You can review request shaping, storage, and logging behavior in the repository.
-
-### No Hidden Telemetry Product
-
-There is no separate analytics backend for this package. Documented network calls are OAuth/API, optional GitHub catalog fetches, and optional npm version checks.
-
----
-
-## Questions?
-
-- **Plugin-specific:** [GitHub Issues](https://github.com/ndycode/oc-codex-multi-auth/issues)
-- **OpenAI data handling:** [OpenAI Support](https://help.openai.com/)
-- **Security concerns:** [SECURITY.md](../SECURITY.md)
-
----
-
-**Back to:** [Documentation Home](index.md) | [Getting Started](getting-started.md) | [Tools and CLI](tools-and-cli.md)
+- Not affiliated with OpenAI; upstream data handling is governed by [OpenAI's policies](https://openai.com/policies/privacy-policy/).
+- Source is public: [github.com/ndycode/oc-codex-multi-auth](https://github.com/ndycode/oc-codex-multi-auth).
+- Security reports: [SECURITY.md](../SECURITY.md). Questions: [GitHub Issues](https://github.com/ndycode/oc-codex-multi-auth/issues).
