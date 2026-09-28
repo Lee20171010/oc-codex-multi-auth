@@ -194,8 +194,10 @@ describe("chaos/request-faults — real fault injection", () => {
 		});
 
 		it("token-bucket backoff deduplicates inside the 2s window and increments past it", () => {
+			// A neutral roll lands on jitter factor 1.0, the deterministic values.
+			const noJitter = () => 0.5;
 			// First 429: attempt 1, no dedup.
-			const first = getRateLimitBackoff(0, "codex", 2000);
+			const first = getRateLimitBackoff(0, "codex", 2000, noJitter);
 			expect(first.attempt).toBe(1);
 			expect(first.delayMs).toBe(2000);
 			expect(first.isDuplicate).toBe(false);
@@ -203,14 +205,14 @@ describe("chaos/request-faults — real fault injection", () => {
 			// Concurrent duplicate inside the 2s dedup window — same attempt,
 			// flagged as duplicate so the caller doesn't double-increment.
 			vi.setSystemTime(new Date(Date.now() + 1_500));
-			const dup = getRateLimitBackoff(0, "codex", 2000);
+			const dup = getRateLimitBackoff(0, "codex", 2000, noJitter);
 			expect(dup.attempt).toBe(1);
 			expect(dup.isDuplicate).toBe(true);
 
 			// Past the dedup window → attempt increments and the exponential
 			// delay doubles (2s → 4s), bounded by MAX_BACKOFF_MS upstream.
 			vi.setSystemTime(new Date(Date.now() + 1_000));
-			const second = getRateLimitBackoff(0, "codex", 2000);
+			const second = getRateLimitBackoff(0, "codex", 2000, noJitter);
 			expect(second.attempt).toBe(2);
 			expect(second.delayMs).toBe(4000);
 			expect(second.isDuplicate).toBe(false);

@@ -208,6 +208,17 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	// gpt-5-codex was shut down on 2026-07-23 (API deprecations page); a
 	// hand-typed selection still gets a way out.
 	"gpt-5-codex": [GPT_56_TERRA_MODEL_ID, GPT_56_LUNA_MODEL_ID],
+	// gpt-5.1-codex-max and gpt-5.1-codex-mini went down in the same 2026-07-23
+	// API shutdown and are still routed when typed by hand. The docs name
+	// gpt-5.6-sol as the max successor and gpt-5.6-terra as the mini successor
+	// (docs/configuration.md); both rows end on the terminal so a blocked
+	// successor still walks out like every other retired-model row.
+	"gpt-5.1-codex-max": [
+		GPT_56_SOL_MODEL_ID,
+		GPT_56_TERRA_MODEL_ID,
+		GPT_56_LUNA_MODEL_ID,
+	],
+	"gpt-5.1-codex-mini": [GPT_56_TERRA_MODEL_ID, GPT_56_LUNA_MODEL_ID],
 	// Legacy selectors normalize to `gpt-5-codex` before lookup during the
 	// request path. Keep these historical entries for direct helper callers and
 	// custom-chain documentation; the canonical `gpt-5-codex` edge above is the
@@ -391,10 +402,25 @@ export function extractUnsupportedCodexModelFromText(bodyText: string): string |
 	return undefined;
 }
 
+/**
+ * Both unsupported-model wordings the verdict can legitimately fire on: the
+ * raw upstream ChatGPT phrasing AND the phrasing this plugin itself emits in
+ * normalizeErrorPayload. A peer plugin/proxy, or a re-normalized payload
+ * flowing back through handleErrorResponse, only carries the normalized
+ * wording — gating the verdict on the upstream phrasing alone let those
+ * errors sail past the fallback resolver.
+ */
+function isUnsupportedCodexModelMessage(text: string): boolean {
+	return (
+		CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(text) ||
+		NORMALIZED_UNSUPPORTED_MODEL_PATTERN.test(text)
+	);
+}
+
 function isUnsupportedCodexModelForChatGpt(status: number, bodyText: string): boolean {
 	if (status !== HTTP_STATUS.BAD_REQUEST) return false;
 	if (!bodyText) return false;
-	return CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(bodyText);
+	return isUnsupportedCodexModelMessage(bodyText);
 }
 
 export function getUnsupportedCodexModelInfo(
@@ -413,7 +439,7 @@ export function getUnsupportedCodexModelInfo(
 			: undefined;
 		return {
 			isUnsupported: directDetail
-				? CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(directDetail)
+				? isUnsupportedCodexModelMessage(directDetail)
 				: false,
 			message: directDetail,
 			unsupportedModel: unsupportedModel ?? undefined,
@@ -432,7 +458,7 @@ export function getUnsupportedCodexModelInfo(
 		: extractUnsupportedCodexModelFromText(message ?? "");
 	const isUnsupported =
 		code === CHATGPT_CODEX_UNSUPPORTED_MODEL_CODE ||
-		(message ? CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(message) : false);
+		(message ? isUnsupportedCodexModelMessage(message) : false);
 
 	return {
 		isUnsupported,
@@ -871,9 +897,19 @@ export function extractRequestUrl(input: Request | string | URL): string {
  */
 export function rewriteUrlForCodex(url: string): string {
 	const parsedUrl = new URL(url);
-	const rewrittenPath = parsedUrl.pathname.includes(URL_PATHS.RESPONSES)
-		? parsedUrl.pathname.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
-		: parsedUrl.pathname;
+	// A path that is already Codex-shaped must not be rewritten again:
+	// `/responses` is a substring of `/codex/responses`, so the naive replace
+	// produced `/backend-api/codex/codex/responses` for already-prefixed input
+	// (e.g. a caller passing a Codex URL straight through, or a double pass of
+	// this helper).
+	const rewrittenPath = parsedUrl.pathname.includes(URL_PATHS.CODEX_RESPONSES)
+		? parsedUrl.pathname
+		: parsedUrl.pathname.includes(URL_PATHS.RESPONSES)
+			? parsedUrl.pathname.replace(
+					URL_PATHS.RESPONSES,
+					URL_PATHS.CODEX_RESPONSES,
+				)
+			: parsedUrl.pathname;
 	const normalizedPath =
 		rewrittenPath === CODEX_BASE_PATH_PREFIX ||
 		rewrittenPath.startsWith(`${CODEX_BASE_PATH_PREFIX}/`)
@@ -953,6 +989,18 @@ export async function transformRequestForCodex(
 				normalizedModel,
 			);
 			body.input = upsertBackendModelIdentityMessage(body.input, normalizedModel);
+
+			// Native mode is a lighter transform, not a passthrough: the
+			// stateless/privacy invariants apply on EVERY Codex-bound request.
+			// The ChatGPT backend requires store=false and the encrypted-reasoning
+			// include, and honoring a body that omits (or contradicts) them either
+			// 400s upstream or silently stores the request server-side.
+			body.store = false;
+			const include = Array.isArray(body.include) ? [...body.include] : [];
+			if (!include.includes("reasoning.encrypted_content")) {
+				include.push("reasoning.encrypted_content");
+			}
+			body.include = include;
 
 			logRequest(LOG_STAGES.AFTER_TRANSFORM, {
 				url,
@@ -1461,6 +1509,41 @@ function normalizeErrorPayload(
                         }
                         return payload;
                 }
+
+                // FastAPI-style bodies carry the human-readable error on a
+                // top-level `detail` field (string, or a record holding
+                // message/code/type). Without this branch they surfaced as
+                // the raw JSON string of the whole body.
+                const detail = errorBody.detail;
+                const detailMessage =
+                        typeof detail === "string"
+                                ? detail
+                                : isRecord(detail) && typeof detail.message === "string"
+                                        ? detail.message
+                                        : undefined;
+                if (typeof detailMessage === "string" && detailMessage.trim()) {
+                        const payload: ErrorPayload = {
+                                error: { message: detailMessage },
+                        };
+                        if (isRecord(detail)) {
+                                if (typeof detail.type === "string") {
+                                        payload.error.type = detail.type;
+                                }
+                                if (
+                                        typeof detail.code === "string" ||
+                                        typeof detail.code === "number"
+                                ) {
+                                        payload.error.code = detail.code;
+                                }
+                        }
+                        if (diagnostics && Object.keys(diagnostics).length > 0) {
+                                payload.error.diagnostics = diagnostics;
+                        }
+                        if (status === HTTP_STATUS.UNAUTHORIZED) {
+                                payload.error.message = `${payload.error.message} (run \`opencode auth login\` if this persists)`;
+                        }
+                        return payload;
+                }
         }
 
         const trimmed = bodyText.trim();
@@ -1553,6 +1636,25 @@ function parseRetryAfterMs(
                 const parsed = Number.parseInt(retryAfterHeader, 10);
                 if (!Number.isNaN(parsed) && parsed > 0) {
                         return Math.min(parsed * 1000, MAX_RETRY_DELAY_MS);
+                }
+                // RFC 7231 also permits an absolute HTTP-date
+                // ("Retry-After: Wed, 21 Oct 2099 07:28:00 GMT"). parseInt on
+                // one is NaN, so only the non-numeric branch reaches
+                // Date.parse — a numeric-but-non-positive value (0, negative)
+                // keeps its existing "ignore and fall through" verdict. A
+                // past/unparseable date likewise falls through rather than
+                // manufacturing a delay; future dates get the same 5-min cap.
+                if (Number.isNaN(parsed)) {
+                        const dateMs = Date.parse(retryAfterHeader);
+                        if (!Number.isNaN(dateMs)) {
+                                const delta = dateMs - Date.now();
+                                if (delta > 0) {
+                                        return Math.min(
+                                                Math.floor(delta),
+                                                MAX_RETRY_DELAY_MS,
+                                        );
+                                }
+                        }
                 }
         }
 
