@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file. Dates are I
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [6.25.0] - 2026-09-28
+## [6.25.1] - 2026-09-28
 
 ### Added
 - The standalone `limits` report now reads the plugin's last readings by default — no upstream calls unless `--refresh` is passed — sorts accounts by account, usage, or reset time with `--sort`, names the Business workspace each seat belongs to, and prints readable percentages, renewal times, and plan lines for large pools. (#274, thanks @Nowaker)
