@@ -1,0 +1,44 @@
+[
+	{
+		"match": "transform gpt-5-codex",
+		"baseline": 38,
+		"unit": "µs",
+		"label": "transform 38µs",
+		"higherIsBetter": false
+	},
+	{
+		"match": "transform minimal body (no tools)",
+		"baseline": 38,
+		"unit": "µs",
+		"label": "transform 38µs (minimal)",
+		"higherIsBetter": false
+	},
+	{
+		"match": "SSE 10MB @ 64KB chunks",
+		"baseline": 215,
+		"unit": "MB/s",
+		"label": "SSE 215MB/s",
+		"higherIsBetter": true
+	},
+	{
+		"match": "selectHybridAccount pool=10",
+		"baseline": 290,
+		"unit": "ns",
+		"label": "rotation 0.29µs",
+		"higherIsBetter": false
+	},
+	{
+		"match": "getAccountForStrategy(hybrid) pool=10",
+		"baseline": 0.29,
+		"unit": "µs",
+		"label": "rotation 0.29µs (manager)",
+		"higherIsBetter": false
+	},
+	{
+		"match": "import dist/index.js module-eval (cold)",
+		"baseline": 91,
+		"unit": "ms",
+		"label": "import ~91ms",
+		"higherIsBetter": false
+	}
+]
