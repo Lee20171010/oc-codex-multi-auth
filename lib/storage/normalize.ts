@@ -142,15 +142,21 @@ function sanitizeAccountNumericState(account: AccountMetadataV3): AccountMetadat
   // input keep their raw values.
   if (next.rateLimitResetTimes) {
     const cleaned: Record<string, number | undefined> = {};
+    let dropped = false;
     for (const [key, value] of Object.entries(next.rateLimitResetTimes)) {
       if (typeof value === "number" && Number.isFinite(value) && value <= horizon) {
         cleaned[key] = value;
+      } else {
+        dropped = true;
       }
     }
-    if (Object.keys(cleaned).length > 0) {
-      next.rateLimitResetTimes = cleaned;
-    } else {
+    // Match the historical contract: an already-empty map (cleared rate-limit
+    // state) is preserved, but a map emptied BY pruning poisoned entries is
+    // dropped entirely so diagnostics can tell "clean" from "healed".
+    if (dropped && Object.keys(cleaned).length === 0) {
       delete next.rateLimitResetTimes;
+    } else {
+      next.rateLimitResetTimes = cleaned;
     }
   }
 
