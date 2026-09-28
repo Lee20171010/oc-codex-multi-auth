@@ -132,6 +132,40 @@ describe("installer JSONC support and config safety", () => {
 		expect(stdout).toMatch(/not preserve|does not preserve/i);
 	});
 
+	it("warns before rewriting a commented tui.json — its notes would drop too", async () => {
+		// The same comment-loss blind spot existed on the TUI config: an
+		// existing tui.json with JSONC comments is rewritten as plain JSON
+		// whenever the TUI plugin block changes (coderabbit minor on PR
+		// #275). The warning must cover both files.
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const { runInstaller } = await importCore();
+		const configDir = join(tempHome, ".config", "opencode");
+		const tuiPath = join(configDir, "tui.json");
+		await mkdir(configDir, { recursive: true });
+		await writeFile(
+			tuiPath,
+			`{
+				// operator note: theme tuned for the projector
+				"theme": "custom",
+				"urls": ["https://example.com/a//b"]
+			}`,
+			"utf-8",
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await expect(
+			runInstaller(["--modern", "--no-cache-clear"], {
+				env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+			}),
+		).resolves.toMatchObject({ action: "install", exitCode: 0 });
+
+		const stdout = gatherStdout(logSpy);
+		expect(stdout).toMatch(/tui\.json[\s\S]{0,120}comments|comments[\s\S]{0,120}tui\.json/i);
+		expect(stdout).toMatch(/not preserve|does not preserve/i);
+	});
+
 	it("merges a real-world JSONC opencode.json instead of failing the parse", async () => {
 		tempHome = await createTempHome();
 		vi.stubEnv("HOME", tempHome);
