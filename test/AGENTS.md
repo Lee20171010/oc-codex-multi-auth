@@ -7,7 +7,7 @@ model catalog, rotation logic, storage, tools/CLI, TUI, and recovery.
 
 The suite is large and evolves frequently. Use the current test tree and local
 commands as the source of truth instead of hard-coded totals or committed file
-lists. As of this writing the suite is 136 test files: 118 top-level plus
+lists. As of this writing the suite is 159 test files: 141 top-level plus
 `chaos/` (9), `property/` (6), and `contracts/` (3).
 
 ```bash
@@ -63,11 +63,12 @@ coverage.
 ## CONVENTIONS
 
 - Vitest globals are enabled (`describe`, `it`, `expect`).
-- Coverage thresholds are enforced by `vitest.config.ts`; statements/functions/lines
-  keep an 80% global floor, while branch and legacy `index.ts` floors are
-  calibrated to the current broad coverage baseline.
+- Coverage thresholds are enforced by `vitest.config.ts`: an 80% global floor
+  plus per-directory `perFile` floors, with deliberately low floors for the
+  terminal-UI and pure-barrel surfaces.
 - Lint rules are relaxed for tests (see `eslint.config.js`).
-- Property tests use fast-check for randomized testing.
+- Property tests use fast-check for randomized testing; `FC_SEED=<integer>`
+  replays a failing run with a fixed seed.
 
 ## ANTI-PATTERNS
 
