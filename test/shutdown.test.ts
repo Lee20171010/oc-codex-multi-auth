@@ -163,7 +163,12 @@ describe("Graceful shutdown", () => {
 			};
 		}
 
-		/** Fresh module instance: resets the `shutdownRegistered` / `ownsProcess` latches. */
+		/**
+		 * Re-imports the module. The shutdown state is process-level
+		 * (`Symbol.for` on globalThis), so this returns a module generation
+		 * sharing the same queue and handlers — the detach in `beforeEach`
+		 * stripped them, so the next `registerCleanup` re-attaches.
+		 */
 		async function freshShutdown() {
 			vi.resetModules();
 			const mod = await import("../lib/shutdown.js");
@@ -291,7 +296,10 @@ describe("Graceful shutdown", () => {
 			expect(processExitSpy).toHaveBeenCalledWith(130);
 		});
 
-		it("ownership does not leak across module instances", async () => {
+		// Ownership is process-level state: the standalone `warm` CLI's claim
+		// must survive a host re-evaluating the module graph, not silently reset
+		// to guest-mode because a younger module generation exists.
+		it("ownership claimed by an older module generation still applies", async () => {
 			const owning = await freshShutdown();
 			owning.setShutdownOwnsProcess(true);
 
@@ -301,7 +309,23 @@ describe("Graceful shutdown", () => {
 			process.emit("SIGINT", "SIGINT");
 			await settle();
 
-			expect(processExitSpy).not.toHaveBeenCalled();
+			expect(processExitSpy).toHaveBeenCalledWith(130);
+		});
+
+		// The shared queue is what makes process-level handlers safe: a cleanup
+		// registered by a re-evaluated module drains through the handler trio the
+		// first generation attached, not through a second stacked set.
+		it("drains cleanups registered by a re-evaluated module instance", async () => {
+			await freshShutdown();
+
+			const second = await freshShutdown();
+			const cleanupFn = vi.fn();
+			second.registerCleanup(cleanupFn);
+
+			process.emit("SIGINT", "SIGINT");
+			await settle();
+
+			expect(cleanupFn).toHaveBeenCalled();
 		});
 
 		it("beforeExit handler runs cleanup without calling exit", async () => {
@@ -316,19 +340,39 @@ describe("Graceful shutdown", () => {
 			expect(processExitSpy).not.toHaveBeenCalled();
 		});
 
-		it("signal handlers are only registered once", async () => {
-			const processOnceSpy = vi.spyOn(process, "once").mockImplementation(() => process);
-
-			vi.resetModules();
-			const { registerCleanup: freshRegister } = await import("../lib/shutdown.js");
-
-			freshRegister(() => {});
-			const firstCallCount = processOnceSpy.mock.calls.length;
+		// The latch is the listeners' presence on `process`, not a module flag:
+		// re-registering must not stack a second trio, and re-evaluating the
+		// module (a host plugin reload) must not add another set either.
+		it("does not stack signal handlers across re-registration or module re-evaluation", async () => {
+			const { registerCleanup: freshRegister } = await freshShutdown();
 
 			freshRegister(() => {});
-			expect(processOnceSpy.mock.calls.length).toBe(firstCallCount);
+			freshRegister(() => {});
+			expect(process.listenerCount("SIGINT")).toBe(1);
+			expect(process.listenerCount("SIGTERM")).toBe(1);
+			expect(process.listenerCount("beforeExit")).toBe(1);
 
-			processOnceSpy.mockRestore();
+			const second = await freshShutdown();
+			second.registerCleanup(() => {});
+			expect(process.listenerCount("SIGINT")).toBe(1);
+			expect(process.listenerCount("SIGTERM")).toBe(1);
+			expect(process.listenerCount("beforeExit")).toBe(1);
+		});
+
+		// A host that strips every listener (removeAllListeners) must not strand
+		// the queue: the next registration re-attaches the shared handlers.
+		it("re-attaches handlers a host stripped", async () => {
+			const { registerCleanup: freshRegister } = await freshShutdown();
+			const cleanupFn = vi.fn();
+			freshRegister(cleanupFn);
+
+			process.removeAllListeners("SIGINT");
+			freshRegister(vi.fn());
+			expect(process.listenerCount("SIGINT")).toBe(1);
+
+			process.emit("SIGINT", "SIGINT");
+			await settle();
+			expect(cleanupFn).toHaveBeenCalled();
 		});
 	});
 
