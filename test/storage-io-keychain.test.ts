@@ -245,12 +245,14 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		expect(loaded?.accounts[0]?.accountId).toBe("acct-off");
 	});
 
-	it("does not serve an older marker when the newest one is corrupt", async () => {
-		// The fallback only ever trusts the NEWEST marker: an older marker is
-		// an earlier pool state, and serving it after a corrupt freshest would
-		// resurrect consumed refresh tokens and deleted accounts (greptile P1
-		// on PR #280 — the "stale marker restores old credentials" finding).
-		// A corrupt freshest means an honest empty pool, not stale data.
+	it("recovers from an older marker when the newest one is corrupt", async () => {
+		// A VALID newest marker always wins — staler siblings never shadow it.
+		// But a corrupt newest must not hide the older ones: an older
+		// parseable marker is a real pool snapshot, and reporting empty lets
+		// the next save permanently mask recoverable accounts (greptile P1 on
+		// PR #280). Steady-state staleness is prevented at save time — every
+		// successful keychain write mirrors the newest marker and retires the
+		// rest, so an older file only survives when that sync never ran.
 		delete process.env.CODEX_KEYCHAIN;
 		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-old-good")), "utf-8");
 		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
@@ -259,7 +261,18 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		await fs.writeFile(corruptName, "{ not valid json", "utf-8");
 
 		const loaded = await loadAccounts();
-		expect(loaded).toBeNull();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-old-good");
+	});
+
+	it("serves the newest valid marker — older ones never shadow it", async () => {
+		delete process.env.CODEX_KEYCHAIN;
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-old")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		const newestName = `${storagePath}.migrated-to-keychain.2999-01-01T00-00-00-000Z-ffffff`;
+		await fs.writeFile(newestName, JSON.stringify(makeStorage("acct-newest")), "utf-8");
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-newest");
 	});
 
 	it("keeps the newest marker in sync with every subsequent keychain save", async () => {

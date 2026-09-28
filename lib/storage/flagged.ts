@@ -291,9 +291,14 @@ async function loadFlaggedAccountsUnlocked(
   // A missing flagged file with a `.migrated-to-keychain` marker present is
   // the interrupted-migration signature — the marker holds the last good
   // flagged store and must be read before concluding the pool is empty.
-  // Only the NEWEST marker qualifies: an older one is a staler pool state
-  // that would resurrect consumed tokens if served over a corrupt freshest.
-  for (const markerPath of (await listKeychainMigrationMarkers(path)).slice(0, 1)) {
+  // Newest-first: a VALID newest marker always wins so staler siblings can
+  // never shadow it, but a CORRUPT newest must not hide the older ones —
+  // an older parseable marker is a real snapshot and reporting empty lets
+  // the next save permanently mask recoverable accounts (greptile P1 on
+  // PR #280). Steady-state staleness is prevented at save time: each
+  // successful keychain write mirrors the newest marker and retires the
+  // rest, so an older file only survives when that sync never ran.
+  for (const markerPath of await listKeychainMigrationMarkers(path)) {
     try {
       const markerData = JSON.parse(
         (await fs.readFile(markerPath, "utf-8")).replace(/^\uFEFF/, ""),
