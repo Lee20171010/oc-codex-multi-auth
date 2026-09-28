@@ -73,8 +73,10 @@ describe("PluginConfigSchema", () => {
 	it("rejects timeout settings below 1000ms", () => {
 		const fetchResult = PluginConfigSchema.safeParse({ fetchTimeoutMs: 999 });
 		const stallResult = PluginConfigSchema.safeParse({ streamStallTimeoutMs: 999 });
+		const durationResult = PluginConfigSchema.safeParse({ maxStreamDurationMs: 999 });
 		expect(fetchResult.success).toBe(false);
 		expect(stallResult.success).toBe(false);
+		expect(durationResult.success).toBe(false);
 	});
 
 	it("rejects wrong types", () => {

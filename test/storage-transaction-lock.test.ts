@@ -57,9 +57,10 @@ describe("storage transaction leases", () => {
 		} finally {
 			await release();
 		}
-		// The acquisition budget deliberately sums to several seconds, so this
-		// test has to outlast it rather than the default 5s.
-	}, 20_000);
+		// The acquisition budget deliberately sums past the 10s stale window
+		// (~15s without jitter, up to ~30s with it), so this test has to outlast
+		// that rather than the default 5s.
+	}, 45_000);
 
 	it("waits out a burst of contention instead of failing fast", async () => {
 		// given a holder that keeps the lease for longer than the old ~0.5s budget

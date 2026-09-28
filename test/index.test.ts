@@ -186,6 +186,7 @@ vi.mock("../lib/config.js", () => ({
 	getModelAccountPoolMode: vi.fn(() => "preferred"),
 	getFetchTimeoutMs: () => 60000,
 	getStreamStallTimeoutMs: () => 45000,
+	getMaxStreamDurationMs: () => 300000,
 	getCodexTuiV2: () => true,
 	getCodexTuiColorProfile: () => "truecolor",
 	getCodexTuiGlyphMode: () => "ascii",
@@ -2353,34 +2354,41 @@ describe("OpenAIOAuthPlugin", () => {
 					expiresAt: Date.now() - 1000,
 				},
 			];
-			vi.mocked(withAccountStorageTransaction).mockImplementationOnce(
-				async (
-					handler: (
-						current: typeof mockStorage | null,
-						persist: (storage: typeof mockStorage) => Promise<void>,
-					) => Promise<boolean>,
-				) =>
-					await handler(
-						{
-							version: 3,
-							accounts: [
-								{
-									refreshToken: "different-refresh",
-									accountId: "acc-1",
-									email: "solo@test.com",
-								},
-							],
-							activeIndex: 0,
-							activeIndexByFamily: {},
-						},
-						async (nextStorage) => {
-							mockStorage.version = nextStorage.version;
-							mockStorage.accounts = nextStorage.accounts.map((account) => structuredClone(account));
-							mockStorage.activeIndex = nextStorage.activeIndex;
-							mockStorage.activeIndexByFamily = { ...nextStorage.activeIndexByFamily };
-						},
-					),
-			);
+			// The coordinator runs TWO transactions — probe, then commit. Both must
+			// see the same drifted snapshot: the commit's adopt guard treats a
+			// disk token that matches neither the exchanged nor the rotated value
+			// as a serial rotation committed by another holder and declines to
+			// clobber it. Serving the drifted world to both calls is what makes
+			// the simulated exchange→commit coherent.
+			const driftedTransaction = async (
+				handler: (
+					current: typeof mockStorage | null,
+					persist: (storage: typeof mockStorage) => Promise<void>,
+				) => Promise<boolean>,
+			) =>
+				await handler(
+					{
+						version: 3,
+						accounts: [
+							{
+								refreshToken: "different-refresh",
+								accountId: "acc-1",
+								email: "solo@test.com",
+							},
+						],
+						activeIndex: 0,
+						activeIndexByFamily: {},
+					},
+					async (nextStorage) => {
+						mockStorage.version = nextStorage.version;
+						mockStorage.accounts = nextStorage.accounts.map((account) => structuredClone(account));
+						mockStorage.activeIndex = nextStorage.activeIndex;
+						mockStorage.activeIndexByFamily = { ...nextStorage.activeIndexByFamily };
+					},
+				);
+			vi.mocked(withAccountStorageTransaction)
+				.mockImplementationOnce(driftedTransaction)
+				.mockImplementationOnce(driftedTransaction);
 			globalThis.fetch = vi.fn().mockImplementation(async () =>
 				new Response(
 					JSON.stringify({
@@ -3568,8 +3576,10 @@ describe("OpenAIOAuthPlugin", () => {
 				{ refreshToken: "old-r1", email: "one@example.com" },
 			];
 			const { withAccountStorageTransaction } = await import("../lib/storage.js");
-			// Probe + commit: only the commit persists, so the failing persist has to
-			// be in place for both calls of the coordinated refresh.
+			// Every transaction shares a persist that always fails: probe reads
+			// never persist, so this simulates a storage outage across the commit
+			// AND the post-commit salvage the coordinated refresh now attempts.
+			const originalTransaction = vi.mocked(withAccountStorageTransaction).getMockImplementation();
 			const failingTransaction = async <T>(
 				callback: (
 					loadedStorage: typeof mockStorage,
@@ -3582,9 +3592,7 @@ describe("OpenAIOAuthPlugin", () => {
 				};
 				return callback(loadedStorage, persist);
 			};
-			vi.mocked(withAccountStorageTransaction)
-				.mockImplementationOnce(failingTransaction)
-				.mockImplementationOnce(failingTransaction);
+			vi.mocked(withAccountStorageTransaction).mockImplementation(failingTransaction);
 
 			const result = parseJsonOutput<{
 				healthyCount: number;
@@ -3597,6 +3605,7 @@ describe("OpenAIOAuthPlugin", () => {
 			expect(result.accounts[0]?.status).toBe("unhealthy");
 			expect(result.accounts[0]?.error).toContain("disk full");
 			expect(mockStorage.accounts[0]?.refreshToken).toBe("old-r1");
+			vi.mocked(withAccountStorageTransaction).mockImplementation(originalTransaction);
 		});
 
 		it("surfaces stale-state and duplicate findings (issue #171)", async () => {

@@ -23,7 +23,18 @@ export function getProjectConfigDir(projectPath: string): string {
 
 function normalizeProjectPath(projectPath: string): string {
 	const resolvedPath = resolve(projectPath);
-	const normalizedSeparators = resolvedPath.replace(/\\/g, "/");
+	// Collapse symlinks so a project reached through a symlinked parent and
+	// the same project reached directly share one storage key — without this,
+	// `/link/repo` and `/real/repo` would each get their own account pool for
+	// one physical repository. Best effort: realpath fails for not-yet-
+	// existing paths, so fall back to the lexical resolution.
+	let canonical = resolvedPath;
+	try {
+		canonical = realpathSync(resolvedPath);
+	} catch {
+		// Keep the lexical resolution.
+	}
+	const normalizedSeparators = canonical.replace(/\\/g, "/");
 	return process.platform === "win32"
 		? normalizedSeparators.toLowerCase()
 		: normalizedSeparators;
@@ -35,8 +46,7 @@ function sanitizeProjectName(projectPath: string): string {
 	return sanitized || "project";
 }
 
-export function getProjectStorageKey(projectPath: string): string {
-	const normalizedPath = normalizeProjectPath(projectPath);
+function storageKeyForNormalizedPath(normalizedPath: string): string {
 	const hash = createHash("sha256")
 		.update(normalizedPath)
 		.digest("hex")
@@ -45,35 +55,107 @@ export function getProjectStorageKey(projectPath: string): string {
 	return `${projectName}-${hash}`;
 }
 
+export function getProjectStorageKey(projectPath: string): string {
+	return storageKeyForNormalizedPath(normalizeProjectPath(projectPath));
+}
+
+/**
+ * The storage key a pre-canonicalization build would have produced for this
+ * project: the lexical `resolve()` without the realpath collapse. Pools
+ * created through a symlinked path live under this key — the canonical-key
+ * lookup hides them entirely unless it is consulted as a fallback.
+ */
+function getLegacyProjectStorageKey(projectPath: string): string {
+	const lexical = resolve(projectPath).replace(/\\/g, "/");
+	const normalizedSeparators =
+		process.platform === "win32" ? lexical.toLowerCase() : lexical;
+	return storageKeyForNormalizedPath(normalizedSeparators);
+}
+
 /**
  * Per-project storage is namespaced under ~/.opencode/projects
  * to avoid writing account files into user repositories.
+ *
+ * Fallback rule: a pool created before storage keys canonicalized their
+ * project path (or created through a since-removed symlink) lives under the
+ * lexical key. When the canonical-keyed directory does not exist but the
+ * lexical-keyed one does, the lexical directory is adopted so the accounts
+ * keep loading instead of reporting an empty pool. When neither exists the
+ * canonical key wins so new pools always land on the modern layout.
  */
 export function getProjectGlobalConfigDir(projectPath: string): string {
-	return join(getConfigDir(), PROJECTS_DIR, getProjectStorageKey(projectPath));
+	const canonicalDir = join(
+		getConfigDir(),
+		PROJECTS_DIR,
+		getProjectStorageKey(projectPath),
+	);
+	if (existsSync(canonicalDir)) return canonicalDir;
+	const legacyKey = getLegacyProjectStorageKey(projectPath);
+	const canonicalKey = getProjectStorageKey(projectPath);
+	if (legacyKey !== canonicalKey) {
+		const legacyDir = join(getConfigDir(), PROJECTS_DIR, legacyKey);
+		if (existsSync(legacyDir)) return legacyDir;
+	}
+	return canonicalDir;
 }
 
 export function isProjectDirectory(dir: string): boolean {
 	return PROJECT_MARKERS.some((marker) => existsSync(join(dir, marker)));
 }
 
+/**
+ * True when `dir` is the user's home directory, compared by canonical path so
+ * a symlinked HOME still matches.
+ */
+function isHomeDirectory(dir: string): boolean {
+	try {
+		return realpathSync(dir) === realpathSync(homedir());
+	} catch {
+		return resolve(dir) === resolve(homedir());
+	}
+}
+
+/**
+ * `~/.opencode` is this plugin's own state directory, so it exists in every
+ * home directory that has ever run the plugin. Letting it count as a project
+ * marker for $HOME would scope a whole home directory as one "project" the
+ * first time the CLI ran from it — pooling every invocation's accounts under
+ * one accidental key. Other markers (`.git`, `package.json`, …) still make
+ * $HOME a legitimate project root (dotfiles repos, home-as-package).
+ */
+function isProjectRootCandidate(dir: string): boolean {
+	if (!isProjectDirectory(dir)) return false;
+	if (!isHomeDirectory(dir)) return true;
+	return PROJECT_MARKERS.some(
+		(marker) => marker !== ".opencode" && existsSync(join(dir, marker)),
+	);
+}
+
 export function findProjectRoot(startDir: string): string | null {
+	// Canonicalize the start directory so the ancestor walk follows the real
+	// filesystem hierarchy — a symlinked start would otherwise walk the link's
+	// lexical parents and silently miss (or mislabel) the real project root.
 	let current = startDir;
+	try {
+		current = realpathSync(startDir);
+	} catch {
+		current = resolve(startDir);
+	}
 	const root = dirname(current) === current ? current : null;
-	
+
 	while (current) {
-		if (isProjectDirectory(current)) {
+		if (isProjectRootCandidate(current)) {
 			return current;
 		}
-		
+
 		const parent = dirname(current);
 		if (parent === current) {
 			break;
 		}
 		current = parent;
 	}
-	
-	return root && isProjectDirectory(root) ? root : null;
+
+	return root && isProjectRootCandidate(root) ? root : null;
 }
 
 function normalizePathForComparison(filePath: string): string {

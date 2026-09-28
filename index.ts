@@ -96,6 +96,7 @@ import {
 	getModelAccountPoolMode,
 	getFetchTimeoutMs,
 	getStreamStallTimeoutMs,
+	getMaxStreamDurationMs,
 	getCodexTuiV2,
 	getCodexTuiColorProfile,
 	getCodexTuiGlyphMode,
@@ -2497,6 +2498,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							const accountToastsEnabled = getAccountToastsEnabled(pluginConfig);
 							const fetchTimeoutMs = getFetchTimeoutMs(pluginConfig);
 							const streamStallTimeoutMs = getStreamStallTimeoutMs(pluginConfig);
+							const maxStreamDurationMs = getMaxStreamDurationMs(pluginConfig);
 							const emptyResponseMaxRetries = getEmptyResponseMaxRetries(pluginConfig);
 							const emptyResponseRetryDelayMs = getEmptyResponseRetryDelayMs(pluginConfig);
 							const pidOffsetEnabled = getPidOffsetEnabled(pluginConfig);
@@ -3804,6 +3806,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					try {
 						successResponse = await handleSuccessResponse(response, isStreaming, {
 							streamStallTimeoutMs,
+							maxStreamDurationMs,
 						});
 					} catch (streamError) {
 						// A stream stall or SSE-parse failure happened AFTER a token was

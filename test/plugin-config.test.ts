@@ -23,6 +23,7 @@ import {
 	getRequestTransformMode,
 	getFetchTimeoutMs,
 	getStreamStallTimeoutMs,
+	getMaxStreamDurationMs,
 	getAutoUpdate,
 	getAccountToastsEnabled,
 	getQuotaNotifications,
@@ -151,6 +152,7 @@ describe('Plugin Configuration', () => {
 				pidOffsetEnabled: false,
 				fetchTimeoutMs: 60_000,
 				streamStallTimeoutMs: 45_000,
+				maxStreamDurationMs: 300_000,
 			});
 			// The stat gate answers "does the file exist" without a read
 			// syscall: the loader probes the path but must not call
@@ -207,6 +209,7 @@ describe('Plugin Configuration', () => {
 				pidOffsetEnabled: false,
 				fetchTimeoutMs: 60_000,
 				streamStallTimeoutMs: 45_000,
+				maxStreamDurationMs: 300_000,
 			});
 		});
 
@@ -256,6 +259,7 @@ describe('Plugin Configuration', () => {
 				pidOffsetEnabled: false,
 				fetchTimeoutMs: 60_000,
 				streamStallTimeoutMs: 45_000,
+				maxStreamDurationMs: 300_000,
 			});
 		});
 
@@ -316,6 +320,7 @@ describe('Plugin Configuration', () => {
 		pidOffsetEnabled: false,
 		fetchTimeoutMs: 60_000,
 		streamStallTimeoutMs: 45_000,
+		maxStreamDurationMs: 300_000,
 	});
 		expect(mockLogWarn).toHaveBeenCalled();
 	});
@@ -370,6 +375,7 @@ describe('Plugin Configuration', () => {
 			pidOffsetEnabled: false,
 			fetchTimeoutMs: 60_000,
 			streamStallTimeoutMs: 45_000,
+			maxStreamDurationMs: 300_000,
 		});
 		expect(mockLogWarn).toHaveBeenCalled();
 	});
@@ -884,6 +890,12 @@ describe('Plugin Configuration', () => {
 			process.env.CODEX_AUTH_STREAM_STALL_TIMEOUT_MS = '30000';
 			expect(getStreamStallTimeoutMs({})).toBe(30000);
 			delete process.env.CODEX_AUTH_STREAM_STALL_TIMEOUT_MS;
+		});
+
+		it('should read max stream duration from env', () => {
+			process.env.CODEX_AUTH_MAX_STREAM_DURATION_MS = '120000';
+			expect(getMaxStreamDurationMs({})).toBe(120000);
+			delete process.env.CODEX_AUTH_MAX_STREAM_DURATION_MS;
 		});
 	});
 

@@ -7,7 +7,101 @@ const log = createLogger("response-handler");
 
 const MAX_SSE_SIZE = 10 * 1024 * 1024; // 10MB limit to prevent memory exhaustion
 const DEFAULT_STREAM_STALL_TIMEOUT_MS = 45_000;
+/**
+ * Overall post-headers deadline for a non-streaming SSE conversion.
+ *
+ * The stall timer only measures the gap *between* reads and is re-armed on
+ * every chunk, so a drip that always lands just inside the window (a byte
+ * per 44s under the 45s default) used to hang the conversion forever. This
+ * deadline is armed once and never re-armed.
+ */
+const DEFAULT_MAX_STREAM_DURATION_MS = 5 * 60_000;
 const STREAM_ERROR_CODE = "stream_error";
+
+/** Defaults for {@link readBoundedResponseText}. */
+const DEFAULT_BOUNDED_READ_MAX_BYTES = 256 * 1024;
+const DEFAULT_BOUNDED_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * Read a response body with a hard byte cap and a total timeout.
+ *
+ * `Response.text()` keeps pulling until the stream ends: a hostile or broken
+ * upstream can make it buffer unboundedly (150MB bodies were observed) or
+ * never finish (a slow drip defeats nothing — nothing was armed). This reader
+ * stops at `maxBytes` or `timeoutMs`, cancels the rest of the stream so
+ * backpressure reaches the socket, and returns whatever arrived — a
+ * truncated body still feeds the downstream parsers/classifiers.
+ *
+ * Bodies that are not byte streams (test doubles, exotic implementations)
+ * fall back to `text()` — still char-capped — since there is nothing to
+ * cancel.
+ */
+export async function readBoundedResponseText(
+	response: Response,
+	options?: { maxBytes?: number; timeoutMs?: number },
+): Promise<string> {
+	const maxBytes = Math.max(
+		1,
+		Math.floor(options?.maxBytes ?? DEFAULT_BOUNDED_READ_MAX_BYTES),
+	);
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_BOUNDED_READ_TIMEOUT_MS;
+	const body = response.body as ReadableStream<Uint8Array> | null;
+	if (!body || typeof body.getReader !== "function") {
+		const text = await response.text();
+		return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+	}
+
+	const reader = body.getReader();
+	const parts: Uint8Array[] = [];
+	let received = 0;
+	let stop = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	// One shared deadline raced against every read: it never re-arms, so a
+	// drip that keeps "progressing" cannot extend it.
+	const timedOut = new Promise<"timeout">((resolve) => {
+		if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+			timer = setTimeout(() => resolve("timeout"), timeoutMs);
+		}
+	});
+	try {
+		while (!stop) {
+			const result = await Promise.race([reader.read(), timedOut]);
+			if (result === "timeout") {
+				stop = true;
+				break;
+			}
+			if (result.done || !result.value) break;
+			parts.push(result.value);
+			received += result.value.byteLength;
+			if (received >= maxBytes) {
+				stop = true;
+			}
+		}
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+		if (stop) {
+			// Release the source so the upstream stops uploading a body nobody
+			// will read further. Do NOT await: on a cloned (tee'd) body the
+			// cancel promise only resolves once the sibling branch cancels
+			// too, and the original body is deliberately left for callers —
+			// awaiting it would deadlock. The cancellation itself takes effect
+			// synchronously, which is what stops the pulls.
+			void reader.cancel().catch(() => {});
+		}
+		reader.releaseLock();
+	}
+
+	const kept = Math.min(received, maxBytes);
+	const merged = new Uint8Array(kept);
+	let offset = 0;
+	for (const part of parts) {
+		if (offset >= kept) break;
+		const slice = part.subarray(0, kept - offset);
+		merged.set(slice, offset);
+		offset += slice.length;
+	}
+	return new TextDecoder().decode(merged);
+}
 
 type ParsedSseResult =
 	| {
@@ -24,7 +118,10 @@ type ParsedSseResult =
 	  };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
-	if (value && typeof value === "object") {
+	// `Array.isArray` matters: an array-typed `response`/`error` used to pass
+	// this check, letting `[1,2,3]` flow through as the terminal response and
+	// surface to the caller as a 200 carrying odd JSON.
+	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as Record<string, unknown>;
 	}
 	return null;
@@ -54,11 +151,17 @@ function extractStreamError(event: SSEEventData): {
 	type?: string;
 	code?: string | number;
 } {
-	const errorRecord = toRecord((event as { error?: unknown }).error);
-	const eventMessage = (event as { message?: unknown }).message;
-	const parsedError = extractErrorFromRecord(errorRecord);
+	const rawError = (event as { error?: unknown }).error;
+	const parsedError = extractErrorFromRecord(toRecord(rawError));
 	if (parsedError) return parsedError;
+	// Some upstreams emit `error` as a bare string instead of an object —
+	// that IS the failure detail, and silently dropping it turned a real
+	// verdict into the generic "emitted an error event" wording.
+	if (typeof rawError === "string" && rawError.trim()) {
+		return { message: rawError.trim() };
+	}
 
+	const eventMessage = (event as { message?: unknown }).message;
 	const message =
 		(typeof eventMessage === "string" ? eventMessage.trim() : "") ||
 		"Codex stream emitted an error event";
@@ -71,12 +174,23 @@ function extractResponseError(responseRecord: Record<string, unknown>): {
 	code?: string | number;
 } | null {
 	const status = typeof responseRecord.status === "string" ? responseRecord.status : "";
-	const parsedError = extractErrorFromRecord(
-		toRecord((responseRecord as { error?: unknown }).error),
-	);
+	const rawError = (responseRecord as { error?: unknown }).error;
+	const parsedError = extractErrorFromRecord(toRecord(rawError));
 	if (parsedError) return parsedError;
+	if (typeof rawError === "string" && rawError.trim()) {
+		return { message: rawError.trim() };
+	}
 	if (status === "failed" || status === "incomplete") {
-		return { message: `Codex stream ended with status: ${status}` };
+		// `incomplete_details.reason` is the only diagnosis an incomplete
+		// response carries (e.g. max_output_tokens) — don't drop it.
+		const details = toRecord(responseRecord.incomplete_details);
+		const reason =
+			details && typeof details.reason === "string" ? details.reason.trim() : "";
+		return {
+			message: reason
+				? `Codex stream ended with status: ${status} (${reason})`
+				: `Codex stream ended with status: ${status}`,
+		};
 	}
 	return null;
 }
@@ -138,8 +252,18 @@ function processSsePayload(payload: string): ParsedSseResult | null {
 					});
 					return { kind: "error", error: parsedError };
 				}
+				return { kind: "response", response: data.response };
 			}
-			return { kind: "response", response: data.response };
+			// A terminal event whose `response` is absent or a bare scalar/array
+			// is malformed: returning it verbatim surfaced odd 200s (`"x"`,
+			// `42`, `[1,2,3]`) that callers then treated as real responses.
+			return {
+				kind: "error",
+				error: {
+					message:
+						"Codex stream terminal event carried no response object",
+				},
+			};
 		}
 	} catch {
 		// Skip malformed JSON
@@ -151,13 +275,15 @@ function processSsePayload(payload: string): ParsedSseResult | null {
  * Convert SSE stream response to JSON for generateText()
  * @param response - Fetch response with SSE stream
  * @param headers - Response headers
- * @param options - Optional `streamStallTimeoutMs` override (floored at 1000ms)
+ * @param options - Optional `streamStallTimeoutMs` (floored at 1000ms,
+ *   inter-chunk gap) and `maxStreamDurationMs` (floored at 1000ms, total
+ *   post-headers deadline that a drip cannot keep resetting)
  * @returns Response with JSON body
  */
 export async function convertSseToJson(
 	response: Response,
 	headers: Headers,
-	options?: { streamStallTimeoutMs?: number },
+	options?: { streamStallTimeoutMs?: number; maxStreamDurationMs?: number },
 ): Promise<Response> {
 	if (!response.body) {
 		throw new RequestError('[openai-codex-plugin] Response has no body', {
@@ -168,11 +294,19 @@ export async function convertSseToJson(
 	const decoder = new TextDecoder();
 	const textEncoder = new TextEncoder();
 	// Chunks are collected and joined once — accumulating into a single
-	// string is quadratic on multi-MB streams.
+	// string is quadratic on multi-MB streams. They are only retained while
+	// reachable: request logging wants the full body, and the no-SSE
+	// passthrough needs it only until the stream has proven to be SSE.
 	const textParts: string[] = [];
 	// Leftover buffer: only text after the last complete line is held over
 	// for the next chunk, instead of re-splitting the whole stream per chunk.
 	let pendingText = '';
+	// Scan cursor into pendingText: everything below it is already known to
+	// contain no '\n'. Without it each drain rescanned the whole carried tail
+	// — O(tail) per chunk made a stream of tiny chunks quadratic, and the
+	// pathological single-byte-chunk case flattened an ever-growing rope
+	// until the heap died.
+	let pendingScanFrom = 0;
 	let totalBytes = 0;
 	let sawSseLine = false;
 	const assertWithinLimit = (): void => {
@@ -186,6 +320,10 @@ export async function convertSseToJson(
 	const streamStallTimeoutMs = Math.max(
 		1_000,
 		Math.floor(options?.streamStallTimeoutMs ?? DEFAULT_STREAM_STALL_TIMEOUT_MS),
+	);
+	const maxStreamDurationMs = Math.max(
+		1_000,
+		Math.floor(options?.maxStreamDurationMs ?? DEFAULT_MAX_STREAM_DURATION_MS),
 	);
 
 	// Incremental WHATWG-SSE event folding: consecutive `data:` lines of one
@@ -209,26 +347,44 @@ export async function convertSseToJson(
 		if (trimmedLine === '') {
 			return dispatch();
 		}
-		if (/^(?:data|event):/.test(trimmedLine)) sawSseLine = true;
-		const payload = parseDataPayload(trimmedLine);
-		if (payload !== null) dataLines.push(payload);
+		if (trimmedLine.startsWith("data:")) {
+			const payload = parseDataPayload(trimmedLine);
+			if (payload !== null) dataLines.push(payload);
+			// Only a JSON-object payload or the [DONE] sentinel proves SSE
+			// framing. Plain text/HTML bodies legitimately contain `data:`- and
+			// `event:`-prefixed lines — counting those flipped the passthrough
+			// verdict into a false `incomplete_stream` error.
+			const dataText = trimmedLine.slice(5).trimStart();
+			if (dataText.startsWith("{") || dataText === "[DONE]") {
+				sawSseLine = true;
+			}
+		}
 		return null;
 	};
 	// Extract complete lines out of pendingText; a trailing partial line
-	// (no newline yet) stays buffered for the next chunk.
+	// (no newline yet) stays buffered for the next chunk. The scan starts at
+	// pendingScanFrom — the cursor left by the previous drain — so a carried
+	// tail is never rescanned.
 	const drainLines = (): ParsedSseResult | null => {
 		let lineStart = 0;
-		let newlineIndex = pendingText.indexOf('\n');
+		let newlineIndex = pendingText.indexOf('\n', pendingScanFrom);
 		while (newlineIndex !== -1) {
 			const result = processLine(pendingText.slice(lineStart, newlineIndex));
 			if (result) {
 				pendingText = '';
+				pendingScanFrom = 0;
 				return result;
 			}
 			lineStart = newlineIndex + 1;
 			newlineIndex = pendingText.indexOf('\n', lineStart);
 		}
-		pendingText = pendingText.slice(lineStart);
+		if (lineStart > 0) {
+			pendingText = pendingText.slice(lineStart);
+		}
+		// The last indexOf reached end-of-buffer without a match, so the whole
+		// remaining tail is known newline-free — the next drain may resume
+		// where this one stopped.
+		pendingScanFrom = pendingText.length;
 		return null;
 	};
 	// End-of-stream: the residual line has no trailing newline, and the
@@ -243,8 +399,11 @@ export async function convertSseToJson(
 		return dispatch();
 	};
 
-	// One stall timer re-armed per read, rather than a fresh timeout promise
-	// (and timer object) per chunk.
+	// One stall timer re-armed per read (the inter-chunk gap guard), plus a
+	// single total-duration deadline armed once and raced on every read. The
+	// stall timer alone is defeated by a drip that always lands inside the
+	// window (a byte per 44s under a 45s stall used to hang forever); the
+	// deadline is the bound it could never extend.
 	let stallTimer: ReturnType<typeof setTimeout> | undefined;
 	let stallReject: ((error: Error) => void) | undefined;
 	const stallPromise = new Promise<never>((_, reject) => {
@@ -263,22 +422,53 @@ export async function convertSseToJson(
 			);
 		}, streamStallTimeoutMs);
 	};
+	let deadlineReject: ((error: Error) => void) | undefined;
+	const deadlinePromise = new Promise<never>((_, reject) => {
+		deadlineReject = reject;
+	});
+	deadlinePromise.catch(() => {});
+	const deadlineTimer = setTimeout(() => {
+		deadlineReject?.(
+			new Error(
+				`SSE stream exceeded the ${maxStreamDurationMs}ms total duration limit waiting for response.done`,
+			),
+		);
+	}, maxStreamDurationMs);
 
 	try {
 		// Consume the stream, folding SSE events as complete lines arrive.
 		armStallTimer();
 		while (true) {
-			const { done, value } = await Promise.race([reader.read(), stallPromise]);
+			const { done, value } = await Promise.race([
+				reader.read(),
+				stallPromise,
+				deadlinePromise,
+			]);
 			if (done || !value) break;
 			totalBytes += value.byteLength;
 			const decoded = decoder.decode(value, { stream: true });
-			textParts.push(decoded);
+			// Retain the chunk only while it is still reachable: the no-SSE
+			// passthrough needs the pre-SSE body, request logging needs it all.
+			if (LOGGING_ENABLED || !sawSseLine) {
+				textParts.push(decoded);
+			}
 			pendingText += decoded;
 			assertWithinLimit();
-			const lineResult = drainLines();
-			if (lineResult) {
-				parsedResult = lineResult;
-				break;
+			// Only appended text containing '\n' can complete a line — the
+			// carried tail is newline-free by the drainLines invariant, so a
+			// newline-less chunk has nothing to drain.
+			if (decoded.indexOf('\n') !== -1) {
+				const lineResult = drainLines();
+				if (lineResult) {
+					parsedResult = lineResult;
+					break;
+				}
+				// Once the stream has proven to be SSE the retained text is
+				// unreachable (the passthrough requires !sawSseLine); drop it
+				// unless logging still wants the full body.
+				if (!LOGGING_ENABLED && sawSseLine) {
+					textParts.length = 0;
+				}
 			}
 			armStallTimer();
 		}
@@ -286,17 +476,32 @@ export async function convertSseToJson(
 		if (!parsedResult) {
 			const tail = decoder.decode();
 			if (tail) {
+				if (LOGGING_ENABLED || !sawSseLine) {
+					textParts.push(tail);
+				}
 				pendingText += tail;
-				textParts.push(tail);
 				totalBytes += textEncoder.encode(tail).byteLength;
 				assertWithinLimit();
+				if (tail.indexOf('\n') !== -1) {
+					const tailResult = drainLines();
+					if (tailResult) {
+						parsedResult = tailResult;
+					}
+				}
 			}
-			const flushed = flushPending();
-			if (flushed) parsedResult = flushed;
+			if (!parsedResult) {
+				const flushed = flushPending();
+				if (flushed) parsedResult = flushed;
+			}
+			if (!LOGGING_ENABLED && sawSseLine) {
+				textParts.length = 0;
+			}
 		} else {
 			// A resolved stream still has an upstream tail in flight; cancel it
 			// so the socket does not keep downloading a response nobody reads.
-			await reader.cancel().catch(() => {});
+			// Not awaited — a source whose cancel() pends forever must not hang
+			// the conversion past its own deadline.
+			void reader.cancel().catch(() => {});
 		}
 
 		if (LOGGING_ENABLED) {
@@ -376,7 +581,37 @@ export async function convertSseToJson(
 		const jsonHeaders = new Headers(headers);
 		jsonHeaders.set('content-type', 'application/json; charset=utf-8');
 
-		return new Response(JSON.stringify(finalResponse), {
+		let serializedBody: string;
+		try {
+			serializedBody = JSON.stringify(finalResponse);
+		} catch (error) {
+			// JSON.parse accepts deeper nesting than the recursive stringify
+			// can emit, so a hostile/garbled terminal object used to escape
+			// here as a thrown RangeError — surfaced upstream as a transient
+			// stream failure and churned account rotation. A deterministic 502
+			// keeps the verdict honest without penalising the account.
+			log.warn("SSE terminal response could not be serialized", {
+				error: String(error),
+			});
+			logRequest("stream-error", { error: "terminal response not serializable" });
+			return new Response(
+				JSON.stringify({
+					error: {
+						message:
+							"Upstream terminal response could not be serialized.",
+						type: STREAM_ERROR_CODE,
+						code: "unserializable_response",
+					},
+				}),
+				{
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: jsonHeaders,
+				},
+			);
+		}
+
+		return new Response(serializedBody, {
 			status: response.status,
 			statusText: response.statusText,
 			headers: jsonHeaders,
@@ -386,11 +621,12 @@ export async function convertSseToJson(
 		log.error("Error converting stream", { error: String(error) });
 		logRequest("stream-error", { error: String(error) });
 		if (typeof reader.cancel === "function") {
-			await reader.cancel(String(error)).catch(() => {});
+			void reader.cancel(String(error)).catch(() => {});
 		}
 		throw error;
 	} finally {
 		if (stallTimer !== undefined) clearTimeout(stallTimer);
+		clearTimeout(deadlineTimer);
 		// Release the reader lock to prevent resource leaks
 		reader.releaseLock();
 	}
@@ -427,7 +663,16 @@ export function isEmptyResponse(body: unknown): boolean {
 
 	if (Object.keys(obj).length === 0) return true;
 
-	const hasOutput = 'output' in obj && obj.output !== null && obj.output !== undefined;
+	// An `output` that is merely present is not content: `{id, output: []}`
+	// and `{id, output: ""}` are shape-only responses and must read as empty
+	// so the caller can retry instead of accepting a hollow success.
+	const outputValue = obj.output;
+	const hasOutput =
+		'output' in obj &&
+		outputValue !== null &&
+		outputValue !== undefined &&
+		!(Array.isArray(outputValue) && outputValue.length === 0) &&
+		(typeof outputValue !== 'string' || outputValue.trim() !== '');
 	const hasChoices = 'choices' in obj && Array.isArray(obj.choices) && 
 		obj.choices.some(c => c !== null && c !== undefined && typeof c === 'object' && Object.keys(c as object).length > 0);
 	const hasContent = 'content' in obj && obj.content !== null && obj.content !== undefined &&

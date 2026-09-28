@@ -82,6 +82,7 @@ export const PluginConfigSchema = z.object({
 	pidOffsetEnabled: z.boolean().optional(),
 	fetchTimeoutMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
 	streamStallTimeoutMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
+	maxStreamDurationMs: z.number().min(1_000).max(MAX_CONFIG_DURATION_MS).optional(),
 	quotaNotifications: z.object({
 		enabled: z.boolean().optional(),
 		autoProtectCredits: z.boolean().optional(),

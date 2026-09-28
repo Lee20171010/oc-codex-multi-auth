@@ -7,6 +7,7 @@
  */
 
 import { logDebug } from "./logger.js";
+import { readBoundedResponseText } from "./request/response-handler.js";
 
 /**
  * Error patterns that indicate context overflow
@@ -123,7 +124,12 @@ export async function handleContextOverflow(
   }
 
   try {
-    const bodyText = await response.clone().text();
+    // Bounded + timed: the 400 path used to read the whole body a second time
+    // (handleErrorResponse reads it again downstream) with neither a size cap
+    // nor a deadline — a huge or never-ending body hung the request here.
+    // Overflow markers are always near the front of an error body, so the
+    // shared 256KB/10s bounds lose nothing.
+    const bodyText = await readBoundedResponseText(response.clone());
     if (isContextOverflowError(response.status, bodyText)) {
 		logDebug("Context overflow detected, returning synthetic response");
       return {

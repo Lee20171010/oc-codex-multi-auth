@@ -61,7 +61,15 @@ const TOKEN_PATTERNS: Array<RegExp | { pattern: RegExp; group: number }> = [
 	},
 ];
 
-const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// The lookbehind does the bounding the `{1,64}` used to fake: a match can
+// only start at a real local-part boundary, so interior positions of an
+// overlong local part can never start a match — a 90-char local masks whole
+// instead of leaving its first 26 chars visible (greptile P1 on PR #280).
+// It also keeps the scan linear: non-boundary positions fail the lookbehind
+// instantly, so a `@`-free 256KB body no longer pays a backtrack attempt at
+// every offset (the original quadratic ~24s scan).
+const EMAIL_PATTERN =
+	/(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
 const SENSITIVE_KEYS = new Set([
 	"access",

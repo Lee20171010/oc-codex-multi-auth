@@ -15,6 +15,55 @@ describe("retry-budget", () => {
 		expect(aggressive.rateLimitGlobal).toBeGreaterThan(conservative.rateLimitGlobal);
 	});
 
+	it("falls back to the balanced profile for an unknown profile name", () => {
+		// Without the `?? PROFILE_LIMITS.balanced` fallback an unknown profile
+		// yields all-undefined limits — and `consume()` treats a non-finite
+		// limit as unbounded, i.e. infinite retries.
+		const limits = resolveRetryBudgetLimits("bogus-profile" as never);
+		expect(limits).toEqual({
+			authRefresh: 4,
+			network: 4,
+			server: 4,
+			rateLimitShort: 4,
+			rateLimitGlobal: 3,
+			emptyResponse: 2,
+		});
+		const tracker = new RetryBudgetTracker(limits);
+		for (let i = 0; i < 3; i++) {
+			expect(tracker.consume("rateLimitGlobal")).toBe(true);
+		}
+		expect(tracker.consume("rateLimitGlobal")).toBe(false);
+	});
+
+	it("pins every profile table to its exact values", () => {
+		// Self-referential or weakened profile constants (e.g. one bucket
+		// referencing another) only survive assertion-free suites.
+		expect(resolveRetryBudgetLimits("conservative")).toEqual({
+			authRefresh: 2,
+			network: 2,
+			server: 2,
+			rateLimitShort: 2,
+			rateLimitGlobal: 1,
+			emptyResponse: 1,
+		});
+		expect(resolveRetryBudgetLimits("balanced")).toEqual({
+			authRefresh: 4,
+			network: 4,
+			server: 4,
+			rateLimitShort: 4,
+			rateLimitGlobal: 3,
+			emptyResponse: 2,
+		});
+		expect(resolveRetryBudgetLimits("aggressive")).toEqual({
+			authRefresh: 8,
+			network: 8,
+			server: 8,
+			rateLimitShort: 8,
+			rateLimitGlobal: 10,
+			emptyResponse: 4,
+		});
+	});
+
 	it("applies normalized overrides", () => {
 		const limits = resolveRetryBudgetLimits("balanced", {
 			network: 2.9,
@@ -118,6 +167,14 @@ describe("retry-budget", () => {
 
 			// A long wait stays governed: the fourth exceeds the balanced budget.
 			expect(tracker.consumeWait("rateLimitGlobal", 6 * 60 * 60 * 1000)).toBe(false);
+		});
+
+		it("a zero wait is still free — it carries nothing, not a full unit", () => {
+			const tracker = balanced();
+			// `waitMs <= 0` would charge a full unit for a wait of zero; only
+			// `waitMs < 0` is the unproportioned case.
+			expect(tracker.consumeWait("rateLimitGlobal", 0)).toBe(true);
+			expect(tracker.getUsage().rateLimitGlobal).toBe(0);
 		});
 
 		it("accumulates short waits into whole units", () => {

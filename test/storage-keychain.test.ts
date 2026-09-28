@@ -201,15 +201,28 @@ describe("lib/storage/keychain: low-level backend", () => {
 			expect(read).toBe(blob);
 
 			const del = await deleteFromKeychain("proj-key");
-			expect(del).toBe(true);
+			expect(del.deleted).toBe(true);
+			expect(del.error).toBeUndefined();
 			expect(mock.store.size).toBe(0);
 		});
 
-		it("delete returns false when entry is absent", async () => {
+		it("delete returns deleted=false without error when entry is absent", async () => {
 			const mock = createMockBackend();
 			_setBackendForTests(mock);
 			const del = await deleteFromKeychain("missing-key");
-			expect(del).toBe(false);
+			expect(del.deleted).toBe(false);
+			expect(del.error).toBeUndefined();
+		});
+
+		it("delete surfaces backend failures as error, distinct from absent", async () => {
+			const mock = createMockBackend();
+			mock.delete = async () => {
+				throw new Error("keychain locked");
+			};
+			_setBackendForTests(mock);
+			const del = await deleteFromKeychain("proj-key");
+			expect(del.deleted).toBe(false);
+			expect(del.error).toContain("keychain locked");
 		});
 
 		it("readFromKeychain returns null when a mock backend has no entry for the key", async () => {

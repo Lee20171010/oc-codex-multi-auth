@@ -17,6 +17,9 @@ export interface RateLimitBackoffResult {
 const RATE_LIMIT_DEDUP_WINDOW_MS = 2000;
 const RATE_LIMIT_STATE_RESET_MS = 120_000;
 const MAX_BACKOFF_MS = 60_000;
+// Amortization cadence for the stale-state sweep — see
+// pruneStaleRateLimitState for why it is not run on every call.
+const RATE_LIMIT_PRUNE_INTERVAL_MS = 30_000;
 
 // Bounded jitter: the computed exponential delay is scaled by
 // [0.75, 1.25] so a fleet of accounts throttled together does not retry in
@@ -45,16 +48,40 @@ interface RateLimitState {
 }
 
 const rateLimitStateByAccountQuota = new Map<string, RateLimitState>();
+let lastRateLimitPruneAt: number | undefined;
 
 function normalizeDelayMs(value: number | null | undefined, fallback: number): number {
 	const candidate = typeof value === "number" && Number.isFinite(value) ? value : fallback;
 	return Math.max(0, Math.floor(candidate));
 }
 
-function pruneStaleRateLimitState(): void {
-	const now = Date.now();
+/**
+ * Sweep stale entries — amortized.
+ *
+ * This used to run on every 429 decision: O(map) per call meant a rate-limit
+ * storm paid O(n²) just pruning. Stale entries are harmless in the meantime
+ * (the attempt arithmetic below re-checks the reset window before reusing
+ * one), so a coarse sweep cadence bounds the map without the per-call scan.
+ *
+ * `now < lastRateLimitPruneAt` (a backward clock jump) always sweeps:
+ * entries stamped "in the future" are collectible nowhere else.
+ */
+function pruneStaleRateLimitState(now: number): void {
+	if (
+		lastRateLimitPruneAt !== undefined &&
+		now >= lastRateLimitPruneAt &&
+		now - lastRateLimitPruneAt < RATE_LIMIT_PRUNE_INTERVAL_MS
+	) {
+		return;
+	}
+	lastRateLimitPruneAt = now;
 	for (const [key, state] of rateLimitStateByAccountQuota) {
-		if (now - state.lastAt > RATE_LIMIT_STATE_RESET_MS) {
+		const age = now - state.lastAt;
+		// age < 0 means the clock moved backwards past the stamp — the entry
+		// is from a dead epoch. Before this check it survived the prune
+		// forever: a negative age is never > the reset window, so it could
+		// never age out.
+		if (age > RATE_LIMIT_STATE_RESET_MS || age < 0) {
 			rateLimitStateByAccountQuota.delete(key);
 		}
 	}
@@ -77,14 +104,20 @@ export function getRateLimitBackoff(
 	serverRetryAfterMs: number | null | undefined,
 	random: () => number = Math.random,
 ): RateLimitBackoffResult {
-	pruneStaleRateLimitState();
 	const now = Date.now();
+	pruneStaleRateLimitState(now);
 	const stateKey = `${accountIndex}:${quotaKey}`;
 	const previous = rateLimitStateByAccountQuota.get(stateKey);
+	const elapsedSinceLast = previous ? now - previous.lastAt : Number.POSITIVE_INFINITY;
 
 	const baseDelay = normalizeDelayMs(serverRetryAfterMs, 1000);
 
-	if (previous && now - previous.lastAt < RATE_LIMIT_DEDUP_WINDOW_MS) {
+	// A negative `elapsedSinceLast` means the clock moved backwards past the
+	// stamp: the entry belongs to a dead epoch. Without the `>= 0` guards a
+	// negative diff read as "inside the dedup window" — the attempt counter
+	// froze at its current value for every subsequent 429 AND the entry could
+	// never age out of the 120s reset window (a negative age is always < it).
+	if (previous && elapsedSinceLast >= 0 && elapsedSinceLast < RATE_LIMIT_DEDUP_WINDOW_MS) {
 		const backoffDelay = applyBackoffJitter(
 			Math.min(
 				baseDelay * Math.pow(2, previous.consecutive429 - 1),
@@ -94,13 +127,16 @@ export function getRateLimitBackoff(
 		);
 		return {
 			attempt: previous.consecutive429,
-			delayMs: Math.max(baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
+			// Floor at 1ms: a zero delay reaches markRateLimitedWithReason(0),
+			// where zero means "window elapsed" and deletes existing blocks —
+			// a hostile 429 could clear every block on the account.
+			delayMs: Math.max(1, baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
 			isDuplicate: true,
 		};
 	}
 
 	const attempt =
-		previous && now - previous.lastAt < RATE_LIMIT_STATE_RESET_MS
+		previous && elapsedSinceLast >= 0 && elapsedSinceLast < RATE_LIMIT_STATE_RESET_MS
 			? previous.consecutive429 + 1
 			: 1;
 
@@ -116,7 +152,7 @@ export function getRateLimitBackoff(
 	);
 	return {
 		attempt,
-		delayMs: Math.max(baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
+		delayMs: Math.max(1, baseDelay, Math.min(backoffDelay, MAX_BACKOFF_MS)),
 		isDuplicate: false,
 	};
 }
@@ -151,6 +187,7 @@ export function remapRateLimitBackoffAfterRemoval(removedIndex: number): void {
 
 export function clearRateLimitBackoffState(): void {
 	rateLimitStateByAccountQuota.clear();
+	lastRateLimitPruneAt = undefined;
 }
 
 const BACKOFF_MULTIPLIERS: Record<RateLimitReason, number> = {
@@ -168,9 +205,15 @@ export function calculateBackoffMs(
 ): number {
 	const multiplier = BACKOFF_MULTIPLIERS[reason] ?? 1.0;
 	const exponentialDelay = baseDelayMs * Math.pow(2, attempt - 1);
-	return Math.min(
-		applyBackoffJitter(exponentialDelay * multiplier, random),
-		MAX_BACKOFF_MS,
+	return Math.max(
+		// Same 1ms floor as getRateLimitBackoff: a sub-ms base with a <1
+		// reason multiplier (concurrent: 0.5) floors to exactly 0 after
+		// jitter, and 0 reaching markRateLimitedWithReason deletes blocks.
+		1,
+		Math.min(
+			applyBackoffJitter(exponentialDelay * multiplier, random),
+			MAX_BACKOFF_MS,
+		),
 	);
 }
 

@@ -29,6 +29,7 @@ import {
 	_setBackendForTests,
 	KEYCHAIN_SERVICE_NAME,
 	GLOBAL_KEYCHAIN_ACCOUNT_KEY,
+	buildKeychainFlaggedKey,
 	type KeychainBackend,
 } from "../lib/storage/keychain.js";
 import { setStoragePathDirect } from "../lib/storage/state.js";
@@ -449,18 +450,18 @@ describe("codex-keychain rollback (F1 MEDIUM: confirm-flag clobber gate)", () =>
 		expect(out).toMatch(/could not confirm the OS-keychain entry was deleted/i);
 	});
 
-	it("skips a flagged backup that fails the flagged-storage shape check", async () => {
+	it("archives the live keychain blob before deleting it so newer keychain-only state is not lost", async () => {
 		await seedBackup("from-backup");
-		// A flagged marker whose contents are NOT a valid
-		// FlaggedAccountStorageV1 — the loader would normalize it to an
-		// empty store, so promoting it would silently erase the quarantined
-		// pool while deleting the keychain copy.
-		const flaggedPath = join(storageDir, FLAGGED_ACCOUNTS_FILE_NAME);
-		const flaggedBackup = `${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`;
-		await fs.writeFile(
-			flaggedBackup,
-			JSON.stringify({ version: 99, accounts: [{ refreshToken: "x" }] }),
-			"utf-8",
+		// Post-migration, every save writes keychain-only — the live entry can
+		// hold strictly newer state than the backup being restored.
+		const newerBlob = JSON.stringify({
+			version: 3,
+			activeIndex: 0,
+			accounts: [{ refreshToken: "rt-newer", accountId: "acct-keychain-newer", addedAt: 1, lastUsed: 1 }],
+		});
+		mock.store.set(
+			`${KEYCHAIN_SERVICE_NAME}::${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`,
+			newerBlob,
 		);
 
 		const t = createCodexKeychainTool(buildCtx());
@@ -470,14 +471,116 @@ describe("codex-keychain rollback (F1 MEDIUM: confirm-flag clobber gate)", () =>
 		)) as string;
 
 		expect(out).toMatch(/Restored/);
+		expect(out).toMatch(/pre-rollback-keychain/i);
+		// The keychain entry is gone, but its newer blob survived as an archive.
+		expect(
+			mock.store.get(`${KEYCHAIN_SERVICE_NAME}::${GLOBAL_KEYCHAIN_ACCOUNT_KEY}`),
+		).toBeUndefined();
+		const entries = await fs.readdir(storageDir);
+		const archived = entries.find((name) =>
+			name.includes(".pre-rollback-keychain."),
+		);
+		expect(archived).toBeDefined();
+		const archivedBody = JSON.parse(
+			await fs.readFile(join(storageDir, archived!), "utf-8"),
+		);
+		expect(archivedBody.accounts[0].accountId).toBe("acct-keychain-newer");
+	});
+
+	it("restores the flagged backup under its own lease and archives the live flagged keychain blob", async () => {
+		await seedBackup("from-backup");
+		const flaggedPath = join(
+			storageDir,
+			"oc-codex-multi-auth-flagged-accounts.json",
+		);
+		const flaggedBackup = `${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`;
+		await fs.writeFile(
+			flaggedBackup,
+			JSON.stringify({
+				version: 1,
+				accounts: [
+					{
+						refreshToken: "rt-flagged",
+						accountId: "acct-flagged",
+						flaggedAt: 1,
+					},
+				],
+			}),
+			"utf-8",
+		);
+		// A live flagged keychain entry holding quarantines newer than the backup.
+		const flaggedKey = buildKeychainFlaggedKey(null);
+		mock.store.set(
+			`${KEYCHAIN_SERVICE_NAME}::${flaggedKey}`,
+			JSON.stringify({
+				version: 1,
+				accounts: [
+					{
+						refreshToken: "rt-flagged-newer",
+						accountId: "acct-flagged-newer",
+						flaggedAt: 2,
+					},
+				],
+			}),
+		);
+
+		const t = createCodexKeychainTool(buildCtx());
+		const out = (await t.execute(
+			{ command: "rollback" },
+			{} as never,
+		)) as string;
+
+		expect(out).toMatch(/Flagged store restored/);
+		expect(existsSync(flaggedPath)).toBe(true);
+		const flaggedOnDisk = JSON.parse(await fs.readFile(flaggedPath, "utf-8"));
+		expect(flaggedOnDisk.accounts[0].accountId).toBe("acct-flagged");
+		// Live flagged keychain entry was archived before deletion.
+		expect(
+			mock.store.get(`${KEYCHAIN_SERVICE_NAME}::${flaggedKey}`),
+		).toBeUndefined();
+		const entries = await fs.readdir(storageDir);
+		const archived = entries.find(
+			(name) =>
+				name.startsWith("oc-codex-multi-auth-flagged-accounts.json") &&
+				name.includes(".pre-rollback-keychain."),
+		);
+		expect(archived).toBeDefined();
+		const archivedBody = JSON.parse(
+			await fs.readFile(join(storageDir, archived!), "utf-8"),
+		);
+		expect(archivedBody.accounts[0].accountId).toBe("acct-flagged-newer");
+	});
+
+	it("leaves a flagged backup that fails shape validation in place and warns", async () => {
+		await seedBackup("from-backup");
+		const flaggedPath = join(
+			storageDir,
+			"oc-codex-multi-auth-flagged-accounts.json",
+		);
+		// An "accounts array exists" check would accept this; the real
+		// flagged-store shape rejects version 2.
+		await fs.writeFile(
+			`${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`,
+			JSON.stringify({ version: 2, accounts: [] }),
+			"utf-8",
+		);
+
+		const t = createCodexKeychainTool(buildCtx());
+		const out = (await t.execute(
+			{ command: "rollback" },
+			{} as never,
+		)) as string;
+
 		expect(out).toMatch(/did not parse as flagged-account storage/i);
 		expect(existsSync(flaggedPath)).toBe(false);
-		expect(existsSync(flaggedBackup)).toBe(true);
 	});
 
 	it("skips the flagged restore when probing the live flagged file fails non-ENOENT", async () => {
 		await seedBackup("from-backup");
-		const flaggedPath = join(storageDir, FLAGGED_ACCOUNTS_FILE_NAME);
+		const flaggedPath = join(
+			storageDir,
+			"oc-codex-multi-auth-flagged-accounts.json",
+		);
 		const flaggedBackup = `${flaggedPath}.migrated-to-keychain.2024-06-15T10-00-00-000Z`;
 		await fs.writeFile(
 			flaggedBackup,
@@ -512,7 +615,7 @@ describe("codex-keychain rollback (F1 MEDIUM: confirm-flag clobber gate)", () =>
 				{ command: "rollback", confirm: true },
 				{} as never,
 			)) as string;
-			expect(out).toMatch(/could not check the existing flagged file/i);
+			expect(out).toMatch(/could not check for an existing flagged accounts file/i);
 			expect(out).toMatch(/Flagged restore skipped/i);
 		} finally {
 			accessSpy.mockRestore();
