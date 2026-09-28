@@ -162,11 +162,14 @@ describe("opencode-codex", () => {
     it("does not let a stored sourceUrl redirect the next fetch", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
+      const diskContent = padPrompt("Cached content");
       vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached content"))
+        .mockResolvedValueOnce(diskContent)
         .mockResolvedValueOnce(JSON.stringify({
-          etag: '"old-etag"',
-          // A planted meta file pointing at an attacker host.
+          // Hash-binds the disk body so the 304 can serve it — but the
+          // stored sourceUrl points at an attacker host and must still be
+          // ignored for the conditional request itself.
+          etag: gitBlobEtag(diskContent),
           sourceUrl: "https://attacker.example/prompt.txt",
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
@@ -315,15 +318,18 @@ describe("opencode-codex", () => {
       );
     });
 
-    it("falls back to cache on network error, then suppresses retries for the TTL", async () => {
+    it("falls back to a hash-bound cache on network error, then suppresses retries for the TTL", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
-      vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached fallback content"))
-        .mockResolvedValueOnce(JSON.stringify({
-          etag: '"etag"',
-          lastChecked: Date.now() - 20 * 60 * 1000,
-        }));
+      const diskContent = padPrompt("Cached fallback content");
+      const seedCache = () =>
+        vi.mocked(readFile)
+          .mockResolvedValueOnce(diskContent)
+          .mockResolvedValueOnce(JSON.stringify({
+            etag: gitBlobEtag(diskContent),
+            lastChecked: Date.now() - 20 * 60 * 1000,
+          }));
+      seedCache();
 
       mockFetch.mockRejectedValue(new Error("Network error"));
 
@@ -332,12 +338,7 @@ describe("opencode-codex", () => {
 
       // An offline window must not pay a full source-list sweep per call:
       // the recorded failure suppresses the next fetch for the TTL.
-      vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached fallback content"))
-        .mockResolvedValueOnce(JSON.stringify({
-          etag: '"etag"',
-          lastChecked: Date.now() - 20 * 60 * 1000,
-        }));
+      seedCache();
       const callsAfterFirst = mockFetch.mock.calls.length;
       const second = await getOpenCodeCodexPrompt();
       expect(second).toContain("Cached fallback content");
@@ -351,18 +352,19 @@ describe("opencode-codex", () => {
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       await expect(getOpenCodeCodexPrompt()).rejects.toThrow(
-        "Failed to fetch OpenCode codex.txt and no cache available"
+        "Failed to fetch OpenCode codex.txt and no verifiable cache available"
       );
       expect(mockFetch.mock.calls.length).toBeGreaterThan(1);
     });
 
-    it("falls back to cache on non-OK response", async () => {
+    it("falls back to a hash-bound cache on non-OK response", async () => {
       const { getOpenCodeCodexPrompt } = await import("../lib/prompts/opencode-codex.js");
 
+      const diskContent = padPrompt("Cached content for 500");
       vi.mocked(readFile)
-        .mockResolvedValueOnce(padPrompt("Cached content for 500"))
+        .mockResolvedValueOnce(diskContent)
         .mockResolvedValueOnce(JSON.stringify({
-          etag: '"etag"',
+          etag: gitBlobEtag(diskContent),
           lastChecked: Date.now() - 20 * 60 * 1000,
         }));
 

@@ -145,8 +145,9 @@ let refreshPromise: Promise<void> | null = null;
 /**
  * Timestamp of the last failed upstream exchange. A failure suppresses
  * retries for `CACHE_TTL_MS` so an offline window does not pay a fetch stall
- * on every call — and it is only inside that window that unverified disk
- * content may serve at all.
+ * on every call. Inside that window a disk body serves only when the
+ * recorded etag hash-binds it — plausibility alone is what a same-UID
+ * planter writes (greptile P1 on PR #281).
  */
 let lastFetchFailedAt: number | null = null;
 
@@ -392,11 +393,16 @@ export async function getOpenCodeCodexPrompt(): Promise<string> {
 		}
 	}
 
-	if (diskCache) {
+	// A disk body is servable offline only when the recorded etag hash-binds
+	// it — the same proof the 304 path requires. `isUsablePromptContent`
+	// alone checks plausibility, which is exactly what a same-UID planter
+	// produces; without the binding a failed fetch would open a 15-minute
+	// window that trusts planted bytes.
+	if (diskCache && isContentBoundToEtag(diskCache.content, diskCache.meta.etag)) {
 		return diskCache.content;
 	}
 	throw new PromptError(
-		"Failed to fetch OpenCode codex.txt and no cache available",
+		"Failed to fetch OpenCode codex.txt and no verifiable cache available",
 		{ code: "FETCH_AND_NO_CACHE" },
 	);
 }

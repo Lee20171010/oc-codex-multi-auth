@@ -749,6 +749,16 @@ export async function getCodexInstructions(
 	// it must not be served, and it must not shield a bundled fallback.
 	const usableDiskContent =
 		diskContent && isUsableInstructions(diskContent) ? diskContent : null;
+	// Sanity alone cannot vet a disk body — plausible bytes are exactly what
+	// a same-UID planter writes. Offline service additionally requires the
+	// recorded etag to hash-bind the content (the same proof the 304 path
+	// demands of upstream), so a failed fetch can never open a window in
+	// which a planted body is trusted (greptile P1 on PR #281).
+	const verifiedDiskContent =
+		usableDiskContent &&
+		isContentBoundToEtag(usableDiskContent, cachedMetadata?.etag ?? null)
+			? usableDiskContent
+			: null;
 
 	const lastFailed = fetchFailedAt.get(key);
 	const upstreamRecentlyFailed =
@@ -782,9 +792,9 @@ export async function getCodexInstructions(
 		}
 	}
 
-	if (usableDiskContent) {
+	if (verifiedDiskContent) {
 		logWarn(`Using cached ${key} instructions`);
-		return rewriteInstructionIdentity(usableDiskContent, normalizedModel);
+		return rewriteInstructionIdentity(verifiedDiskContent, normalizedModel);
 	}
 
 	// Last resort is the vendored copy, not a sibling file: the bundled

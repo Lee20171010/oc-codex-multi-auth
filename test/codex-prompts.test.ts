@@ -190,40 +190,52 @@ describe("Codex Prompts Module", () => {
 	describe("getCodexInstructions", () => {
 		describe("Memory cache behavior", () => {
 			it("should return cached content within TTL", async () => {
-				const recentTimestamp = Date.now() - 5 * 60 * 1000;
-				mockedReadFile.mockImplementation((filePath) => {
-					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
-						return Promise.resolve(JSON.stringify({
-							etag: "cached-etag",
-							tag: "rust-v0.43.0",
-							lastChecked: recentTimestamp,
-							url: "https://example.com",
-						}));
-					}
-					return Promise.resolve(padPrompt("cached instructions"));
-				});
+				// Memory entries only exist after a real fetch — a seeded disk
+				// file can never populate them unverified.
+				stubOkFetch({ prompt: padPrompt("cached instructions") });
 
 				const first = await getCodexInstructions("gpt-5.1-codex");
 				const second = await getCodexInstructions("gpt-5.1-codex");
-				
+
 				expect(first).toContain("cached instructions");
 				expect(second).toBe(first);
 			});
 		});
 
 		describe("Disk cache with TTL", () => {
-			it("should use disk cache if within TTL", async () => {
+			it("should serve disk cache within TTL only when the stored etag hash-binds the body", async () => {
 				const recentTimestamp = Date.now() - 5 * 60 * 1000;
+				const diskBody = padPrompt("disk cached instructions");
+				// A legitimately-fetched cache carries the upstream etag (the git
+				// blob SHA), which hash-binds the body — the conditional revalidation
+				// can then trust the file exactly as the 304 path does.
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached-etag",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "rust-v0.43.0",
 							lastChecked: recentTimestamp,
 							url: "https://example.com",
 						}));
 					}
-					return Promise.resolve(padPrompt("disk cached instructions"));
+					return Promise.resolve(diskBody);
+				});
+				mockFetch.mockImplementation((url: unknown) => {
+					const href = String(url);
+					if (href.includes("api.github.com")) {
+						return Promise.resolve({
+							ok: true,
+							status: 200,
+							text: () => Promise.resolve(JSON.stringify({ tag_name: "rust-v0.43.0" })),
+							headers: { get: () => null },
+						});
+					}
+					return Promise.resolve({
+						ok: false,
+						status: 304,
+						text: () => Promise.resolve(""),
+						headers: { get: () => null },
+					});
 				});
 
 				const result = await getCodexInstructions("gpt-5.2");
@@ -623,17 +635,19 @@ describe("Codex Prompts Module", () => {
 	});
 
 		describe("Fallback behavior", () => {
-			it("should fall back to disk cache on fetch error", async () => {
+			it("should fall back to a hash-bound disk cache on fetch error", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				const diskBody = padPrompt("fallback disk content");
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "old",
+							url: "https://example.com",
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve(padPrompt("fallback disk content"));
+					return Promise.resolve(diskBody);
 				});
 				mockFetch.mockRejectedValue(new Error("Network error"));
 
@@ -641,17 +655,19 @@ describe("Codex Prompts Module", () => {
 				expect(result).toContain("fallback disk content");
 			});
 
-			it("should fall back to disk cache on HTTP error response", async () => {
+			it("should fall back to a hash-bound disk cache on HTTP error response", async () => {
 				const oldTimestamp = Date.now() - 20 * 60 * 1000;
+				const diskBody = padPrompt("disk cache fallback");
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
-							etag: "cached",
+							etag: `"${gitBlobSha1(diskBody)}"`,
 							tag: "rust-v0.43.0",
+							url: "https://example.com",
 							lastChecked: oldTimestamp,
 						}));
 					}
-					return Promise.resolve(padPrompt("disk cache fallback"));
+					return Promise.resolve(diskBody);
 				});
 				mockFetch.mockImplementation((url: unknown) => {
 					const href = String(url);
@@ -759,7 +775,10 @@ describe("Codex Prompts Module", () => {
 				expect(result).not.toContain("planted instructions body");
 			});
 
-			it("serves a planted cache only inside a genuine offline window", async () => {
+			it("never serves a planted cache — not even inside a genuine offline window", async () => {
+				// The plant pairs plausible bytes with a forged meta. After the
+				// fetch fails the only disk bodies allowed to serve are ones the
+				// recorded etag hash-binds, and this etag binds nothing.
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
 						return Promise.resolve(JSON.stringify({
@@ -774,13 +793,15 @@ describe("Codex Prompts Module", () => {
 				mockFetch.mockRejectedValue(new Error("offline"));
 
 				const first = await getCodexInstructions("gpt-5-codex");
-				expect(first).toContain("offline planted body");
+				expect(first).not.toContain("offline planted body");
+				expect(first).toContain("apply_patch"); // bundled fallback
 
 				// A recent failure suppresses retry for the TTL window — the
-				// second call must not pay another doomed fetch.
+				// second call must not pay another doomed fetch, and still
+				// must not reach for the planted file.
 				const callsAfterFirst = mockFetch.mock.calls.length;
 				const second = await getCodexInstructions("gpt-5-codex");
-				expect(second).toContain("offline planted body");
+				expect(second).not.toContain("offline planted body");
 				expect(mockFetch.mock.calls.length).toBe(callsAfterFirst);
 			});
 
@@ -896,6 +917,9 @@ describe("Codex Prompts Module", () => {
 			});
 
 			it("should evict oldest entry when cache exceeds max size", async () => {
+				// Entries only enter the cache through a real fetch, so the
+				// flood is driven by successful upstream responses.
+				stubOkFetch({ prompt: padPrompt("cached instructions") });
 				const recentTimestamp = Date.now() - 5 * 60 * 1000;
 				mockedReadFile.mockImplementation((filePath) => {
 					if (typeof filePath === "string" && filePath.includes("-meta.json")) {
