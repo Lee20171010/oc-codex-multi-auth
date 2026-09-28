@@ -223,13 +223,17 @@ describe("cross-store rotation propagation", () => {
 		expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("r2");
 	});
 
-	it("a sibling-store write failure is best-effort: the committed refresh still succeeds", async () => {
+	it("a transient sibling-store write failure is retried under the lease and still heals", async () => {
+		// A propagation failure that leaves the sibling holding the consumed
+		// token sets up `refresh_token_reused` on its next exchange. The
+		// propagation leg is retried once while the refresh lease is still
+		// held — idempotent, and no competitor can interleave — so a
+		// one-off transaction failure no longer strands the sibling
+		// (greptile P1 on PR #275).
 		await seedMainStore("r0");
 		await seedFlaggedStore();
 		vi.mocked(queuedRefresh).mockResolvedValue(exchangeResult("a1", "r1"));
 
-		// The propagation leg is the first (and only) flagged transaction the
-		// main-side refresh opens; fail just that call.
 		vi.mocked(withFlaggedAccountStorageTransaction).mockImplementationOnce(
 			async () => {
 				throw new Error("sibling store unavailable");
@@ -241,9 +245,35 @@ describe("cross-store rotation propagation", () => {
 
 		const main = await loadAccounts();
 		expect(main?.accounts[0]?.refreshToken).toBe("r1");
-		// The flagged copy keeps the consumed token — no worse than before the
-		// propagation step existed.
+		// The retry healed the sibling copy instead of leaving it consumed.
+		expect((await loadFlaggedAccounts()).accounts[0]?.refreshToken).toBe("r1");
+		// Two flagged transactions total: the failed attempt and the retry.
+		expect(vi.mocked(withFlaggedAccountStorageTransaction)).toHaveBeenCalledTimes(2);
+	});
+
+	it("a persistent sibling-store write failure stays best-effort: the committed refresh still succeeds", async () => {
+		await seedMainStore("r0");
+		await seedFlaggedStore();
+		vi.mocked(queuedRefresh).mockResolvedValue(exchangeResult("a1", "r1"));
+
+		// Fail BOTH propagation attempts — the contract only hardens against
+		// transient failure; a persistently unavailable sibling still reports
+		// the committed refresh as success.
+		vi.mocked(withFlaggedAccountStorageTransaction)
+			.mockImplementationOnce(async () => {
+				throw new Error("sibling store unavailable");
+			})
+			.mockImplementationOnce(async () => {
+				throw new Error("sibling store unavailable");
+			});
+
+		const result = await coordinatePersistedRefresh(identity);
+		expect(result.type).toBe("success");
+
+		const main = await loadAccounts();
+		expect(main?.accounts[0]?.refreshToken).toBe("r1");
 		expect((await loadFlaggedAccounts()).accounts[0]?.refreshToken).toBe("r0");
+		expect(vi.mocked(withFlaggedAccountStorageTransaction)).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not touch a flagged record that names a different member", async () => {

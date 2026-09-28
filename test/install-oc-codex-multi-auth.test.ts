@@ -49,6 +49,8 @@ describe("install-oc-codex-multi-auth script", () => {
 
 	it("registers V2 using native plugin entries and preserves a local checkout and provider config", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -69,6 +71,8 @@ describe("install-oc-codex-multi-auth script", () => {
 
 	it("refuses to remove an existing V1 registration during V2 install", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -81,6 +85,8 @@ describe("install-oc-codex-multi-auth script", () => {
 
 	it("refuses to create a second V2 config beside an existing JSONC file", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		await mkdir(configDir, { recursive: true });
@@ -93,6 +99,8 @@ describe("install-oc-codex-multi-auth script", () => {
 
 	it("does not write V2 config during a dry run", async () => {
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		await runInstaller(["--v2", "--dry-run"], { env: { HOME: tempHome, USERPROFILE: tempHome } });
 		expect(await readdir(tempHome)).toEqual([]);
@@ -121,6 +129,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("writes compact UI catalog with --modern, preserves user model entries, and normalizes plugin entries", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -211,6 +221,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("default install registers plugin entries without changing provider.openai", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -250,6 +262,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("writes the merged full catalog when --full is requested", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -291,6 +305,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("merges tui.json plugin entries without clobbering plugin_enabled", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -350,6 +366,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("parses BOM-prefixed existing config and preserves custom keys on merge", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -400,6 +418,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("parses BOM-less existing config and preserves custom keys on merge", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -455,6 +475,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("deep-merges provider.openai preserving user customizations while overwriting managed keys", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -520,6 +542,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("dry-run does not write and prints a diff to stdout", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
@@ -586,6 +610,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("update clears bare and latest cache layouts without reading or writing config", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -619,6 +645,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("install --plugin-only preserves provider.openai while registering the plugin", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -657,6 +685,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("does not rewrite or back up semantically unchanged plugin-only config", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -682,6 +712,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("install --plugin-only refuses to replace malformed config", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -707,6 +739,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	])("default install refuses structurally invalid $label config", async ({ content }) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -726,6 +760,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("install --plugin-only refuses to replace malformed TUI config", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -750,6 +786,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("default install refuses structurally invalid TUI config", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -833,6 +871,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("keeps cache files when --no-cache-clear is set but still unpins the cached package entry", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -891,6 +931,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("clears OpenCode node_modules and package cache layouts", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
 		const configPath = join(configDir, "opencode.json");
@@ -960,6 +1002,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("refuses to clear cache targets when the OpenCode cache directory resolves through a symlink", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		const configDir = join(tempHome, ".config", "opencode");
@@ -1019,6 +1063,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it("retries backup copies after transient Windows lock errors", async () => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const sourcePath = join(tempHome, "opencode.json");
 		const copyFileMock = vi.fn()
 			.mockRejectedValueOnce(Object.assign(new Error("busy"), { code: "EBUSY" }))
@@ -1065,6 +1111,8 @@ describe("install-oc-codex-multi-auth script", () => {
 	it.each(["EPERM", "EBUSY"])("retries update cache removal after transient Windows %s errors", async (code) => {
 		vi.resetModules();
 		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
 		const firstCachePath = join(tempHome, ".cache", "opencode", "node_modules", "oc-codex-multi-auth");
 		await mkdir(firstCachePath, { recursive: true });
 		const rmMock = vi.fn()
@@ -1105,6 +1153,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("keeps a local checkout however it is spelled and does not add the published name", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
 			const buildOutput = join(checkout, "dist");
@@ -1162,6 +1212,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("never rewrites an entry that carries plugin options", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
 			const configuredCheckout = [checkout, { debug: true }];
@@ -1177,6 +1229,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("registers the published name without touching an unrelated local plugin", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const unrelated = await createCheckout(tempHome, "some-other-plugin", "some-other-plugin");
 
@@ -1186,6 +1240,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("leaves a config that already registers a local checkout untouched", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
 			const entry = pathToFileURL(checkout).href;
@@ -1235,6 +1291,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("reports a checkout the plugin ran from that the config no longer registers", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
 			const historyPath = await writeOriginHistory(tempHome, [sightingFor(checkout)]);
@@ -1248,6 +1306,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("stays silent when the recorded checkout is gone or was never recorded", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const absent = join(tempHome, "deleted-checkout");
 			const historyPath = await writeOriginHistory(tempHome, [sightingFor(absent)]);
@@ -1264,6 +1324,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("stays silent when the recorded directory now holds a different package", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const reusedRoot = await createCheckout(tempHome, "oc-codex-multi-auth", "reused-root");
 			const historyPath = await writeOriginHistory(tempHome, [sightingFor(reusedRoot)]);
@@ -1287,6 +1349,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("names the replaced checkout without restoring it to the config", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
@@ -1318,6 +1382,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("keeps a local checkout when a catalog mode rewrites provider.openai", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "oc-codex-multi-auth");
 			const entry = pathToFileURL(checkout).href;
@@ -1340,6 +1406,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("recognizes a relative checkout through the config directory that declares it", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const configDir = join(tempHome, ".config", "opencode");
 			await mkdir(configDir, { recursive: true });
@@ -1366,6 +1434,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("drops a published entry left beside a registered checkout", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "my-codex-fork");
 
@@ -1380,6 +1450,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("keeps every checkout of this package that a config registers", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const first = await createCheckout(tempHome, "oc-codex-multi-auth", "fork-one");
 			const second = await createCheckout(tempHome, "oc-codex-multi-auth", "fork-two");
@@ -1390,6 +1462,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("registers the current package beside a checkout of the former one", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const legacyCheckout = await createCheckout(
 				tempHome,
@@ -1419,6 +1493,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("leaves a config registering a relative checkout untouched end to end", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			await createCheckout(tempHome, "oc-codex-multi-auth", "my-codex-fork");
 			const entry = "../../my-codex-fork";
@@ -1450,6 +1526,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("retires a cache copy this installer deletes, versioned or not", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const cacheDirectory = join(tempHome, ".cache", "opencode");
 			const packagesDirectory = join(cacheDirectory, "packages");
@@ -1474,6 +1552,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("keeps a monorepo checkout that merely spells its directory like the cache", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const cacheDirectory = join(tempHome, ".cache", "opencode");
 			const monorepoCheckout = await createCheckout(
@@ -1490,6 +1570,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("never leaves the config pointing at the cache copy it just deleted", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const cachePackage = await createCheckout(
 				join(tempHome, ".cache", "opencode", "packages"),
@@ -1537,6 +1619,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("treats a slash-bearing specifier as a checkout only when it resolves on disk", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { __test } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const configDir = join(tempHome, ".config", "opencode");
 			await mkdir(configDir, { recursive: true });
@@ -1574,6 +1658,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("suppresses the published name in tui.json when only opencode.json registers a checkout", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "my-codex-fork");
 			const configDir = join(tempHome, ".config", "opencode");
@@ -1611,6 +1697,8 @@ describe("install-oc-codex-multi-auth script", () => {
 		it("does not add the published name to tui.json when a checkout is registered in opencode.json", async () => {
 			vi.resetModules();
 			tempHome = await createTempHome();
+			vi.stubEnv("HOME", tempHome);
+			vi.stubEnv("USERPROFILE", tempHome);
 			const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 			const checkout = await createCheckout(tempHome, "oc-codex-multi-auth", "my-codex-fork");
 			const configDir = join(tempHome, ".config", "opencode");

@@ -245,6 +245,56 @@ describe("writeFileWithTimeout", () => {
 		}
 	});
 
+	it("hands the in-flight close to the caller when sync resolved but close is still pending", async () => {
+		// Distinct wedge from the stalled-fsync case: sync() resolves inside
+		// the budget, then close() hangs past the deadline. The timeout path
+		// must surface the close promise already running — a second close()
+		// on the same handle would throw — or the caller has no deferred
+		// unlink retry and the temp file stays pinned by the pending fd
+		// (coderabbit minor on PR #275).
+		let releaseClose!: () => void;
+		const closeGate = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		const closeSpy = vi.fn(() => closeGate);
+		const origOpen = fs.open.bind(fs);
+		const openSpy = vi
+			.spyOn(fs, "open")
+			.mockImplementation(async (path, flags, mode) => {
+				if (flags === "r+") {
+					return {
+						fd: 4343,
+						sync: () => Promise.resolve(),
+						close: closeSpy,
+					} as unknown as Awaited<ReturnType<typeof fs.open>>;
+				}
+				return origOpen(path, flags, mode);
+			});
+		try {
+			const target = join(dir, "backup.json");
+			let abandoned: Promise<void> | undefined;
+			await expect(
+				writeFileWithTimeout(target, "payload", 100, (closed) => {
+					abandoned = closed;
+				}),
+			).rejects.toThrow(/Timed out/);
+			// The pending close was handed over, not re-started.
+			expect(abandoned).toBeDefined();
+			expect(closeSpy).toHaveBeenCalledTimes(1);
+
+			let released = false;
+			void abandoned!.then(() => {
+				released = true;
+			});
+			await Promise.resolve();
+			expect(released).toBe(false);
+			releaseClose();
+			await vi.waitFor(() => expect(released).toBe(true));
+		} finally {
+			openSpy.mockRestore();
+		}
+	});
+
 	it("writeBackupFileContent retries the temp unlink once the abandoned handle closes", async () => {
 		// Same stalled-fsync scenario at the caller level: the first unlink
 		// loses to the open fd (EPERM), and the deferred retry must remove the
