@@ -21,7 +21,11 @@ import { fsyncParentDirectory, writeFileAtomic } from "./atomic-write.js";
 import { trySnapshotCredentialStoreBeforeWrite } from "./credential-snapshots.js";
 import { StorageError } from "./errors.js";
 import { getWorkspaceIdentityKey, isRecord } from "./identity.js";
-import { migrateOnDiskJsonToKeychainBackup } from "./load-save.js";
+import {
+  listKeychainMigrationMarkers,
+  migrateOnDiskJsonToKeychainBackup,
+  retireKeychainMigrationArtifacts,
+} from "./load-save.js";
 import {
   getStoragePath,
   getCurrentProjectStorageKey,
@@ -72,7 +76,7 @@ function getLegacyBlockedAccountsPath(): string {
   return join(dirname(getStoragePath()), LEGACY_BLOCKED_ACCOUNTS_FILE_NAME);
 }
 
-function normalizeFlaggedStorage(data: unknown, sourcePath?: string): FlaggedAccountStorageV1 {
+export function normalizeFlaggedStorage(data: unknown, sourcePath?: string): FlaggedAccountStorageV1 {
   // Loud contract, mirroring normalizeAccountStorage: an unreadable or
   // unsupported flagged store must surface to the caller instead of becoming
   // an empty pool, because the caller would otherwise persist that empty
@@ -280,6 +284,34 @@ async function loadFlaggedAccountsUnlocked(
         path,
         "Restore the flagged accounts from a credential snapshot in the backups directory, or remove the file to start fresh.",
       );
+    }
+  }
+
+  // A missing flagged file with a `.migrated-to-keychain` marker present is
+  // the interrupted-migration signature — the marker holds the last good
+  // flagged store and must be read before concluding the pool is empty.
+  for (const markerPath of await listKeychainMigrationMarkers(path)) {
+    try {
+      const markerData = JSON.parse(
+        (await fs.readFile(markerPath, "utf-8")).replace(/^\uFEFF/, ""),
+      ) as unknown;
+      const migrated = normalizeFlaggedStorage(markerData, markerPath);
+      log.warn(
+        "Recovered flagged account storage from an interrupted keychain-migration marker; the canonical file was missing",
+        { markerPath },
+      );
+      return migrated;
+    } catch (markerErr) {
+      if (
+        markerErr instanceof StorageError &&
+        markerErr.code !== "INVALID_STORAGE"
+      ) {
+        throw markerErr;
+      }
+      log.warn("keychain: skipping an unreadable flagged migration marker", {
+        markerPath,
+        error: String(markerErr),
+      });
     }
   }
 
@@ -501,15 +533,26 @@ export async function clearFlaggedAccounts(): Promise<void> {
         // gone (or was already absent). Leaving the keychain blob behind
         // would resurrect every cleared flagged account on the next
         // keychain-first load — the exact failure mode this function exists
-        // to prevent.
+        // to prevent. A FAILED delete is surfaced distinctly from "no entry
+        // existed": the stale copy resurrects the cleared records just the
+        // same as one that was never attempted.
         if (jsonCleared && isKeychainOptInEnabled()) {
-          try {
-            await deleteFlaggedFromKeychain(getCurrentProjectStorageKey());
-          } catch (err) {
-            log.warn("keychain: flagged delete during clearFlaggedAccounts failed", {
-              error: String(err),
-            });
+          const result = await deleteFlaggedFromKeychain(
+            getCurrentProjectStorageKey(),
+          );
+          if (!result.deleted && result.error) {
+            log.warn(
+              "keychain: flagged delete during clearFlaggedAccounts failed; a stale keychain copy may survive and resurrect the cleared records on the next opt-in load",
+              { error: result.error },
+            );
           }
+        }
+
+        // `.migrated-to-keychain` markers beside the flagged file hold the
+        // same plaintext token set — a clear that leaves them behind has not
+        // actually cleared the credentials.
+        if (jsonCleared) {
+          await retireKeychainMigrationArtifacts(path);
         }
       },
     }),

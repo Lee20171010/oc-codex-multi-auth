@@ -20,6 +20,8 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+	clearAccounts,
+	loadAccounts,
 	saveAccounts,
 	setStoragePathDirect,
 	type AccountStorageV3,
@@ -213,6 +215,59 @@ describe("storage I/O: keychain migration lifecycle", () => {
 		}
 		const markers = await markerFiles();
 		expect(markers).toHaveLength(2);
+	});
+
+	it("recovers the pool from a marker when the migration was interrupted before the keychain write", async () => {
+		// The crash window: canonical renamed to a marker, then the process
+		// died (or the keychain write failed) — no canonical file, no keychain
+		// entry. A load that reported empty here would lose the pool on the
+		// next save.
+		process.env.CODEX_KEYCHAIN = "1";
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-stuck")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		expect(existsSync(storagePath)).toBe(false);
+		expect(await markerFiles()).toHaveLength(1);
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-stuck");
+	});
+
+	it("recovers from the marker even when the keychain opt-in is off", async () => {
+		delete process.env.CODEX_KEYCHAIN;
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-off")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		expect(existsSync(storagePath)).toBe(false);
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-off");
+	});
+
+	it("skips a corrupt newest marker and falls through to an older valid one", async () => {
+		delete process.env.CODEX_KEYCHAIN;
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-old-good")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		// A second, newer marker that is corrupt.
+		const corruptName = `${storagePath}.migrated-to-keychain.2999-01-01T00-00-00-000Z-ffffff`;
+		await fs.writeFile(corruptName, "{ not valid json", "utf-8");
+
+		const loaded = await loadAccounts();
+		expect(loaded?.accounts[0]?.accountId).toBe("acct-old-good");
+	});
+
+	it("clearAccounts retires migrated-to-keychain markers along with the store", async () => {
+		process.env.CODEX_KEYCHAIN = "1";
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-a")), "utf-8");
+		await migrateOnDiskJsonToKeychainBackup(storagePath, async () => undefined);
+		// A fresh canonical file exists again (post-migration JSON fallback).
+		await fs.writeFile(storagePath, JSON.stringify(makeStorage("acct-b")), "utf-8");
+		expect(await markerFiles()).toHaveLength(1);
+
+		await clearAccounts();
+
+		expect(existsSync(storagePath)).toBe(false);
+		// The marker held the same plaintext token set — it must not survive
+		// a "delete all credentials" request.
+		expect(await markerFiles()).toHaveLength(0);
 	});
 
 	it("rewrites the canonical file with the fresh blob when the marker rename fails", async () => {

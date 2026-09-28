@@ -90,6 +90,57 @@ describe("Storage Paths Module", () => {
 			expect(result).toContain(path.join(homedir(), ".opencode", "projects"));
 			expect(result).toContain("myproject-");
 		});
+
+		it("adopts a lexical-keyed pool dir when the canonical-keyed one does not exist", async () => {
+			// A project reached through a symlink: realpath collapses
+			// /link/repo onto /real/repo, so the canonical storage key differs
+			// from the lexical key a pre-canonicalization pool was stored under.
+			vi.mocked(realpathSync).mockImplementation((p) =>
+				String(p).includes("/link/") || String(p).endsWith("/link")
+					? String(p).replace("/link/", "/real/")
+					: String(p),
+			);
+			const { createHash } = await import("node:crypto");
+			const lexical = path.resolve("/link/repo").replace(/\\/g, "/");
+			const legacyKey = `repo-${createHash("sha256").update(lexical).digest("hex").slice(0, 12)}`;
+			const projectsDir = path.join(FAKE_HOME, ".opencode", "projects");
+			const legacyDir = path.join(projectsDir, legacyKey);
+			// Only the lexical-keyed directory exists on disk.
+			mockedExistsSync.mockImplementation((p) => p === legacyDir);
+
+			const result = getProjectGlobalConfigDir("/link/repo");
+			expect(result).toBe(legacyDir);
+			// The canonical key really is different (otherwise the test is a no-op).
+			expect(getProjectStorageKey("/link/repo")).not.toBe(legacyKey);
+		});
+
+		it("prefers the canonical-keyed dir when both exist", () => {
+			vi.mocked(realpathSync).mockImplementation((p) =>
+				String(p).includes("/link/")
+					? String(p).replace("/link/", "/real/")
+					: String(p),
+			);
+			mockedExistsSync.mockReturnValue(true);
+			const canonicalKey = getProjectStorageKey("/link/repo");
+			const result = getProjectGlobalConfigDir("/link/repo");
+			expect(result).toBe(
+				path.join(FAKE_HOME, ".opencode", "projects", canonicalKey),
+			);
+		});
+
+		it("returns the canonical-keyed dir for a fresh project when nothing exists", () => {
+			mockedExistsSync.mockReturnValue(false);
+			const projectPath = "/home/user/brand-new";
+			const result = getProjectGlobalConfigDir(projectPath);
+			expect(result).toBe(
+				path.join(
+					FAKE_HOME,
+					".opencode",
+					"projects",
+					getProjectStorageKey(projectPath),
+				),
+			);
+		});
 	});
 
 	describe("isProjectDirectory", () => {

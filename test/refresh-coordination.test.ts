@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -210,6 +211,107 @@ describe("persisted refresh coordination", () => {
 
 		leaseSpy.mockRestore();
 		if (realLease) vi.mocked(withRefreshLease).mockImplementation(realLease);
+	});
+
+	it("blocks a new exchange when a pending rotation journal could not be fully replayed", async () => {
+		// given: a leftover journal whose flagged-store replay cannot land
+		// (the flagged file is structurally corrupt), plus a healthy pool.
+		await seedAccount();
+		await writeFile(
+			join(directory, "oc-codex-multi-auth-flagged-accounts.json"),
+			"{ not valid json",
+			"utf-8",
+		);
+		const journalPath = join(directory, "accounts.json.refresh.pending");
+		const journal = {
+			version: 1,
+			consumedRefreshToken: "consumed-other",
+			rotatedRefreshToken: "rotated-other",
+			memberId: "member-1",
+			recordedAt: Date.now(),
+		};
+		await writeFile(journalPath, JSON.stringify(journal), "utf-8");
+
+		// when
+		const outcome = await refreshAndPersistAccount({ index: 0, identity });
+
+		// then: the refresh refuses rather than spend a fresh token — writing a
+		// new journal would overwrite the only record of the earlier rotation.
+		expect(outcome.status).toBe("failed");
+		expect(outcome.error).toMatch(/locked|journal|pending/i);
+		expect(queuedRefresh).not.toHaveBeenCalled();
+		// The journal is preserved, not superseded.
+		expect(existsSync(journalPath)).toBe(true);
+		const preserved = JSON.parse(await readFile(journalPath, "utf-8"));
+		expect(preserved.rotatedRefreshToken).toBe("rotated-other");
+		// And the healthy account's token was never touched.
+		const stored = await loadAccounts();
+		expect(stored?.accounts[0]?.refreshToken).toBe("refresh-0");
+	});
+
+	it("adopts a serial rotation committed while the exchange was in flight instead of clobbering it", async () => {
+		// given: the provider exchange stalls long enough for a serial rotation
+		// (another lease holder's commit) to land on the same record.
+		await seedAccount();
+		let finishRefresh: ((value: {
+			type: "success";
+			access: string;
+			refresh: string;
+			expires: number;
+		}) => void) | undefined;
+		let notifyRefreshStarted: (() => void) | undefined;
+		const refreshStarted = new Promise<void>((resolve) => {
+			notifyRefreshStarted = resolve;
+		});
+		vi.mocked(queuedRefresh).mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishRefresh = resolve;
+					notifyRefreshStarted?.();
+				}),
+		);
+		const refresh = refreshAndPersistAccount({ index: 0, identity });
+		await refreshStarted;
+
+		// Another process rotated refresh-0 -> refresh-9 and committed while our
+		// exchange of refresh-0 was still in flight.
+		await withAccountStorageTransaction(async (current, persist) => {
+			if (!current?.accounts[0]) throw new Error("Expected account fixture");
+			current.accounts[0].refreshToken = "refresh-9";
+			current.accounts[0].accessToken = "access-9";
+			current.accounts[0].expiresAt = 2_000_000_000_000;
+			current.accounts[0].tokenRotatedAt = 42;
+			await persist(current);
+		});
+
+		// when our stalled exchange finally returns refresh-1
+		if (!finishRefresh) throw new Error("Expected refresh to start");
+		finishRefresh({
+			type: "success",
+			access: "access-1",
+			refresh: "refresh-1",
+			expires: 2_000_000_000_000,
+		});
+		const outcome = await refresh;
+
+		// then: the commit refuses to overwrite the live refresh-9 with the
+		// now-consumed refresh-1 — the exact dead-account outcome this guard
+		// exists for.
+		const stored = await loadAccounts();
+		expect(stored?.accounts[0]?.refreshToken).toBe("refresh-9");
+		expect(outcome).toMatchObject({
+			status: "refreshed",
+			result: { refreshToken: "refresh-9" },
+		});
+		// The journal was retargeted at the adopted token so records still
+		// holding refresh-0 get healed with a LIVE credential on replay.
+		const journalPath = join(directory, "accounts.json.refresh.pending");
+		expect(existsSync(journalPath)).toBe(true);
+		const journal = JSON.parse(await readFile(journalPath, "utf-8"));
+		expect(journal).toMatchObject({
+			consumedRefreshToken: "refresh-0",
+			rotatedRefreshToken: "refresh-9",
+		});
 	});
 
 	it("does not hold the storage lease across the provider exchange", async () => {

@@ -46,8 +46,7 @@ function sanitizeProjectName(projectPath: string): string {
 	return sanitized || "project";
 }
 
-export function getProjectStorageKey(projectPath: string): string {
-	const normalizedPath = normalizeProjectPath(projectPath);
+function storageKeyForNormalizedPath(normalizedPath: string): string {
 	const hash = createHash("sha256")
 		.update(normalizedPath)
 		.digest("hex")
@@ -56,12 +55,48 @@ export function getProjectStorageKey(projectPath: string): string {
 	return `${projectName}-${hash}`;
 }
 
+export function getProjectStorageKey(projectPath: string): string {
+	return storageKeyForNormalizedPath(normalizeProjectPath(projectPath));
+}
+
+/**
+ * The storage key a pre-canonicalization build would have produced for this
+ * project: the lexical `resolve()` without the realpath collapse. Pools
+ * created through a symlinked path live under this key — the canonical-key
+ * lookup hides them entirely unless it is consulted as a fallback.
+ */
+function getLegacyProjectStorageKey(projectPath: string): string {
+	const lexical = resolve(projectPath).replace(/\\/g, "/");
+	const normalizedSeparators =
+		process.platform === "win32" ? lexical.toLowerCase() : lexical;
+	return storageKeyForNormalizedPath(normalizedSeparators);
+}
+
 /**
  * Per-project storage is namespaced under ~/.opencode/projects
  * to avoid writing account files into user repositories.
+ *
+ * Fallback rule: a pool created before storage keys canonicalized their
+ * project path (or created through a since-removed symlink) lives under the
+ * lexical key. When the canonical-keyed directory does not exist but the
+ * lexical-keyed one does, the lexical directory is adopted so the accounts
+ * keep loading instead of reporting an empty pool. When neither exists the
+ * canonical key wins so new pools always land on the modern layout.
  */
 export function getProjectGlobalConfigDir(projectPath: string): string {
-	return join(getConfigDir(), PROJECTS_DIR, getProjectStorageKey(projectPath));
+	const canonicalDir = join(
+		getConfigDir(),
+		PROJECTS_DIR,
+		getProjectStorageKey(projectPath),
+	);
+	if (existsSync(canonicalDir)) return canonicalDir;
+	const legacyKey = getLegacyProjectStorageKey(projectPath);
+	const canonicalKey = getProjectStorageKey(projectPath);
+	if (legacyKey !== canonicalKey) {
+		const legacyDir = join(getConfigDir(), PROJECTS_DIR, legacyKey);
+		if (existsSync(legacyDir)) return legacyDir;
+	}
+	return canonicalDir;
 }
 
 export function isProjectDirectory(dir: string): boolean {
