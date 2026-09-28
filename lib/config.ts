@@ -696,7 +696,14 @@ function resolveNumberSetting(
 	const candidate = envValue ?? configValue ?? defaultValue;
 	const min = options?.min;
 	const max = options?.max;
-	let result = candidate;
+	// Env input is finite-checked by EnvNumberSchema and file input by the
+	// Zod schema, but callers can hand these getters an unvalidated
+	// PluginConfig. A non-finite candidate sails straight through
+	// Math.max/Math.min — NaN in particular reaches setTimeout as ~0, a
+	// silent hot re-poll — so fall back to the default instead of clamping
+	// it. A deliberately non-finite *default* (Infinity means "unbounded")
+	// is honoured; it is ours, not untrusted input.
+	let result = Number.isFinite(candidate) ? candidate : defaultValue;
 	if (min !== undefined) {
 		result = Math.max(min, result);
 	}
@@ -726,7 +733,12 @@ function resolveIntegerSetting(
 	const candidate = envValue ?? configValue ?? defaultValue;
 	const min = options?.min;
 	const max = options?.max;
-	let result = Math.trunc(candidate);
+	// Same non-finite guard as resolveNumberSetting: Math.trunc cannot rescue
+	// NaN — it stays NaN through the clamps — so an unvalidated config value
+	// falls back to the default. A non-finite *default* is still honoured:
+	// retryAllAccountsMaxRetries deliberately defaults to Infinity.
+	const base = Number.isFinite(candidate) ? candidate : defaultValue;
+	let result = Math.trunc(base);
 	if (min !== undefined) {
 		result = Math.max(min, result);
 	}
@@ -1530,7 +1542,13 @@ export function getQuotaStatus(pluginConfig: PluginConfig): QuotaStatusConfig {
 				: pickEnum(resetTimes, QUOTA_OVERVIEW_RESET_TIMES, "low"),
 		resetCredits: config?.resetCredits ?? false,
 		recovery: config?.recovery ?? false,
-		resetsMinUsedPercent: config?.resetsMinUsedPercent ?? 100,
+		// Finite-clamped like rotateMs/rows above: NaN would make every
+		// `used >= min` comparison downstream silently false.
+		resetsMinUsedPercent:
+			typeof config?.resetsMinUsedPercent === "number" &&
+			Number.isFinite(config.resetsMinUsedPercent)
+				? Math.min(100, Math.max(0, config.resetsMinUsedPercent))
+				: 100,
 		rows:
 			typeof config?.rows === "number" && Number.isFinite(config.rows)
 				? Math.min(MAX_QUOTA_STATUS_ROWS, Math.max(1, Math.trunc(config.rows)))
