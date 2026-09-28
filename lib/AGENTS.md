@@ -14,7 +14,7 @@ lib/
 ├── request/                # request-transformer (URL/body), fetch-helpers (headers, error mapping, refresh), response-handler (SSE→JSON, empty-response, stall timeout), retry-budget, rate-limit-backoff
 │   └── helpers/            # model-map, responses-lite, client-identity, user-agent, input-utils, tool-utils, effort-suffix
 ├── storage.ts              # facade barrel re-exporting lib/storage/ (pre-split import surface)
-├── storage/                # paths, state (storage scope + path switching), load-save, migrations (V1→V3; V2 throws UNKNOWN_V2_FORMAT), normalize, identity (dedup/merge), atomic-write (0600 temp → fsync → rename → dir fsync), keychain (opt-in), backup, export-import, credential-snapshots, flagged, transaction-lock, worktree-lock, coordinated-refresh (cross-process token rotation), test-home-guard, errors
+├── storage/                # paths, state (storage scope + path switching), load-save, migrations (V1→V3; V2 throws UNKNOWN_V2_FORMAT), normalize, identity (dedup/merge), atomic-write (0600 temp → fsync → rename → dir fsync; mode bits are POSIX-only), keychain (opt-in), backup, export-import, credential-snapshots, flagged, transaction-lock, worktree-lock, coordinated-refresh (cross-process token rotation), test-home-guard, errors
 ├── recovery.ts             # facade barrel re-exporting lib/recovery/
 ├── recovery/               # hook (auto-resume/repair engine), storage, constants, types
 ├── opencode-v2.ts          # V2 adapter: auth methods, provider/model reroute, aisdk hooks, tool bridge, RPC, storage scope
@@ -89,7 +89,7 @@ lib/
 | Responses-lite + client identity | `request/helpers/responses-lite.ts`, `client-identity.ts`, `user-agent.ts` | lite reshape for catalog `use_responses_lite` models; `opencode` vs `codex_cli_rs` identity + UA |
 | Storage format | `storage/load-save.ts`, `storage/migrations.ts`, `storage/normalize.ts` | V3 current; V1 migrates on load; V2 payload throws `UNKNOWN_V2_FORMAT` |
 | Storage paths + scope | `storage/paths.ts`, `storage/state.ts` | project-root detection; `createStorageScope` for per-location isolation (V2) |
-| Atomic writes | `storage/atomic-write.ts` | 0600 temp → fsync(fd) → rename → fsync(dir) |
+| Atomic writes | `storage/atomic-write.ts` | 0600 temp → fsync(fd) → rename → fsync(dir); 0600 is POSIX-only (Windows ACLs) |
 | Cross-process refresh | `storage/coordinated-refresh.ts` | single-use refresh-token exchange serialized under a separate refresh lock; rotations propagate to sibling writers |
 | Locks | `storage/transaction-lock.ts`, `storage/worktree-lock.ts` | proper-lockfile lease on every mutation; advisory worktree-collision detection (never blocks) |
 | Keychain | `storage/keychain.ts` | opt-in (`CODEX_KEYCHAIN=1`); keychain holds the authoritative V3 blob when on; any keychain failure falls back to the JSON path — credentials are never silently lost |

@@ -190,6 +190,14 @@ Format: `field | env override | type | default | bounds | meaning`.
 | `parallelProbing` | `CODEX_AUTH_PARALLEL_PROBING` | boolean | `false` | — | concurrent account health probes. Probe code exists (`lib/parallel-probe.ts`) but the fetch loop probes sequentially, so this flag has no runtime consumer today |
 | `parallelProbingMaxConcurrency` | `CODEX_AUTH_PARALLEL_PROBING_MAX_CONCURRENCY` | integer | `2` | file: int 1–5; env: int clamped 1–5 | max concurrent probes when enabled |
 
+**How "project" is decided.** With `perProjectAccounts` on, the plugin walks
+up from the working directory looking for a marker — `.git`, `package.json`,
+`Cargo.toml`, `go.mod`, `pyproject.toml`, or `.opencode` — and stops the search
+at your home directory, so a stray `~/.opencode` does not turn `$HOME` itself
+into a project. Outside a project the global pool is used. For the standalone
+CLI, run it from inside a real project to reach that project's pool, or pass
+`--config-path` to name the accounts file directly.
+
 #### Retries, waits & timeouts
 
 | field | env | type | default | bounds | meaning |
@@ -551,7 +559,7 @@ process environment. Same `"1"`-only truthy rule for booleans unless noted.
 | `CODEX_AUTH_SEND_ORGANIZATION_HEADER=1` | restore legacy `openai-organization` request pinning (off by default; upstream Codex never sends it) |
 | `CODEX_AUTH_PREWARM=0` | disable the startup prewarm that runs when `requestTransformMode` is `legacy` (on by default; native mode does not prewarm) |
 | `CODEX_AUTH_SYNC_CODEX_CLI=0` | disable hydrating accounts from Codex CLI `~/.codex` storage (on by default) |
-| `CODEX_KEYCHAIN=1` | opt in to OS-native keychain account storage instead of the JSON accounts file |
+| `CODEX_KEYCHAIN=1` | opt in to OS-native keychain account storage instead of the JSON accounts file; on Windows, Credential Manager's blob-size cap means an oversized pool is size-checked and stays on the JSON path |
 | `CODEX_AUTH_FALLBACK_UNSUPPORTED_MODEL` | legacy boolean env → `unsupportedCodexPolicy` (`1` → `fallback`, anything else → `strict`); evaluated only when neither the policy env nor the config key is set |
 | `CODEX_RETRY_ALL_UNBOUNDED=1` | remove the 10-minute interactive ceiling on `retryAllAccountsMaxWaitMs: 0`, restoring truly unbounded all-accounts-limited waits (upstream quota blocks can stretch for days) |
 | `CODEX_AUTH_FALLBACK_GPT53_TO_GPT52` | same as the `fallbackToGpt52OnUnsupportedGpt53` field (listed here because it predates the config key) |

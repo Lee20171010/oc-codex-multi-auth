@@ -65,7 +65,7 @@ There is no lib-wide barrel; modules import focused paths directly.
 | Device code | Headless/SSH: verification URL + one-time code poll |
 | Manual URL paste | User pastes the full callback URL; its `state` parameter binds the paste to the login attempt, so a bare code or mismatched state is rejected before token exchange |
 
-The callback server binds both `127.0.0.1:1455` and `[::1]:1455`; the path is `/auth/callback`. Tokens land in the V3 account pool (global or per-project). Workspace identity is preserved per account; `lib/auth/scopes.ts` validates connector scopes and triggers re-auth checks.
+The callback server binds both `127.0.0.1:1455` and `[::1]:1455`; the path is `/auth/callback`. Tokens land in the V3 account pool (global or per-project). Workspace identity is preserved per account; `lib/auth/scopes.ts` validates connector scopes and triggers re-auth checks. Token responses are schema-validated, and `expires_in` is bounded before it becomes a stored `expires` timestamp — a negative or absurdly large lifetime cannot pin a token to the epoch or push its expiry into overflow territory.
 
 ---
 
@@ -88,6 +88,7 @@ Invariants:
 
 - V1 pools migrate to V3 on load; V2-format files throw `UNKNOWN_V2_FORMAT`; versions above 3 throw `UNSUPPORTED_SCHEMA_VERSION`.
 - Mutations run under a process mutex plus a `proper-lockfile` lease on `<storage>.transaction.lock`. OAuth refresh uses a **second** lease on `<storage>.refresh.lock` because refresh tokens are single-use — `lib/storage/coordinated-refresh.ts` serializes the exchange across processes and `propagateRotationToSiblingStore` keeps the sibling store's rotation state consistent. `<storage>.lock` remains advisory collision diagnostics; `lib/storage/worktree-lock.ts` detects other live processes without blocking.
+- A refresh that succeeded upstream but could not be committed to the pool (crash, lost lease) is journaled in a `*.pending-rotation.json` file beside the accounts file and applied on the next load, so a rotated refresh token is never lost to an interrupted write.
 - Keychain is opt-in (`CODEX_KEYCHAIN=1`), service `oc-codex-multi-auth`, keys `accounts:global` / `accounts:<project-storage-key>`. Migrating JSON→keychain renames the source to `<file>.migrated-to-keychain.<timestamp>` as the rollback artifact; `deleteFlaggedFromKeychain` handles flagged entries. Keychain failures never silently delete JSON credentials.
 - Import supports dry-run preview and takes a pre-import backup when accounts exist.
 
@@ -141,7 +142,7 @@ The slot's width is measured, not computed: `measureStatusSlot` walks up to the 
 - Health (`HealthScoreTracker`): +1 success, −10 rate limit, −20 other failure, +2/hour passive recovery, clamped 0–100. The standalone CLI counts an account healthy when `enabled && hasRefreshToken` — credentials, not scores.
 - Circuit breaker: opens after 3 failures in 60s, resets after 30s, allows 1 half-open probe. Key: `${accountId}:${workspaceIdentityHash}:${modelFamily}` — one degraded family can't poison others on the same account.
 - Retry budgets (`lib/request/retry-budget.ts`): six classes — `authRefresh`, `network`, `server`, `rateLimitShort`, `rateLimitGlobal`, `emptyResponse`. Profiles: `conservative` 2/2/2/2/1/1, `balanced` 4/4/4/4/3/2, `aggressive` 8/8/8/8/10/4; `beginnerSafeMode` forces `conservative`. Exhaustion fails the request.
-- All-accounts-limited waits: `retryAllAccountsMaxWaitMs: 0` means "as long as the backend asks", but interactive requests are capped by `INTERACTIVE_ALL_LIMITED_CEILING_MS` (10 min) unless `CODEX_RETRY_ALL_UNBOUNDED=1`.
+- All-accounts-limited waits: `retryAllAccountsMaxWaitMs: 0` means "as long as the backend asks", but interactive requests are capped by `INTERACTIVE_ALL_LIMITED_CEILING_MS` (10 min) unless `CODEX_RETRY_ALL_UNBOUNDED=1`. The "remaining" countdown sleeps on elapsed time, not `Date.now()` deadlines — a wall-clock jump neither stretches nor cancels the wait.
 - `lib/parallel-probe.ts` races probe requests across candidates first-success-wins with a `timeoutMs` bound; no runtime entrypoint currently calls it.
 
 ### Error → Action Matrix

@@ -42,14 +42,19 @@ model catalog:
 
 Both `opencode.json` and `opencode.jsonc` are supported, comments and
 trailing commas included. When `opencode.jsonc` is your effective config, the
-installer merges into it; it refuses to overwrite a config it cannot parse,
-and unknown flags are errors. Changed files are backed up first.
+installer merges into it; it refuses to overwrite a config it cannot parse
+(an unterminated `/*` comment counts as unparseable), and unknown flags are
+errors. Changed files are backed up first.
 
 To update later without touching either config file:
 
 ```bash
 npx -y oc-codex-multi-auth@latest update
 ```
+
+To remove the plugin later, see
+[Uninstall / disable](docs/getting-started.md#uninstall--disable) — removal is
+manual; there is no `uninstall` command.
 
 ## Sign in and verify
 
@@ -101,7 +106,9 @@ healthiest enabled account per request (`rotationStrategy`, default
 `hybrid`).
 
 Account pools are **per-project by default**. The plugin walks up from the
-working directory to find a project root; without one it uses global storage.
+working directory looking for a project marker (`.git`, `package.json`,
+`.opencode`, and friends), stopping at your home directory; without a marker
+it uses global storage.
 
 | File | Path |
 | --- | --- |
@@ -212,7 +219,8 @@ oc-codex-multi-auth health      # local token/account health
 oc-codex-multi-auth dashboard   # dashboard guidance
 ```
 
-All accept `--json` and `--config-path <file>`; `status`/`list`/`limits`
+These standalone commands accept `--json` and `--config-path <file>`
+(`install`/`update` do not — they reject it); `status`/`list`/`limits`
 redact identifiers unless `--include-sensitive` is passed. Via npx:
 `npx -y oc-codex-multi-auth@latest status --json`.
 

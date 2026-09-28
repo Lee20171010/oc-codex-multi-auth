@@ -173,7 +173,7 @@ for the user-facing table.
 | `CODEX_AUTH_SEND_ORGANIZATION_HEADER=1` | restore legacy `openai-organization` request pinning (off by default) |
 | `CODEX_AUTH_PREWARM=0` | disable legacy-transform startup prewarm (on by default, skipped under test) |
 | `CODEX_AUTH_SYNC_CODEX_CLI=0` | disable `~/.codex` Codex CLI account hydration (on by default) |
-| `CODEX_KEYCHAIN=1` | opt in to OS keychain account storage |
+| `CODEX_KEYCHAIN=1` | opt in to OS keychain account storage; on `win32` oversized blobs are size-checked and stay on the JSON path |
 | `CODEX_AUTH_FALLBACK_UNSUPPORTED_MODEL` | legacy boolean env → `unsupportedCodexPolicy` |
 | `CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK`, `_GPT56_`, `_GPT55_`, `_CODEX_` | `=1` disables the corresponding default-selector auto-fallback (which otherwise runs even under `strict`) |
 | `CODEX_RETRY_ALL_UNBOUNDED=1` | remove the 10-minute interactive ceiling on `retryAllAccountsMaxWaitMs: 0` |

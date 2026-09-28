@@ -106,7 +106,7 @@ On OpenCode 2.0.16+, the default exports' `setup` hooks delegate to `lib/opencod
 
 V3 JSON account files with atomic writes, V1→V3 migration on load, per-project path resolution, import/export with dry-run preview, flagged-account recovery, and credential snapshots under `backups/codex-credential-snapshot-*.json`. V2-format files are rejected with `UNKNOWN_V2_FORMAT`; versions above 3 with `UNSUPPORTED_SCHEMA_VERSION`. Mutations run under a process mutex plus a `proper-lockfile` lease on `<storage>.transaction.lock`; OAuth refresh uses a second lease on `<storage>.refresh.lock` because refresh tokens are single-use. These guarantees are local-filesystem/same-host only.
 
-The optional keychain backend (`CODEX_KEYCHAIN=1`) stores pools under service `oc-codex-multi-auth` with keys `accounts:global` / `accounts:<project-storage-key>`; migrating renames the JSON file to `<file>.migrated-to-keychain.<timestamp>` as the rollback artifact.
+The optional keychain backend (`CODEX_KEYCHAIN=1`) stores pools under service `oc-codex-multi-auth` with keys `accounts:global` / `accounts:<project-storage-key>`; migrating renames the JSON file to `<file>.migrated-to-keychain.<timestamp>` as the rollback artifact. On Windows, Credential Manager's blob-size cap means an oversized pool is size-checked before write and stays on the JSON path.
 
 | State | Default path |
 | --- | --- |

@@ -32,8 +32,9 @@ model families with 53 variants selectable through `--variant`. Alternatives:
 Config files may be `opencode.json` or `opencode.jsonc` — comments and
 trailing commas are fine, and the installer merges into the `.jsonc` file when
 that is your effective config. It refuses to overwrite a config it cannot
-parse. Rerun with `update` to refresh the cached package without touching
-config at all.
+parse — a JSONC file with an unterminated block comment is refused rather
+than truncated. Rerun with `update` to refresh the cached package without
+touching config at all.
 
 ## 2. Sign in
 
@@ -81,6 +82,21 @@ opencode run "Summarize this repo" --model=openai/gpt-5.5 --variant=medium
 `--variant` presets exist only after a catalog install (`--modern`, `--full`,
 or `--legacy`); after a plugin-only install, use the model entries OpenCode
 itself provides.
+
+## Uninstall / disable
+
+There is no `uninstall` command — removal is manual:
+
+1. Delete the `oc-codex-multi-auth` plugin entry the installer added to
+   `~/.config/opencode/opencode.json` (the `plugin` list, or `plugins` for V2)
+   and to `~/.config/opencode/tui.json`.
+2. Optionally remove the model entries the catalog modes wrote to
+   `provider.openai.models` in the same file.
+3. Runtime state stays under `~/.opencode` (account pools, config, caches,
+   logs). Leave it for a later reinstall, or delete it following
+   [privacy.md](privacy.md#deleting-your-data).
+
+Restart OpenCode afterward; the plugin's entry point is only loaded at startup.
 
 ## What the plugin sends
 
