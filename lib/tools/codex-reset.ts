@@ -433,6 +433,9 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						error instanceof Error ? error.message : String(error),
 					);
 					if (outputFormat === "json") {
+						// Same envelope semantics as every other codex-reset JSON
+						// failure: `error` is the machine code, `message` the prose.
+						const envelope = buildToolErrorEnvelope("codex-reset", error);
 						return renderJsonOutput({
 							...emptyConsumeJsonPayload(),
 							...identity,
@@ -442,8 +445,9 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 							credit,
 							availableCount: summary.availableCount,
 							credits: summary.credits,
-							error: consumeError,
-							message: `The consume request failed but may have reached the backend. Run codex-reset (status) and check whether ${credit.id} is still available before redeeming another credit.`,
+							error: envelope.error,
+							retryable: envelope.retryable,
+							message: `${consumeError} — the consume request failed but may have reached the backend. Run codex-reset (status) and check whether ${credit.id} is still available before redeeming another credit.`,
 						});
 					}
 					return [
@@ -501,6 +505,13 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 				}
 
 				if (outputFormat === "json") {
+					// Report the post-consume inventory: `summary` was fetched before
+					// the redeem POST, so echoing it back would present the spent
+					// credit as still available and invite a second redemption.
+					const remainingCredits = summary.credits.filter(
+						(entry) => entry.id !== credit.id,
+					);
+					const consumedCount = summary.credits.length - remainingCredits.length;
 					return renderJsonOutput({
 						...emptyConsumeJsonPayload(),
 						...identity,
@@ -510,8 +521,11 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						blocksCleared,
 						blocksClearError: blocksClearError ?? null,
 						credit,
-						availableCount: summary.availableCount,
-						credits: summary.credits,
+						availableCount: Math.max(
+							0,
+							summary.availableCount - consumedCount,
+						),
+						credits: remainingCredits,
 						result: {
 							code: result.code ?? null,
 							windowsReset: result.windows_reset ?? null,
@@ -538,9 +552,9 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 				].join("\n");
 			} catch (error) {
 				// The shared error envelope merges with the account identity so the
-				// consumer still knows which account the request targeted. Within
-				// codex-reset payloads `error` carries the masked message (stable
-				// consume-shape semantics); `errorCode` carries the machine code.
+				// consumer still knows which account the request targeted, and the
+				// fields keep the shared envelope's meaning — `error` is the machine
+				// code, `message` the masked prose — so callers parse one schema.
 				const message = sanitizeToolErrorMessage(
 					error instanceof Error ? error.message : String(error),
 				);
@@ -551,8 +565,8 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						...identity,
 						ok: envelope.ok,
 						tool: envelope.tool,
-						error: envelope.message,
-						errorCode: envelope.error,
+						error: envelope.error,
+						message: envelope.message,
 						retryable: envelope.retryable,
 						nextAction: envelope.nextAction,
 						path: envelope.path,

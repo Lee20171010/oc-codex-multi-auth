@@ -24,6 +24,7 @@ import {
 	_resetBackendForTests,
 	_setBackendForTests,
 	buildKeychainAccountKey,
+	buildKeychainFlaggedKey,
 	deleteFromKeychain,
 	GLOBAL_KEYCHAIN_ACCOUNT_KEY,
 	isKeychainOptInEnabled,
@@ -31,6 +32,8 @@ import {
 	KEYCHAIN_SERVICE_NAME,
 	keychainIsAvailable,
 	readFromKeychain,
+	WIN32_KEYCHAIN_MAX_BLOB_BYTES,
+	writeFlaggedToKeychain,
 	writeToKeychain,
 	type KeychainBackend,
 } from "../lib/storage/keychain.js";
@@ -250,6 +253,79 @@ describe("lib/storage/keychain: low-level backend", () => {
 				vi.doUnmock("@napi-rs/keyring");
 				await vi.resetModules();
 			}
+		});
+	});
+
+	describe("[P1] oversized-blob refusal retires the stale keychain entry", () => {
+		// On Windows a pool that grows past the Credential Manager byte limit
+		// can never be written back — but if a smaller blob was saved earlier,
+		// leaving it in place makes every keychain-first load serve the stale
+		// pool over the newer JSON file (greptile P1 on PR #282). The refusal
+		// path must delete the stranded entry so JSON stays authoritative.
+		const originalPlatform = process.platform;
+
+		function asWindows(): void {
+			Object.defineProperty(process, "platform", { value: "win32" });
+		}
+
+		afterEach(() => {
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+			});
+		});
+
+		it("writeToKeychain refusal deletes the older entry", async () => {
+			asWindows();
+			const mock = createMockBackend();
+			_setBackendForTests(mock);
+
+			// Seed a small earlier entry — the "grew beyond the limit" case.
+			const small = await writeToKeychain("proj-key", JSON.stringify(makeStorage()));
+			expect(small.ok).toBe(true);
+			const key = `${KEYCHAIN_SERVICE_NAME}::accounts:proj-key`;
+			expect(mock.store.has(key)).toBe(true);
+
+			const oversized = "x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES + 1);
+			const refused = await writeToKeychain("proj-key", oversized);
+			expect(refused.ok).toBe(false);
+			expect(refused.error).toContain(`${WIN32_KEYCHAIN_MAX_BLOB_BYTES}`);
+			// The stale entry is gone: a keychain-first load now reads null and
+			// falls through to the JSON file instead of serving the older pool.
+			expect(mock.store.has(key)).toBe(false);
+			const read = await readFromKeychain("proj-key");
+			expect(read).toBeNull();
+		});
+
+		it("writeFlaggedToKeychain refusal deletes the older flagged entry", async () => {
+			asWindows();
+			const mock = createMockBackend();
+			_setBackendForTests(mock);
+
+			const small = await writeFlaggedToKeychain(
+				"proj-key",
+				JSON.stringify(makeStorage()),
+			);
+			expect(small.ok).toBe(true);
+			const key = `${KEYCHAIN_SERVICE_NAME}::${buildKeychainFlaggedKey("proj-key")}`;
+			expect(mock.store.has(key)).toBe(true);
+
+			const oversized = "x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES + 1);
+			const refused = await writeFlaggedToKeychain("proj-key", oversized);
+			expect(refused.ok).toBe(false);
+			expect(mock.store.has(key)).toBe(false);
+		});
+
+		it("writeToKeychain refusal resolves when there is nothing to clear", async () => {
+			asWindows();
+			const mock = createMockBackend();
+			_setBackendForTests(mock);
+			const oversized = "x".repeat(WIN32_KEYCHAIN_MAX_BLOB_BYTES + 1);
+			const refused = await writeToKeychain("proj-key", oversized);
+			expect(refused.ok).toBe(false);
+			expect(refused.error).toContain(`${WIN32_KEYCHAIN_MAX_BLOB_BYTES}`);
+			// The delete still ran — an absent entry is not an error, but the
+			// attempt must happen so a racing writer's entry cannot survive.
+			expect(mock.calls.some((c) => c.op === "delete")).toBe(true);
 		});
 	});
 

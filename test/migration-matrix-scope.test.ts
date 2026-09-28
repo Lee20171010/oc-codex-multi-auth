@@ -36,6 +36,8 @@ import type { TokenResult } from "../lib/types.js";
 
 let scratch: string;
 const ORIG_KEYCHAIN = process.env.CODEX_KEYCHAIN;
+const ORIG_HOME = process.env.HOME;
+const ORIG_USERPROFILE = process.env.USERPROFILE;
 
 function mkV3(tokens: string[]): AccountStorageV3 {
 	return {
@@ -63,17 +65,25 @@ async function mkProject(name: string): Promise<string> {
 
 beforeEach(async () => {
 	scratch = await fs.mkdtemp(join(tmpdir(), "audit-verify2-"));
+	// Per-test home: the global-account fixtures below must never live in the
+	// run-wide minted home — sibling migration suites read and write those same
+	// paths from parallel workers, and touching them erases fixtures mid-test.
+	// `homedir()` resolves HOME dynamically in the storage path layer, so the
+	// redirect also keeps this suite's own global file private to the test.
+	process.env.HOME = scratch;
+	process.env.USERPROFILE = scratch;
 	vi.mocked(queuedRefresh).mockReset();
 });
 
 afterEach(async () => {
 	setStoragePathDirect(null);
+	if (ORIG_HOME === undefined) delete process.env.HOME;
+	else process.env.HOME = ORIG_HOME;
+	if (ORIG_USERPROFILE === undefined) delete process.env.USERPROFILE;
+	else process.env.USERPROFILE = ORIG_USERPROFILE;
 	if (ORIG_KEYCHAIN === undefined) delete process.env.CODEX_KEYCHAIN;
 	else process.env.CODEX_KEYCHAIN = ORIG_KEYCHAIN;
 	try { await fs.rm(scratch, { recursive: true, force: true }); } catch { /* ignore */ }
-	// clean sandbox-home global file between tests
-	try { await fs.rm(join(homedir(), ".opencode", "oc-codex-multi-auth-accounts.json"), { force: true }); } catch { /* ignore */ }
-	try { await fs.rm(join(homedir(), ".opencode", "openai-codex-accounts.json"), { force: true }); } catch { /* ignore */ }
 });
 
 describe("CROSS-SCOPE: seeded pair + rotation propagation", () => {

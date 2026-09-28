@@ -195,7 +195,15 @@ describe("codex-reset tool", () => {
 		const invalidate = vi.spyOn(ctx, "invalidateAccountManagerCache");
 		const execute = createCodexResetTool(ctx).execute as ToolExecute;
 		const output = JSON.parse(await execute({ action: "consume", confirm: true, format: "json" }));
-		expect(output).toMatchObject({ redeemed: true, blocksCleared: true });
+		expect(output).toMatchObject({
+			redeemed: true,
+			blocksCleared: true,
+			// Post-consume inventory: the spent credit must not still show as
+			// available in the same payload that reports `redeemed: true`
+			// (greptile P1 on PR #282 — stale inventory invites a re-redeem).
+			availableCount: 0,
+			credits: [],
+		});
 		expect(current.accounts[0].quotaExhaustedStampAt).toBe(200);
 		expect(current.accounts[0].quotaExhaustedUntil).toBe(future);
 		expect(current.accounts[0].rateLimitResetTimes).toEqual({ codex: future + 60_000 });
@@ -342,7 +350,11 @@ describe("codex-reset tool", () => {
 		};
 		expect(parsed.redeemed).toBeNull();
 		expect(parsed.reason).toBe("consume-failed");
-		expect(parsed.error).toContain("socket hang up");
+		// Shared-envelope semantics (greptile P2 on PR #282): `error` is the
+		// machine code — a TypeError has none, so the generic code applies —
+		// and `message` carries the masked prose plus the recovery guidance.
+		expect(parsed.error).toBe("CODEX_TOOL_ERROR");
+		expect(parsed.message).toContain("socket hang up");
 		expect(parsed.message).toContain("RateLimitResetCredit_1");
 
 		const text = await execute({ action: "consume", confirm: true });

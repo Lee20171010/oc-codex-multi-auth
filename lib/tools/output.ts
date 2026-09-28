@@ -96,15 +96,20 @@ export function stripControlCharacters(input: string): string {
 }
 
 /**
- * Masks credential-shaped substrings, collapses embedded newlines, and
- * truncates to `limit` — the standard treatment for upstream error bodies and
- * `StorageError` text before it reaches tool output.
+ * Masks credential-shaped substrings, redacts embedded home paths, collapses
+ * embedded newlines, and truncates to `limit` — the standard treatment for
+ * upstream error bodies and `StorageError` text before it reaches tool output.
+ * Home redaction runs inside the sanitizer (not only on the envelope's `path`
+ * field) because messages like storage-contention errors interpolate the
+ * account-file path inline.
  */
 export function sanitizeToolErrorMessage(
 	message: string,
 	limit: number = TOOL_ERROR_MESSAGE_LIMIT,
 ): string {
-	return maskString(message).replace(/[\r\n]+/g, " ").slice(0, limit);
+	return redactHomePaths(maskString(message))
+		.replace(/[\r\n]+/g, " ")
+		.slice(0, limit);
 }
 
 /**

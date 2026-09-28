@@ -270,7 +270,17 @@ export async function writeToKeychain(
 ): Promise<KeychainWriteResult> {
 	const refusal = keychainBlobRefusal(jsonBlob);
 	if (refusal) {
-		log.warn("keychain: write refused", { reason: refusal });
+		// A refused write can never reach the keychain, so an entry already
+		// there can only ever serve stale data: loads read the keychain first,
+		// and a smaller older blob would shadow every newer JSON save. Retire
+		// it best-effort — a delete failure is logged, never thrown, because
+		// the JSON file remains authoritative either way.
+		const cleared = await deleteFromKeychain(projectStorageKey);
+		log.warn("keychain: write refused", {
+			reason: refusal,
+			staleEntryCleared: cleared.deleted,
+			...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
+		});
 		return { ok: false, error: refusal };
 	}
 	const backend = await getBackend();
@@ -350,7 +360,14 @@ export async function writeFlaggedToKeychain(
 ): Promise<KeychainWriteResult> {
 	const refusal = keychainBlobRefusal(jsonBlob);
 	if (refusal) {
-		log.warn("keychain: flagged write refused", { reason: refusal });
+		// Same stale-shadow hazard as writeToKeychain: a flagged entry that
+		// can never be updated must not outlive the JSON fallback.
+		const cleared = await deleteFlaggedFromKeychain(projectStorageKey);
+		log.warn("keychain: flagged write refused", {
+			reason: refusal,
+			staleEntryCleared: cleared.deleted,
+			...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
+		});
 		return { ok: false, error: refusal };
 	}
 	const backend = await getBackend();
