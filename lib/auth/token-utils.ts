@@ -31,6 +31,54 @@ function toStringValue(value: unknown): string | undefined {
 }
 
 /**
+ * Upper bound for a display-bound claim value (workspace name, role, plan
+ * label). Real values are a few dozen characters at most.
+ */
+const MAX_CLAIM_TEXT_LENGTH = 64;
+
+/**
+ * Strip control characters (C0, DEL, C1 — including the ESC that opens ANSI
+ * sequences) from a string. Used on values extracted from JWT claims / org
+ * payloads before they are rendered into account labels, menus, or emails:
+ * upstream text is nominally trustworthy but crosses the prompt/terminal
+ * boundary, where a stray `\n` splits a rendered row and a `\x1b` rewrites
+ * the display. Mirrors `sanitizePlanLabel` in plan-tier.ts.
+ */
+function stripControlChars(value: string): string {
+	let cleaned = "";
+	for (const char of value) {
+		const code = char.codePointAt(0) ?? 0;
+		cleaned += (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) ? " " : char;
+	}
+	return cleaned;
+}
+
+/**
+ * Sanitize a display-bound claim value: control characters are replaced by
+ * spaces (then collapsed) and the result is bounded in length.
+ */
+function sanitizeClaimText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const collapsed = stripControlChars(value).replace(/\s+/g, " ").trim();
+	if (!collapsed) return undefined;
+	return collapsed.length > MAX_CLAIM_TEXT_LENGTH
+		? `${collapsed.slice(0, MAX_CLAIM_TEXT_LENGTH - 1)}…`
+		: collapsed;
+}
+
+/**
+ * Sanitize an email-shaped claim value: control characters are removed
+ * outright (a valid address never contains whitespace) rather than replaced
+ * with spaces.
+ */
+function sanitizeClaimEmail(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const cleaned = stripControlChars(value).replace(/\s+/g, "");
+	if (!cleaned || !cleaned.includes("@")) return undefined;
+	return cleaned.length > MAX_CLAIM_TEXT_LENGTH ? undefined : cleaned;
+}
+
+/**
  * Converts a value to boolean if possible.
  */
 function toBoolean(value: unknown): boolean | undefined {
@@ -46,9 +94,14 @@ function toBoolean(value: unknown): boolean | undefined {
 
 /**
  * Formats account ID to last 6 characters for display.
+ *
+ * The suffix is display-only (it goes into `[id:…]` label markers), so
+ * control characters are stripped here rather than trusted to be absent from
+ * the claim.
  */
 function formatAccountIdSuffix(accountId: string): string {
-	return accountId.length > 6 ? accountId.slice(-6) : accountId;
+	const cleaned = stripControlChars(accountId).replace(/\s+/g, "");
+	return cleaned.length > 6 ? cleaned.slice(-6) : cleaned;
 }
 
 /**
@@ -184,23 +237,27 @@ function extractCandidateFromRecord(
 	const organizationId =
 		extractOrganizationIdFromRecord(record) ?? organizationIdOverride;
 
+	// Display-bound fields are sanitized at extraction: they come from JWT
+	// claims / org payloads and are interpolated into account labels rendered
+	// in menus, tables, and toasts, so control characters must not pass
+	// through (same treatment as `sanitizePlanLabel` for plan labels).
 	const name =
-		toStringValue(record.name) ??
-		toStringValue(record.display_name) ??
-		toStringValue(record.title) ??
-		toStringValue(record.organization_name) ??
-		toStringValue(record.workspace_name) ??
-		toStringValue(record.team_name) ??
-		toStringValue(record.slug);
+		sanitizeClaimText(record.name) ??
+		sanitizeClaimText(record.display_name) ??
+		sanitizeClaimText(record.title) ??
+		sanitizeClaimText(record.organization_name) ??
+		sanitizeClaimText(record.workspace_name) ??
+		sanitizeClaimText(record.team_name) ??
+		sanitizeClaimText(record.slug);
 	const type =
-		toStringValue(record.type) ??
-		toStringValue(record.plan_type) ??
-		toStringValue(record.kind) ??
-		toStringValue(record.account_type);
+		sanitizeClaimText(record.type) ??
+		sanitizeClaimText(record.plan_type) ??
+		sanitizeClaimText(record.kind) ??
+		sanitizeClaimText(record.account_type);
 	const role =
-		toStringValue(record.role) ??
-		toStringValue(record.membership_role) ??
-		toStringValue(record.user_role);
+		sanitizeClaimText(record.role) ??
+		sanitizeClaimText(record.membership_role) ??
+		sanitizeClaimText(record.user_role);
 	const isDefault = toBoolean(
 		record.is_default ?? record.isDefault ?? record.default ?? record.primary ?? record.is_active ?? record.isActive ?? record.current,
 	);
@@ -492,8 +549,8 @@ export function extractAccountEmail(accessToken?: string, idToken?: string): str
 	// Try id_token first - OpenAI puts email here
 	if (idToken) {
 		const idDecoded = decodeJWT(idToken);
-		const idEmail = idDecoded?.email as string | undefined;
-		if (typeof idEmail === "string" && idEmail.includes("@") && idEmail.trim()) {
+		const idEmail = sanitizeClaimEmail(idDecoded?.email);
+		if (idEmail) {
 			return idEmail;
 		}
 	}
@@ -509,15 +566,12 @@ export function extractAccountEmail(accessToken?: string, idToken?: string): str
 		| Record<string, unknown>
 		| undefined;
 	const candidate =
-		(nested?.email as string | undefined) ??
-		(nested?.chatgpt_user_email as string | undefined) ??
-		(profile?.email as string | undefined) ??
-		(decoded?.email as string | undefined) ??
-		(decoded?.preferred_username as string | undefined);
-	if (typeof candidate === "string" && candidate.includes("@") && candidate.trim()) {
-		return candidate;
-	}
-	return undefined;
+		nested?.email ??
+		nested?.chatgpt_user_email ??
+		profile?.email ??
+		decoded?.email ??
+		decoded?.preferred_username;
+	return sanitizeClaimEmail(candidate);
 }
 
 /**
@@ -604,13 +658,14 @@ export function resolveRequestAccountId(
 }
 
 /**
- * Sanitizes an email address by trimming whitespace and lowercasing.
+ * Sanitizes an email address by stripping control characters, trimming
+ * whitespace, and lowercasing.
  * @param email - Email string to sanitize
  * @returns Sanitized email or undefined if invalid
  */
 export function sanitizeEmail(email: string | undefined): string | undefined {
 	if (!email) return undefined;
-	const trimmed = email.trim();
-	if (!trimmed || !trimmed.includes("@")) return undefined;
-	return trimmed.toLowerCase();
+	const cleaned = stripControlChars(email).trim();
+	if (!cleaned || !cleaned.includes("@")) return undefined;
+	return cleaned.toLowerCase();
 }

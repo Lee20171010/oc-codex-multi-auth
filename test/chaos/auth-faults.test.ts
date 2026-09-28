@@ -236,7 +236,9 @@ describe("chaos/auth-faults — real fault injection", () => {
 				"http://127.0.0.1:1455/auth/callback?code=hijack&state=loser-state",
 			);
 			expect(res.status).toBe(400);
-			expect(await res.text()).toContain("State mismatch");
+			const body = await res.text();
+			expect(body).toContain("Sign-in link mismatch");
+			expect(body).toContain("restart the login flow");
 		});
 	});
 });

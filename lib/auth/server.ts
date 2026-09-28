@@ -2,7 +2,7 @@ import http from "node:http";
 import { randomBytes } from "node:crypto";
 import type { OAuthServerInfo } from "../types.js";
 import { logError, logWarn } from "../logger.js";
-import { renderOAuthSuccessHtml } from "../oauth-success.js";
+import { renderOAuthErrorHtml, renderOAuthSuccessHtml } from "../oauth-success.js";
 import {
 	OAUTH_CALLBACK_BIND_HOSTS,
 	OAUTH_CALLBACK_BIND_URL,
@@ -18,6 +18,39 @@ function closeServer(server: http.Server): void {
 	} catch (err) {
 		logError(`Failed to close OAuth server: ${(err as Error)?.message ?? String(err)}`);
 	}
+}
+
+/**
+ * Send an HTML response with the full hardening header set. Every rendered
+ * page — success or error — gets the same posture: a nonce-bound inline
+ * style, no scripts, no framing, no referrer.
+ */
+function sendHtmlResponse(
+	res: http.ServerResponse,
+	status: number,
+	render: (styleNonce: string) => string,
+): void {
+	const styleNonce = randomBytes(18).toString("base64");
+	res.statusCode = status;
+	res.setHeader("Content-Type", "text/html; charset=utf-8");
+	res.setHeader("Cache-Control", "no-store");
+	res.setHeader("Referrer-Policy", "no-referrer");
+	res.setHeader("X-Frame-Options", "DENY");
+	res.setHeader("X-Content-Type-Options", "nosniff");
+	res.setHeader(
+		"Content-Security-Policy",
+		`default-src 'none'; style-src 'nonce-${styleNonce}'; script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+	);
+	res.end(render(styleNonce));
+}
+
+function sendErrorPage(
+	res: http.ServerResponse,
+	status: number,
+	heading: string,
+	detail: string,
+): void {
+	sendHtmlResponse(res, status, (nonce) => renderOAuthErrorHtml(nonce, heading, detail));
 }
 
 /**
@@ -44,36 +77,42 @@ export async function startLocalOAuthServer({ state }: { state: string }): Promi
 				return;
 			}
 			if (url.searchParams.get("state") !== state) {
-				res.statusCode = 400;
-				res.end("State mismatch");
+				sendErrorPage(
+					res,
+					400,
+					"Sign-in link mismatch",
+					"This sign-in link does not match the login attempt running in your terminal. It may be stale or from a different login; return to your terminal and restart the login flow for a fresh link.",
+				);
 				return;
 			}
 			const code = url.searchParams.get("code");
 			if (!code) {
-				res.statusCode = 400;
-				res.end("Missing authorization code");
+				sendErrorPage(
+					res,
+					400,
+					"Missing authorization code",
+					"The sign-in response did not include an authorization code, so login could not be completed. Return to your terminal and restart the login flow for a fresh link.",
+				);
 				return;
 			}
-			const styleNonce = randomBytes(18).toString("base64");
-			res.statusCode = 200;
-			res.setHeader("Content-Type", "text/html; charset=utf-8");
-			res.setHeader("Cache-Control", "no-store");
-			res.setHeader("Referrer-Policy", "no-referrer");
-			res.setHeader("X-Frame-Options", "DENY");
-			res.setHeader("X-Content-Type-Options", "nosniff");
-			res.setHeader(
-				"Content-Security-Policy",
-				`default-src 'none'; style-src 'nonce-${styleNonce}'; script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
-			);
-			res.end(renderOAuthSuccessHtml(styleNonce));
+			sendHtmlResponse(res, 200, renderOAuthSuccessHtml);
 			lastCode = code;
 			for (const server of allServers) {
 				server._lastCode = code;
 			}
 		} catch (err) {
 			logError(`Request handler error: ${(err as Error)?.message ?? String(err)}`);
-			res.statusCode = 500;
-			res.end("Internal error");
+			try {
+				sendErrorPage(
+					res,
+					500,
+					"Something went wrong",
+					"The local sign-in server hit an internal error. Return to your terminal and restart the login flow.",
+				);
+			} catch {
+				// The response object itself is broken (headers/socket gone);
+				// nothing further can be sent.
+			}
 		}
 	};
 

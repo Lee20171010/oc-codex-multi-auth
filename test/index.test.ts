@@ -209,6 +209,8 @@ vi.mock("../lib/logger.js", () => ({
 	logInfo: vi.fn(),
 	logWarn: vi.fn(),
 	logError: vi.fn(),
+	// auth/device-code import maskString; keep it a passthrough in tests.
+	maskString: vi.fn((value: string) => value),
 	setCorrelationId: vi.fn(() => "test-correlation-id"),
 	clearCorrelationId: vi.fn(),
 	createLogger: vi.fn(() => ({
