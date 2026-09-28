@@ -10,6 +10,7 @@ import {
 	buildRefreshInputs,
 	refreshAndPersistAccount,
 } from "./refresh-account.js";
+import { sanitizeToolErrorMessage, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
@@ -20,7 +21,7 @@ export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
 		getStatusMarker,
 		reloadCachedAccountManager,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Manually refresh OAuth tokens for all accounts to verify they're still valid.",
 		args: {},
@@ -68,8 +69,10 @@ export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
 					);
 					skippedCount++;
 				} else {
+					// Mask + truncate upstream refresh failures — they can carry
+					// credential-shaped fragments or account-identifying text.
 					results.push(
-						`  ${getStatusMarker(ui, "error")} ${label}: Failed - ${outcome.error}`,
+						`  ${getStatusMarker(ui, "error")} ${label}: Failed - ${sanitizeToolErrorMessage(outcome.error)}`,
 					);
 					failedCount++;
 				}
@@ -96,4 +99,5 @@ export function createCodexRefreshTool(ctx: ToolContext): ToolDefinition {
 			return results.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-refresh", definition);
 }

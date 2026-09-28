@@ -4,6 +4,7 @@
  */
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
+import { withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexSetupTool(ctx: ToolContext): ToolDefinition {
@@ -13,7 +14,7 @@ export function createCodexSetupTool(ctx: ToolContext): ToolDefinition {
 		renderSetupChecklistOutput,
 		runSetupWizard,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description: "Beginner checklist for first-time setup and account readiness.",
 		args: {
 			wizard: tool.schema
@@ -30,4 +31,5 @@ export function createCodexSetupTool(ctx: ToolContext): ToolDefinition {
 			return renderSetupChecklistOutput(ui, state);
 		},
 	});
+	return withToolErrorEnvelope("codex-setup", definition);
 }

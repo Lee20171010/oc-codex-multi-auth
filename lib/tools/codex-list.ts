@@ -23,6 +23,7 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { stripControlCharacters, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexListTool(ctx: ToolContext): ToolDefinition {
@@ -35,7 +36,7 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 		formatQuotaExhaustionEntry,
 		buildJsonAccountIdentity,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"List all Codex OAuth accounts and the current active index.",
 		args: {
@@ -67,7 +68,11 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 			const storePath = getStoragePath();
 			const outputFormat = normalizeToolOutputFormat(format);
 			const includeSensitiveOutput = includeSensitive === true;
-			const normalizedTag = tag?.trim().toLowerCase() ?? "";
+			// The tag is echoed into `filterTag` and the "No accounts found"
+			// message — strip control characters so it cannot inject escapes.
+			const normalizedTag = tag
+				? stripControlCharacters(tag).trim().toLowerCase()
+				: "";
 			const commandHints = [
 				"opencode auth login",
 				"codex-status",
@@ -90,6 +95,7 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 						storagePath: storePath,
 						filterTag: normalizedTag || null,
 						totalAccounts: 0,
+						shownAccounts: 0,
 						totalStoredAccounts: 0,
 						activeIndex: null,
 						accounts: [],
@@ -132,11 +138,15 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 				});
 			if (normalizedTag && filteredEntries.length === 0) {
 				if (outputFormat === "json") {
+					// `totalAccounts` is always the full pool count (matching the
+					// CLI's `total` vs `shown` split) — the filtered row count lives
+					// in `shownAccounts` and `accounts.length`.
 					return renderJsonOutput({
 						message: `No accounts found for tag: ${normalizedTag}`,
 						storagePath: storePath,
 						filterTag: normalizedTag,
-						totalAccounts: 0,
+						totalAccounts: storage.accounts.length,
+						shownAccounts: 0,
 						totalStoredAccounts: storage.accounts.length,
 						activeIndex: activeIndex + 1,
 						accounts: [],
@@ -163,7 +173,8 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 			}
 			if (outputFormat === "json") {
 				return renderJsonOutput({
-					totalAccounts: filteredEntries.length,
+					totalAccounts: storage.accounts.length,
+					shownAccounts: filteredEntries.length,
 					totalStoredAccounts: storage.accounts.length,
 					activeIndex: activeIndex + 1,
 					filterTag: normalizedTag || null,
@@ -388,4 +399,5 @@ export function createCodexListTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-list", definition);
 }

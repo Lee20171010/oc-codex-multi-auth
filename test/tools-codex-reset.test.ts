@@ -291,7 +291,8 @@ describe("codex-reset tool", () => {
 
 		expect(parsed.redeemed).toBe(true);
 		expect(parsed.usageError).toContain("network down");
-		expect(parsed.error).toBeUndefined();
+		// The consume schema is stable: `error` is always present, null here.
+		expect(parsed.error).toBeNull();
 	});
 
 	it("sends a stable idempotency key derived from the credit id", async () => {

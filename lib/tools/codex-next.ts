@@ -14,6 +14,7 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
@@ -23,7 +24,7 @@ export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
 		toBeginnerAccountSnapshots,
 		getBeginnerRuntimeSnapshot,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Show the single most recommended next action for beginners.",
 		args: {
@@ -67,4 +68,5 @@ export function createCodexNextTool(ctx: ToolContext): ToolDefinition {
 			return `Recommended next action:\n${action}`;
 		},
 	});
+	return withToolErrorEnvelope("codex-next", definition);
 }

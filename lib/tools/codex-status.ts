@@ -29,6 +29,11 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import {
+	redactHomePaths,
+	redactPluginOrigin,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
@@ -49,7 +54,7 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 		runtimeMetrics,
 		cachedAccountManagerRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Show detailed status of Codex accounts and rate limits.",
 		args: {
@@ -76,10 +81,19 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 			const storage = await loadAccounts();
 			if (!storage || storage.accounts.length === 0) {
 				if (outputFormat === "json") {
+					// Keep the schema identical to the populated branch: every key the
+					// populated payload emits is present here with an empty/null value,
+					// so consumers never have to detect a second shape.
 					return renderJsonOutput({
 						message:
 							"No Codex accounts configured. Run: opencode auth login",
 						totalAccounts: 0,
+						pluginOrigin: redactPluginOrigin(getPluginOrigin()),
+						selectionView: {
+							modelFamily: "codex",
+							effectiveModel: null,
+							label: "codex",
+						},
 						accounts: [],
 						activeIndexByFamily: {},
 						rateLimitsByModelFamily: [],
@@ -135,7 +149,7 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 			if (outputFormat === "json") {
 				return renderJsonOutput({
 					totalAccounts: storage.accounts.length,
-					pluginOrigin: getPluginOrigin(),
+					pluginOrigin: redactPluginOrigin(getPluginOrigin()),
 					selectionView: {
 						modelFamily: explainabilityFamily,
 						effectiveModel: explainabilityModel ?? null,
@@ -205,7 +219,7 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 					formatUiKeyValue(
 						ui,
 						"Running from",
-						describePluginOrigin(getPluginOrigin()),
+						redactHomePaths(describePluginOrigin(getPluginOrigin())),
 						"muted",
 					),
 					formatUiKeyValue(
@@ -344,7 +358,7 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 
 			const lines: string[] = [
 				`Account Status (${storage.accounts.length} total):`,
-				`Running from: ${describePluginOrigin(getPluginOrigin())}`,
+				`Running from: ${redactHomePaths(describePluginOrigin(getPluginOrigin()))}`,
 				"",
 				...buildTableHeader(statusTableOptions),
 			];
@@ -432,4 +446,5 @@ export function createCodexStatusTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-status", definition);
 }

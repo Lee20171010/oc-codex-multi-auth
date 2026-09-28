@@ -15,7 +15,6 @@
  */
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +22,12 @@ import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 
 import { getCircuitBreakerSummary } from "../circuit-breaker.js";
 import { LOG_DIR, maskString } from "../logger.js";
+import { loadAccounts } from "../storage.js";
+import {
+	redactHomePaths,
+	sanitizeToolErrorMessage,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 interface PackageManifest {
@@ -59,30 +64,6 @@ function countLogFiles(): number {
 	}
 }
 
-/**
- * Replace occurrences of the user's home directory in free-form strings
- * with the placeholder `<HOME>`. Complements `maskString` which handles
- * token-shaped substrings but does not know about filesystem paths.
- */
-function redactHomePaths(input: string): string {
-	const home = homedir();
-	if (!home) return input;
-	// Normalize both POSIX- and Windows-style separators so the replacement
-	// matches regardless of how the path was embedded.
-	const needles = new Set<string>();
-	needles.add(home);
-	needles.add(home.replace(/\\/g, "/"));
-	needles.add(home.replace(/\\/g, "\\\\"));
-	let output = input;
-	for (const needle of needles) {
-		if (!needle) continue;
-		while (output.includes(needle)) {
-			output = output.replace(needle, "<HOME>");
-		}
-	}
-	return output;
-}
-
 export function createCodexDiagTool(ctx: ToolContext): ToolDefinition {
 	const {
 		cachedAccountManagerRef,
@@ -90,15 +71,29 @@ export function createCodexDiagTool(ctx: ToolContext): ToolDefinition {
 		buildRoutingVisibilitySnapshot,
 	} = ctx;
 
-	return tool({
+	const definition = tool({
 		description:
 			"Generate a redacted diagnostic snapshot for bug reports. Never includes tokens, account IDs, emails, labels, or user home paths.",
 		args: {},
 		async execute() {
 			await Promise.resolve();
 			const manifest = loadPluginManifest();
-			const manager = cachedAccountManagerRef.current;
-			const accountCount = manager?.getAccountCount() ?? 0;
+			// Fresh storage read: the cached AccountManager can be empty or stale
+			// even when accounts exist on disk, and diagnostics must describe the
+			// on-disk reality. On a corrupt/unreadable store the manager count is
+			// the best-effort fallback and `storageError` records why.
+			let storageError: string | null = null;
+			let accountCount: number;
+			try {
+				const storage = await loadAccounts();
+				accountCount = storage?.accounts.length ?? 0;
+			} catch (error) {
+				storageError = sanitizeToolErrorMessage(
+					error instanceof Error ? error.message : String(error),
+				);
+				accountCount =
+					cachedAccountManagerRef.current?.getAccountCount() ?? 0;
+			}
 			const routing = buildRoutingVisibilitySnapshot();
 			const circuit = getCircuitBreakerSummary();
 			const logFileCount = countLogFiles();
@@ -130,9 +125,9 @@ export function createCodexDiagTool(ctx: ToolContext): ToolDefinition {
 					platform: process.platform,
 					arch: process.arch,
 				},
-				accounts: {
-					count: accountCount,
-				},
+				accounts: storageError
+					? { count: accountCount, storageError }
+					: { count: accountCount },
 				activeFamily: routing.modelFamily,
 				circuitBreaker: circuit,
 				metrics: metricsSummary,
@@ -154,4 +149,6 @@ export function createCodexDiagTool(ctx: ToolContext): ToolDefinition {
 			return maskString(redactHomePaths(rendered));
 		},
 	});
+	// codex-diag is always-JSON, so failures emit the envelope too.
+	return withToolErrorEnvelope("codex-diag", definition, { alwaysJson: true });
 }

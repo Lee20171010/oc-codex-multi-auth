@@ -10,11 +10,12 @@ import {
 	loadAccounts,
 } from "../storage.js";
 import { formatUiHeader, formatUiItem, formatUiKeyValue } from "../ui/format.js";
+import { toToolCallError, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexExportTool(ctx: ToolContext): ToolDefinition {
 	const { resolveUiRuntime, getStatusMarker } = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Export accounts to a JSON file for backup or migration. Can auto-generate timestamped backup paths.",
 		args: {
@@ -70,21 +71,12 @@ export function createCodexExportTool(ctx: ToolContext): ToolDefinition {
 				}
 				return `Exported ${count} account(s) to: ${resolvedExportPath}`;
 			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				if (ui.v2Enabled) {
-					return [
-						...formatUiHeader(ui, "Export accounts"),
-						"",
-						formatUiItem(
-							ui,
-							`${getStatusMarker(ui, "error")} Export failed`,
-							"danger",
-						),
-						formatUiKeyValue(ui, "Error", msg, "danger"),
-					].join("\n");
-				}
-				return `Export failed: ${msg}`;
+				// The tool contract carries no isError flag, so an export that
+				// cannot proceed must reject — a returned "Export failed: ..."
+				// string reads as a completed tool result to consumers.
+				throw toToolCallError("Export failed", error);
 			}
 		},
 	});
+	return withToolErrorEnvelope("codex-export", definition);
 }

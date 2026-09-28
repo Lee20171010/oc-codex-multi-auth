@@ -6,12 +6,17 @@
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 import { importAccounts, previewImportAccounts } from "../storage.js";
 import { formatUiHeader, formatUiItem, formatUiKeyValue } from "../ui/format.js";
+import {
+	sanitizeToolErrorMessage,
+	toToolCallError,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexImportTool(ctx: ToolContext): ToolDefinition {
 	const { resolveUiRuntime, getStatusMarker, invalidateAccountManagerCache } =
 		ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Import accounts from a JSON file, with dry-run preview and automatic timestamped backup before apply.",
 		args: {
@@ -77,7 +82,7 @@ export function createCodexImportTool(ctx: ToolContext): ToolDefinition {
 					result.backupStatus === "created"
 						? (result.backupPath ?? "created")
 						: result.backupStatus === "failed"
-							? `failed (${result.backupError ?? "unknown error"})`
+							? `failed (${sanitizeToolErrorMessage(result.backupError ?? "unknown error")})`
 							: "skipped (no existing accounts)";
 				const backupStatus: "ok" | "warning" =
 					result.backupStatus === "created" ? "ok" : "warning";
@@ -139,21 +144,12 @@ export function createCodexImportTool(ctx: ToolContext): ToolDefinition {
 				}
 				return lines.join("\n");
 			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				if (ui.v2Enabled) {
-					return [
-						...formatUiHeader(ui, "Import accounts"),
-						"",
-						formatUiItem(
-							ui,
-							`${getStatusMarker(ui, "error")} Import failed`,
-							"danger",
-						),
-						formatUiKeyValue(ui, "Error", msg, "danger"),
-					].join("\n");
-				}
-				return `Import failed: ${msg}`;
+				// The tool contract carries no isError flag, so an import that
+				// cannot proceed must reject — a returned "Import failed: ..."
+				// string reads as a completed tool result to consumers.
+				throw toToolCallError("Import failed", error);
 			}
 		},
 	});
+	return withToolErrorEnvelope("codex-import", definition);
 }

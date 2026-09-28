@@ -40,6 +40,8 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { renderJsonOutput } from "../runtime.js";
+import { sanitizeToolErrorMessage, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 /**
@@ -85,7 +87,7 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 		resolveMaskEmail,
 		getStatusMarker,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Warm up all accounts by sending one lightweight request to each, starting their usage windows so weekly/5h quotas stagger instead of expiring together.",
 		args: {
@@ -100,7 +102,7 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 			const storage = await loadAccounts();
 			if (!storage || storage.accounts.length === 0) {
 				if (args.format === "json") {
-					return JSON.stringify({ total: 0, warmedCount: 0, failedCount: 0, skippedCount: 0, blocksCleared: 0, results: [] });
+					return renderJsonOutput({ total: 0, warmedCount: 0, failedCount: 0, skippedCount: 0, blocksCleared: 0, blockClearError: null, results: [] });
 				}
 				if (ui.v2Enabled) {
 					return [
@@ -140,9 +142,11 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 				blockClearError = "Failed to clear local blocks; warm results are unchanged.";
 			}
 			if (args.format === "json") {
-				return JSON.stringify({ total: summary.total, warmedCount: summary.warmedCount,
-					failedCount: summary.failedCount, skippedCount: summary.skippedCount, blocksCleared, blockClearError,
-					results: summary.results.map(({ index, status }) => ({ index, status })) });
+				// `index` is the user-facing 1-based slot (matching codex-list);
+				// `zeroBasedIndex` keeps the technical storage offset explicit.
+				return renderJsonOutput({ total: summary.total, warmedCount: summary.warmedCount,
+					failedCount: summary.failedCount, skippedCount: summary.skippedCount, blocksCleared, blockClearError: blockClearError ?? null,
+					results: summary.results.map(({ index, status }) => ({ index: index + 1, zeroBasedIndex: index, status })) });
 			}
 
 			const lines: string[] = ui.v2Enabled
@@ -162,7 +166,7 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 						`  ${getStatusMarker(ui, "warning")} ${label}: Skipped (${result.detail ?? "disabled"})`,
 					);
 				} else {
-					const detail = (result.detail ?? "unknown error").slice(0, 120);
+					const detail = sanitizeToolErrorMessage(result.detail ?? "unknown error");
 					lines.push(`  ${getStatusMarker(ui, "error")} ${label}: Failed - ${detail}`);
 				}
 			}
@@ -191,4 +195,5 @@ export function createCodexWarmTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-warm", definition);
 }

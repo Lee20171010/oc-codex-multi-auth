@@ -22,6 +22,7 @@ import {
 	parseCodexResetCredits,
 	selectRedeemableCredit,
 	type CodexResetConsumePayload,
+	type CodexResetCredit,
 	type CodexResetCreditsSummary,
 } from "../codex-reset.js";
 import {
@@ -50,6 +51,11 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import {
+	buildToolErrorEnvelope,
+	sanitizeToolErrorMessage,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 type CodexResetArgs = {
@@ -108,6 +114,49 @@ function buildUsageLines(
 	return lines;
 }
 
+/**
+ * Baseline for every `action:"consume"` JSON payload: all consume branches
+ * emit this exact key set so consumers see one stable schema whether the
+ * redemption was previewed, skipped, failed, or completed. `redeemed` stays
+ * `boolean | null` — `null` means the outcome is genuinely unknown (the POST
+ * may have reached the backend).
+ */
+function emptyConsumeJsonPayload(): {
+	redeemed: boolean | null;
+	reason: string | null;
+	credit: CodexResetCredit | null;
+	availableCount: number;
+	credits: CodexResetCredit[];
+	blocksCleared: boolean;
+	blocksClearError: string | null;
+	result: {
+		code: string | null;
+		windowsReset: unknown;
+		redeemedAt: string | null;
+	} | null;
+	planType: string | null;
+	limits: CodexUsageSummary["limits"] | null;
+	usageError: string | null;
+	error: string | null;
+	message: string | null;
+} {
+	return {
+		redeemed: null,
+		reason: null,
+		credit: null,
+		availableCount: 0,
+		credits: [],
+		blocksCleared: false,
+		blocksClearError: null,
+		result: null,
+		planType: null,
+		limits: null,
+		usageError: null,
+		error: null,
+		message: null,
+	};
+}
+
 function buildCreditLines(summary: CodexResetCreditsSummary): string[] {
 	const lines = [
 		`banked credits: ${summary.availableCount} available`,
@@ -132,7 +181,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 		invalidateAccountManagerCache,
 	} = ctx;
 
-	return tool({
+	const definition = tool({
 		description:
 			"View banked Codex rate-limit reset credits, and redeem one to clear the current usage windows. Redeeming is irreversible and requires confirm=true.",
 		args: {
@@ -192,12 +241,29 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 			const storage = await loadAccounts();
 			if (!storage || storage.accounts.length === 0) {
 				if (outputFormat === "json") {
-					return renderJsonOutput({
-						message: "No Codex accounts configured. Run: opencode auth login",
+					// One stable schema per action: `status` always carries
+					// availableCount/credits/planType/limits; `consume` additionally
+					// carries the full consume key set so consumers never see a
+					// branch-dependent shape.
+					const base = {
+						message:
+							"No Codex accounts configured. Run: opencode auth login",
 						action: resetAction,
-						credits: [],
 						availableCount: 0,
-					});
+						credits: [] as CodexResetCredit[],
+						planType: null,
+						limits: null,
+					};
+					return renderJsonOutput(
+						resetAction === "consume"
+							? {
+									...emptyConsumeJsonPayload(),
+									...base,
+									redeemed: false,
+									reason: "no-accounts",
+								}
+							: base,
+					);
 				}
 				if (ui.v2Enabled) {
 					return [
@@ -266,6 +332,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						return renderJsonOutput({
 							...identity,
 							action: "status",
+							message: null,
 							availableCount: summary.availableCount,
 							credits: summary.credits,
 							planType: usage.planType,
@@ -299,6 +366,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 							: "No available credits to redeem.";
 					if (outputFormat === "json") {
 						return renderJsonOutput({
+							...emptyConsumeJsonPayload(),
 							...identity,
 							action: "consume",
 							redeemed: false,
@@ -320,11 +388,14 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					const reason = dryRun === true ? "dry-run" : "unconfirmed";
 					if (outputFormat === "json") {
 						return renderJsonOutput({
+							...emptyConsumeJsonPayload(),
 							...identity,
 							action: "consume",
 							redeemed: false,
 							reason,
 							credit,
+							availableCount: summary.availableCount,
+							credits: summary.credits,
 							message:
 								reason === "dry-run"
 									? "Dry run: credit not redeemed."
@@ -356,16 +427,21 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					// send the user to spend a second credit. The idempotency key
 					// is derived from the credit id, so retrying the SAME credit
 					// is safe; the guidance below is about picking a different one.
-					const consumeError = (
-						error instanceof Error ? error.message : String(error)
-					).slice(0, 160);
+					// Upstream error text is masked + truncated — it can carry
+					// credential-shaped fragments from the request/response path.
+					const consumeError = sanitizeToolErrorMessage(
+						error instanceof Error ? error.message : String(error),
+					);
 					if (outputFormat === "json") {
 						return renderJsonOutput({
+							...emptyConsumeJsonPayload(),
 							...identity,
 							action: "consume",
 							redeemed: null,
 							reason: "consume-failed",
 							credit,
+							availableCount: summary.availableCount,
+							credits: summary.credits,
 							error: consumeError,
 							message: `The consume request failed but may have reached the backend. Run codex-reset (status) and check whether ${credit.id} is still available before redeeming another credit.`,
 						});
@@ -419,17 +495,23 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						quotaDisplay,
 					);
 				} catch (error) {
-					usageError = error instanceof Error ? error.message : String(error);
+					usageError = sanitizeToolErrorMessage(
+						error instanceof Error ? error.message : String(error),
+					);
 				}
 
 				if (outputFormat === "json") {
 					return renderJsonOutput({
+						...emptyConsumeJsonPayload(),
 						...identity,
 						action: "consume",
 						redeemed: true,
+						reason: "redeemed",
 						blocksCleared,
 						blocksClearError: blocksClearError ?? null,
 						credit,
+						availableCount: summary.availableCount,
+						credits: summary.credits,
 						result: {
 							code: result.code ?? null,
 							windowsReset: result.windows_reset ?? null,
@@ -437,7 +519,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						},
 						planType: usageAfter?.planType ?? null,
 						limits: usageAfter?.limits ?? null,
-						usageError: usageError ? usageError.slice(0, 160) : null,
+						usageError: usageError ?? null,
 					});
 				}
 				return [
@@ -450,30 +532,46 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					...(usageAfter
 						? ["new usage:", ...buildUsageLines(usageAfter, quotaDisplay)]
 						: [
-								`new usage: unavailable (${usageError?.slice(0, 160)})`,
+								`new usage: unavailable (${usageError ?? "unknown"})`,
 								"The credit was redeemed. Run codex-reset to re-read usage.",
 							]),
 				].join("\n");
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
+				// The shared error envelope merges with the account identity so the
+				// consumer still knows which account the request targeted. Within
+				// codex-reset payloads `error` carries the masked message (stable
+				// consume-shape semantics); `errorCode` carries the machine code.
+				const message = sanitizeToolErrorMessage(
+					error instanceof Error ? error.message : String(error),
+				);
 				if (outputFormat === "json") {
+					const envelope = buildToolErrorEnvelope("codex-reset", error);
 					return renderJsonOutput({
+						...emptyConsumeJsonPayload(),
 						...identity,
+						ok: envelope.ok,
+						tool: envelope.tool,
+						error: envelope.message,
+						errorCode: envelope.error,
+						retryable: envelope.retryable,
+						nextAction: envelope.nextAction,
+						path: envelope.path,
 						action: resetAction,
-						redeemed: false,
-						error: message.slice(0, 160),
+						redeemed: resetAction === "consume" ? false : null,
+						reason: resetAction === "consume" ? "request-failed" : null,
 					});
 				}
 				if (ui.v2Enabled) {
 					return [
 						formatUiItem(ui, displayLabel),
-						`  ${formatUiKeyValue(ui, "Error", message.slice(0, 160), "danger")}`,
+						`  ${formatUiKeyValue(ui, "Error", message, "danger")}`,
 					].join("\n");
 				}
-				return [`${displayLabel}:`, `  Error: ${message.slice(0, 160)}`].join(
+				return [`${displayLabel}:`, `  Error: ${message}`].join(
 					"\n",
 				);
 			}
 		},
 	});
+	return withToolErrorEnvelope("codex-reset", definition);
 }
