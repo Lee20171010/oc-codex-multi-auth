@@ -7,8 +7,10 @@ import {
 	deduplicateUsageAccountIndices,
 	fetchCodexUsage,
 	formatResetCredits,
+	formatUsageCountdown,
 	formatUsageLimitSummary,
 	formatUsagePoolSummary,
+	mapUsageWindow,
 	formatUsageReset,
 	formatUsageWindowLabel,
 	getUsageQuotaExhaustedResetAtMs,
@@ -26,6 +28,30 @@ import {
 import { loadAccounts, saveAccounts, type AccountStorageV3 } from "../lib/storage.js";
 import { setStoragePathDirect } from "../lib/storage/state.js";
 import { formatQuotaDetailsText, type CompactQuotaStatus } from "../lib/tui-status.js";
+
+describe("usage renewal", () => {
+	it.each([
+		[(6 * 1440 + 21 * 60 + 5) * 60_000, "6d 21h"],
+		[(1440 + 30) * 60_000, "1d 30m"],
+		[2 * 1440 * 60_000, "2d"],
+		[(4 * 60 + 12) * 60_000, "4h 12m"],
+		[35 * 60_000, "35m"],
+		[20_000, "1m"],
+	])("counts %i ms down as %s", (ms, expected) => {
+		expect(formatUsageCountdown(ms)).toBe(expected);
+	});
+
+	it("carries no reset for a window nobody has drawn from", () => {
+		const window = mapUsageWindow({
+			used_percent: 0,
+			limit_window_seconds: 604_800,
+			reset_after_seconds: 604_800,
+			reset_at: Math.floor(Date.now() / 1000) + 604_800,
+		});
+		expect(window).toEqual({ usedPercent: 0, windowMinutes: 10_080, notStarted: true });
+		expect(formatUsageLimitSummary(window)).toBe("100% left");
+	});
+});
 
 describe("codex usage helpers", () => {
 	it.each([

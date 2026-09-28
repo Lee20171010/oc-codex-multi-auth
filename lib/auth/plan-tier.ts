@@ -82,7 +82,8 @@ function sanitizePlanLabel(value: string): string | undefined {
  * in `codex-list` and `team` in `codex-limits` and the TUI.
  */
 export function formatPlanType(planType: string | null | undefined): string | undefined {
-	if (!planType) return undefined;
+	// Declared `string` but read unvalidated off `/wham/usage`.
+	if (typeof planType !== "string") return undefined;
 	const normalized = planType.trim().toLowerCase();
 	if (!normalized) return undefined;
 	const known = PLAN_TYPE_LABELS.get(normalized);

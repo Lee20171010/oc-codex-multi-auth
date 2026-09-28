@@ -109,6 +109,10 @@ export const PluginConfigSchema = z.object({
 		rows: z.number().int().min(1).max(4).optional(),
 		showFor: z.enum(["always", "codex-models"]).optional(),
 	}).optional(),
+	limitsSort: z.object({
+		by: z.enum(["account", "usage", "reset"]).optional(),
+		direction: z.enum(["asc", "desc"]).optional(),
+	}).optional(),
 });
 
 export type PluginConfigFromSchema = z.infer<typeof PluginConfigSchema>;

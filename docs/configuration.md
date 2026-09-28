@@ -302,6 +302,7 @@ The sample above intentionally sets `"retryAllAccountsMaxRetries": 3` as a bound
 | `maskEmailInQuotaDetails` | `false` | also masks the active account email in the quota details dialog when `maskEmail` is enabled |
 | `quotaDisplay` | `free` | wording of every quota percentage a person reads: `free` reports the headroom left (`5h limit: 88% left`), matching how Codex itself reports a quota; `used` reports consumption instead (`5h limit: 12% used`). Covers the TUI prompt status line and quota details dialog, `codex-limits`, the standalone `limits` CLI, the interactive account check, and macOS quota notifications. Presentation only: exhaustion, rotation blocks, notification thresholds, and the status line's warning/danger colouring stay keyed on the remaining percentage, and the `usedPercent` / `leftPercent` fields in JSON output are unchanged. |
 | `quotaStatus` | `mode: active` | shape of the TUI prompt status line. `active` describes the account serving requests, `overview` describes the whole pool on one constant line, `resets` lists redeemable reset credits once nothing has headroom left. A list of screens alternates between them. File-only; no environment override. See [Pool-wide quota status](#pool-wide-quota-status). |
+| `limitsSort` | `by: account, direction: asc` | default account order of the standalone `limits` CLI. `by` is `account`, `usage` (least used first), or `reset` (earliest renewal first); `direction` is `asc` or `desc`. `--sort` and `--asc` / `--desc` override each half. File-only. See [What `limits` reports](tools-and-cli.md#what-limits-reports). |
 | `beginnerSafeMode` | `false` | enables conservative beginner-safe runtime behavior for retries and recovery |
 | `fastSession` | `false` | forces low-latency settings per request (`reasoningEffort=none/low`, `reasoningSummary=auto`, `textVerbosity=low`) |
 | `fastSessionStrategy` | `hybrid` | `hybrid` speeds simple turns and keeps full-depth for complex prompts; `always` forces fast mode every turn |
@@ -367,8 +368,9 @@ When the backend reports a fully spent 5-hour or weekly subscription window,
 the account is excluded from every model-family rotation until that window's
 reported reset. Failed or rate-limited usage queries fail open and wait for the
 next interval; they never block an account. Set `autoProtectCredits` to `false`
-to disable this periodic guard. A manual `codex-limits` or standalone `limits`
-check always persists an observed exhaustion block immediately. Quota
+to disable this periodic guard. A manual `codex-limits`, or any account the standalone `limits` reads live
+(every account under `--refresh`), persists an observed exhaustion block
+immediately. Quota
 notifications use the same poller. The 5-hour and
 weekly windows are tracked independently, and each
 threshold alerts once until that window rises above it after a reset. Each line

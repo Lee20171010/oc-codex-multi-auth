@@ -48,6 +48,8 @@ export type LimitWindow = {
 	usedPercent?: number;
 	windowMinutes?: number;
 	resetAtMs?: number;
+	/** Set only when true; see {@link isUsageWindowNotStarted}. */
+	notStarted?: boolean;
 };
 
 export type UsageRateLimit = {
@@ -85,6 +87,8 @@ export type UsageLimitPayload = {
 	usedPercent: number | null;
 	leftPercent: number | null;
 	resetAtMs: number | null;
+	/** Nothing drawn yet, so `resetAtMs` is only "now plus the window". */
+	notStarted: boolean;
 	summary: string;
 };
 
@@ -194,16 +198,51 @@ function mapUsageWindowMinutes(
 	return Math.max(1, Math.ceil(limitWindowSeconds / 60));
 }
 
+/**
+ * Whether a window has not been drawn from since it last reset.
+ *
+ * A rolling window only starts counting at its first request, so an untouched
+ * one reports `reset_after_seconds` equal to its full length and a `reset_at`
+ * of "now plus the window" that moves forward on every read. Printing that as
+ * a renewal date states a moment nothing is scheduled for. A window used even
+ * fractionally - `used_percent` can round to `0` - has a countdown shorter
+ * than its length and is started.
+ */
+export function isUsageWindowNotStarted(
+	window: UsageWindow | undefined,
+	nowMs: number = Date.now(),
+): boolean {
+	if (!window) return false;
+	const { used_percent: used, limit_window_seconds: length } = window;
+	if (used !== 0 || typeof length !== "number" || !Number.isFinite(length) || length <= 0) {
+		return false;
+	}
+	const remaining =
+		typeof window.reset_after_seconds === "number" && Number.isFinite(window.reset_after_seconds)
+			? window.reset_after_seconds
+			: typeof window.reset_at === "number" && Number.isFinite(window.reset_at)
+				? window.reset_at - nowMs / 1000
+				: undefined;
+	return remaining !== undefined && remaining >= length - 1;
+}
+
 export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 	if (window === null) return { windowMinutes: 0 };
 	if (!window) return {};
+	const usedPercent =
+		typeof window.used_percent === "number" &&
+		Number.isFinite(window.used_percent)
+			? window.used_percent
+			: undefined;
+	const windowMinutes = mapUsageWindowMinutes(window.limit_window_seconds);
+	// The reset an untouched window reports is "now plus the window", which
+	// no surface should render as a renewal, so it is not carried at all.
+	if (isUsageWindowNotStarted(window)) {
+		return { usedPercent, windowMinutes, notStarted: true };
+	}
 	return {
-		usedPercent:
-			typeof window.used_percent === "number" &&
-			Number.isFinite(window.used_percent)
-				? window.used_percent
-				: undefined,
-		windowMinutes: mapUsageWindowMinutes(window.limit_window_seconds),
+		usedPercent,
+		windowMinutes,
 		resetAtMs:
 			typeof window.reset_at === "number" && window.reset_at > 0
 				? window.reset_at * 1000
@@ -212,6 +251,42 @@ export function mapUsageWindow(window: UsageWindow | undefined): LimitWindow {
 					? Date.now() + window.reset_after_seconds * 1000
 					: undefined,
 	};
+}
+
+/**
+ * `2026-10-03 14:26:48` in local time. Seconds are printed only when the
+ * timestamp is whole seconds, which is what `reset_at` carries; a reset derived
+ * from `reset_after_seconds` inherits the request's latency, so its seconds
+ * digit would claim a precision nobody measured.
+ */
+export function formatUsageResetTimestamp(resetAtMs: number): string | undefined {
+	if (!Number.isFinite(resetAtMs) || resetAtMs <= 0) return undefined;
+	const date = new Date(resetAtMs);
+	const pad = (value: number) => String(value).padStart(2, "0");
+	const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+	const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+	return resetAtMs % 1000 === 0
+		? `${day} ${time}:${pad(date.getSeconds())}`
+		: `${day} ${time}`;
+}
+
+/**
+ * `6d 21h`, `4h 12m`, `1d 30m`, `35m`: the two largest non-zero units,
+ * floored, so a countdown never claims more time remains than does. Under a
+ * minute still reads `1m`, because a reset that has not happened yet is not
+ * zero away.
+ */
+export function formatUsageCountdown(ms: number): string | undefined {
+	if (!Number.isFinite(ms) || ms <= 0) return undefined;
+	const totalMinutes = Math.floor(ms / 60_000);
+	const parts = [
+		[Math.floor(totalMinutes / 1440), "d"],
+		[Math.floor((totalMinutes % 1440) / 60), "h"],
+		[totalMinutes % 60, "m"],
+	] as const;
+	const nonZero = parts.filter(([value]) => value > 0);
+	if (nonZero.length === 0) return "1m";
+	return nonZero.slice(0, 2).map(([value, unit]) => `${value}${unit}`).join(" ");
 }
 
 export function formatUsageLimitTitle(
@@ -250,6 +325,7 @@ export function toUsageLimitPayload(
 			typeof window.usedPercent === "number" ? window.usedPercent : null,
 		leftPercent: getUsageLeftPercent(window.usedPercent) ?? null,
 		resetAtMs: window.resetAtMs ?? null,
+		notStarted: window.notStarted === true,
 		summary: formatUsageLimitSummary(window, mode),
 	};
 }
@@ -728,6 +804,73 @@ export async function fetchCodexUsage(params: {
 		if (isCodexAbortError(error)) {
 			throw createUsageRequestTimeoutError();
 		}
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+const MAX_WORKSPACE_NAME_LENGTH = 64;
+
+/**
+ * Names of the Business workspaces the token's user belongs to, keyed by
+ * account id.
+ *
+ * `/wham/accounts/check` is the Codex backend's copy of the account list the
+ * ChatGPT web app reads from `/backend-api/accounts/check`, and unlike that one
+ * it accepts a Codex OAuth token rather than a browser session behind
+ * Cloudflare. The list covers every workspace the user is a member of, not only
+ * the one the token is bound to, so one answer can name several accounts.
+ * Personal accounts carry no name and are left out.
+ *
+ * The name is chosen by the workspace owner and printed verbatim into a line,
+ * so control characters are dropped and the length is bounded.
+ */
+export async function fetchCodexWorkspaceNames(params: {
+	accountId: string;
+	accessToken: string;
+	organizationId: string | undefined;
+	timeoutMs?: number;
+}): Promise<Map<string, string>> {
+	const headers = createCodexHeaders(undefined, params.accountId, params.accessToken, {
+		organizationId: params.organizationId,
+	});
+	headers.set("accept", "application/json");
+	const controller = new AbortController();
+	const timeout = setTimeout(
+		() => controller.abort(),
+		params.timeoutMs ?? getFetchTimeoutMs(loadPluginConfig()),
+	);
+	try {
+		const response = await fetch(`${CODEX_BASE_URL}/wham/accounts/check`, {
+			method: "GET",
+			headers,
+			signal: controller.signal,
+		});
+		if (!response.ok) {
+			const bodyText = (await response.text()).slice(0, usageErrorBodyMaxChars);
+			throw new Error(sanitizeCodexApiErrorMessage(response.status, bodyText));
+		}
+		const payload = (await response.json()) as { accounts?: unknown } | null;
+		const names = new Map<string, string>();
+		const accounts = Array.isArray(payload?.accounts) ? payload.accounts : [];
+		for (const entry of accounts) {
+			if (typeof entry !== "object" || entry === null) continue;
+			const { id, name, structure } = entry as Record<string, unknown>;
+			if (typeof id !== "string" || typeof name !== "string") continue;
+			if (structure !== undefined && structure !== "workspace") continue;
+			const cleaned = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+			if (!cleaned) continue;
+			names.set(
+				id,
+				cleaned.length > MAX_WORKSPACE_NAME_LENGTH
+					? `${cleaned.slice(0, MAX_WORKSPACE_NAME_LENGTH - 1)}…`
+					: cleaned,
+			);
+		}
+		return names;
+	} catch (error) {
+		if (isCodexAbortError(error)) throw createUsageRequestTimeoutError();
 		throw error;
 	} finally {
 		clearTimeout(timeout);

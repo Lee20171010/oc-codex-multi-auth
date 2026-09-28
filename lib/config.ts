@@ -728,6 +728,25 @@ export function getQuotaDisplay(pluginConfig: PluginConfig): QuotaDisplayMode {
 	);
 }
 
+export type LimitsSortField = "account" | "usage" | "reset";
+export type LimitsSortDirection = "asc" | "desc";
+
+/**
+ * Default account order for the standalone `limits` CLI. `--sort` and
+ * `--asc`/`--desc` on the command line override each half independently.
+ * File-only, like `quotaStatus`: a display preference belongs to a person.
+ */
+export function getLimitsSort(pluginConfig: PluginConfig): {
+	by: LimitsSortField;
+	direction: LimitsSortDirection;
+} {
+	const config = pluginConfig.limitsSort;
+	return {
+		by: pickEnum(config?.by, ["account", "usage", "reset"] as const, "account"),
+		direction: pickEnum(config?.direction, ["asc", "desc"] as const, "asc"),
+	};
+}
+
 export function getFastSession(pluginConfig: PluginConfig): boolean {
 	return resolveBooleanSetting(
 		"CODEX_AUTH_FAST_SESSION",

@@ -243,6 +243,8 @@ Defaults come from `lib/config.ts` / `lib/schemas.ts`. Environment overrides win
 | `quotaStatus.resetsMinUsedPercent` | `100` | (file only) | Exact total weighted usage threshold (0-100) for the reset-credit screen, independent of `quotaDisplay` |
 | `quotaStatus.rows` | `1` | (file only) | Ceiling on the rows the line may take (1-4). A rendering that fits on one row still takes one |
 | `quotaStatus.showFor` | `always` | (file only) | `always`, or `codex-models` to hide the line unless the session runs a model this plugin routes |
+| `limitsSort.by` | `account` | (file only) | Default order of the standalone `limits` CLI: `account`, `usage`, or `reset`; `--sort` overrides |
+| `limitsSort.direction` | `asc` | (file only) | `asc` or `desc`; `--asc` / `--desc` override |
 
 `quotaStatus` is deliberately file-only: it is a display preference belonging to
 a person, not to whichever shell started OpenCode. `resetTimes` also accepts the

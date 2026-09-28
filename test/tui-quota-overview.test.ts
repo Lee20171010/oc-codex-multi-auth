@@ -260,6 +260,8 @@ describe("overview cache round trip", () => {
 		// rendered stale rather than passing it off as current.
 		expect(result?.fetchedAt).toBe(NOW);
 		expect(result && isFreshTuiQuotaSnapshot(result, later)).toBe(false);
+		// Each account keeps its own time, so the fresh one is not aged with it.
+		expect(result?.accounts.map((account) => account.fetchedAt)).toEqual([later, NOW]);
 	});
 });
 
@@ -357,7 +359,20 @@ describe("mergeOverviewWithLatestAccount", () => {
 	it("takes the request path's newer reading of the serving account", () => {
 		const merged = mergeOverviewWithLatestAccount(snapshot(), latest);
 		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
+		expect(merged.accounts[1]!.fetchedAt).toBe(NOW + 60_000);
 		expect(merged.accounts[0]!.limits[0]!.leftPercent).toBe(0);
+	});
+
+	it("ignores a reading older than that account's own reading", () => {
+		const base = snapshot();
+		const fresher = {
+			...base,
+			accounts: base.accounts.map((account, position) =>
+				position === 1 ? { ...account, fetchedAt: NOW + 120_000 } : account,
+			),
+		};
+		const merged = mergeOverviewWithLatestAccount(fresher, latest);
+		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(60);
 	});
 
 	it("ignores a reading older than the poll", () => {

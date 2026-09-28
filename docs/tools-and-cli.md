@@ -140,7 +140,7 @@ Bin: `oc-codex-multi-auth` (also via `npx -y oc-codex-multi-auth@latest …`).
 | `doctor` | Local account/config diagnostics |
 | `status` | Account/config status |
 | `list` | List configured accounts |
-| `limits` | Live 5-hour and weekly quota usage from the usage endpoint, plus the pool total |
+| `limits` | 5-hour and weekly quota usage per account from the plugin's last readings (`--refresh` reads live), plus the pool total |
 | `dashboard` | Prints guidance (does not start a full dashboard server) |
 | `health` | Local token/account health summary |
 | `diag` | Alias for `doctor --deep` |
@@ -160,7 +160,7 @@ oc-codex-multi-auth diag
 oc-codex-multi-auth warm
 ```
 
-`warm` exits non-zero if any account failed. Disabled accounts are skipped. `limits` exits 1 when it cannot load storage or any account's usage fetch fails.
+`warm` exits non-zero if any account failed. Disabled accounts are skipped. `limits` exits 1 when it cannot load storage or any account it had to read live failed.
 
 ### What `limits` reports
 
@@ -169,14 +169,97 @@ that plan's seats is worth beside the others. The report closes with what the
 pool holds between them:
 
 ```text
+Storage:  /home/me/.opencode/oc-codex-multi-auth-accounts.json
+Accounts: 11
+Sort:     reset (asc)
+Readings: the plugin's last readings, taken 2026-09-27 13:17:22 (14m ago); --refresh reads every account live
+
 - [0] work@example.com id:c487c4
-  Weekly limit: 100% used (resets 15:14 on Sep 30)
-  Plan: pro (20x)
-  Resets: 1 banked
+  Weekly limit:     100% used
+  Renews:           2026-09-30 15:14:08 (in 3d 22h)
+  Plan:             Pro (20x)
+  Resets:           1 applicable now
+
 - [1] team@example.com id:989a40
-  Weekly limit: 79% used (resets 08:33 on Oct 01)
-  Plan: self_serve_business_prolite (5x)
-Pool: 93% used of 81x across 11 accounts
+  Business account: Example Corp
+  Weekly limit:     0% used
+  Renews:           not started (the window opens on first use)
+  Plan:             Business Premium (5x)
+  Read:             2026-09-27 13:31:05 (just now), live
+
+Pool:     93% used of 81x across 11 accounts
+```
+
+`limits` does not ask ChatGPT for anything by default. The plugin already
+polls every account's usage for the [pool status line](configuration.md#pool-wide-quota-status)
+and keeps its last readings in `oc-codex-multi-auth-tui-quota-overview.json`
+in the OpenCode state directory (`$OPENCODE_STATE_DIR`, else
+`$XDG_STATE_HOME/opencode` or `~/.local/state/opencode`), and the request
+path records its newer reading of the account serving requests beside it.
+`limits` reports those, which keeps it instant on a large pool and spares the
+pool a burst of usage requests. `Readings:` says when they were taken; an
+account read at a different moment carries its own `Read:` line.
+
+An account the plugin holds no reading for (added since its last poll, or a
+pool it has not polled) is read live, and so is every account when there is no
+snapshot at all. `--refresh` reads every account live. A live read of the whole
+pool is written back as the plugin's snapshot, so the status line and the next
+`limits` start from it. Nothing is written for a `--tag` subset or a
+`--config-path` store, when an account failed to read and has no earlier
+reading to keep, when the existing snapshot describes a different pool, or
+when another OpenCode process rewrote it during the run. An account is matched
+to its snapshot entry by credential fingerprint only, so an account whose token
+rotated since the plugin's last poll is read live. A reading from the snapshot has no credit
+balance, and its reset-credit line shows only the redeemable count the snapshot
+keeps. `--json` marks each account's `source` (`cache` or `live`) and `readAt`,
+and the whole report's `readings`.
+
+Every value in an account's block starts in one column, shared by all
+accounts, and the header and pool total share another.
+
+A Business seat names the workspace it belongs to, as its owner titled it in
+ChatGPT. The name comes from the Codex backend's account list
+(`/wham/accounts/check`), which one request per login answers for every
+workspace that login is a member of. Names are remembered in
+`oc-codex-multi-auth-workspace-names.json` beside the quota snapshot, so an
+account is asked about only the first time it is seen or under `--refresh`. A
+personal account has no workspace name and gets no such line, and a failed or
+slow lookup (it gives up after 5 seconds) only drops the line. `--json` carries
+it as `workspaceName`.
+
+Each window's renewal is printed on the line below it as a local timestamp and
+a countdown. Seconds are shown only when the backend reported an exact reset
+time. A window that has not been drawn from since it last reset reports a
+reset of "now plus the window length" that moves forward on every read, so it
+is shown as `not started` instead of a date nothing is scheduled for. A renewal
+that has already passed since a cached reading was taken says so.
+
+On a terminal the percentage is coloured by how much of the window is used:
+green below 60%, yellow from 60%, orange from 80%, red from 99%. The colour
+follows consumption whichever way `quotaDisplay` words the number. `NO_COLOR`
+turns it off and `FORCE_COLOR` turns it on without a terminal.
+
+Accounts are listed by account number. `--sort` changes the order:
+
+| Flag | Order |
+| --- | --- |
+| `--sort account` | account number (default) |
+| `--sort usage` | least used first |
+| `--sort reset` | earliest renewal first |
+| `--asc` / `--desc` | direction for any of the above (default `--asc`) |
+
+Both are judged by the account's governing window, the one with the least
+headroom, since that is the one that stops a request; between two equally spent
+windows the later reset governs, because the account is usable only once both
+have renewed. An account with no known value for the chosen key (a failed
+fetch, a window that has not started) sorts last in either direction. To make an order the
+default, set `limitsSort` in `~/.opencode/openai-codex-auth-config.json`; the
+flags still override each half:
+
+```json
+{
+  "limitsSort": { "by": "reset", "direction": "asc" }
+}
 ```
 
 The ratio is appended only when the plan publishes one, so Free, Go and

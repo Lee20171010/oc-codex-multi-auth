@@ -158,7 +158,7 @@ export async function fetchTuiQuotaOverview(params: {
 		);
 		for (const [position, result] of results.entries()) {
 			if (result) {
-				accounts.push(result);
+				accounts.push({ ...result, fetchedAt: now });
 				continue;
 			}
 			// A failed fetch must not drop the account out of the snapshot: the
@@ -182,7 +182,10 @@ export async function fetchTuiQuotaOverview(params: {
 									createUsageAccountFingerprint(account),
 						);
 			if (previous) {
-				accounts.push(previous);
+				accounts.push({
+					...previous,
+					fetchedAt: previous.fetchedAt ?? cached?.fetchedAt,
+				});
 				carriedOver = true;
 			}
 		}
@@ -235,12 +238,18 @@ export function mergeOverviewWithLatestAccount(
 	let merged = false;
 	const accounts = snapshot.accounts.map((account) => {
 		if (account.fingerprint !== latest.fingerprint) return account;
+		// The snapshot's own time is its oldest reading, so the account's own
+		// time is what the header reading has to beat.
+		if (account.fetchedAt !== undefined && latest.fetchedAt <= account.fetchedAt) {
+			return account;
+		}
 		merged = true;
 		return {
 			...account,
 			planType: latest.planType ?? account.planType,
 			email: account.email ?? (latest.accountEmail?.trim() || undefined),
 			limits: latest.limits,
+			fetchedAt: latest.fetchedAt,
 		};
 	});
 	return merged ? { ...snapshot, accounts } : snapshot;

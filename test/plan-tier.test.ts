@@ -51,6 +51,10 @@ describe("formatPlanType", () => {
 		expect(formatPlanType("   ")).toBeUndefined();
 	});
 
+	it("returns undefined for a non-string plan type read off the wire", () => {
+		expect(formatPlanType(42 as unknown as string)).toBeUndefined();
+	});
+
 	/**
 	 * Correlation table. Every `chatgpt_plan_type` below was read from a real
 	 * ChatGPT OAuth access token and independently confirmed against the same

@@ -50,11 +50,19 @@ function parseStandaloneArgs(argv) {
 		fix: false,
 		tag: undefined,
 		configPath: undefined,
+		sort: undefined,
+		direction: undefined,
+		refresh: false,
 		help: false,
 	};
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
 		if (arg === "--json") options.json = true;
+		else if (arg === "--refresh") options.refresh = true;
+		else if (arg === "--sort") options.sort = parseLimitsSortField(argv[++index]);
+		else if (arg.startsWith("--sort=")) options.sort = parseLimitsSortField(arg.slice("--sort=".length));
+		else if (arg === "--asc") options.direction = "asc";
+		else if (arg === "--desc") options.direction = "desc";
 		else if (arg === "--include-sensitive") options.includeSensitive = true;
 		else if (arg === "--deep") options.deep = true;
 		else if (arg === "--fix") options.fix = true;
@@ -66,6 +74,23 @@ function parseStandaloneArgs(argv) {
 		else throw new Error(`Unknown option for standalone command: ${arg}`);
 	}
 	return options;
+}
+
+const LIMITS_SORT_ALIASES = new Map([
+	["account", "account"],
+	["number", "account"],
+	["usage", "usage"],
+	["used", "usage"],
+	["reset", "reset"],
+	["renewal", "reset"],
+]);
+
+function parseLimitsSortField(value) {
+	const field = LIMITS_SORT_ALIASES.get(String(value ?? "").trim().toLowerCase());
+	if (!field) {
+		throw new Error(`Unknown --sort value: ${value ?? "(missing)"} (expected account, usage, or reset)`);
+	}
+	return field;
 }
 
 function getManagedPackageNames() {
@@ -98,11 +123,15 @@ function printHelp() {
 		"  doctor              Run local account/config diagnostics\n" +
 		"  status              Show account/config status\n" +
 		"  list                List configured accounts\n" +
-		"  limits              Show live 5-hour and weekly usage for each account\n" +
+		"  limits              Show 5-hour and weekly usage for each account\n" +
 		"  dashboard           Print dashboard guidance\n" +
 		"  health              Check local token/account health\n" +
 		"  diag                Alias for doctor --deep\n" +
 		"  warm                Open every enabled account's usage window now (one request each)\n\n" +
+		"Limits options:\n" +
+		"  --sort account|usage|reset  Order accounts by number, by usage, or by next reset\n" +
+		"  --asc, --desc               Direction (default --asc: lowest number, least used, earliest reset)\n" +
+		"  --refresh                   Read every account live instead of the plugin's last readings\n\n" +
 		`Installer usage: ${PACKAGE_NAME} install [--plugin-only|--modern|--full|--legacy] [--dry-run] [--no-cache-clear]\n` +
 		`Updater usage:   ${PACKAGE_NAME} update [--dry-run]\n\n` +
 		"Default behavior:\n" +
@@ -954,22 +983,47 @@ async function loadWarmRuntime(env) {
 }
 
 async function loadLimitsRuntime(env) {
-	const [storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod] =
-		await loadDistModules(
-			[
-				"storage.js",
-				"codex-usage.js",
-				"shutdown.js",
-				"logger.js",
-				"config.js",
-				"plan-allotment.js",
-			],
-			"limits",
-		);
+	const [
+		storageMod,
+		usageMod,
+		shutdownMod,
+		loggerMod,
+		configMod,
+		planMod,
+		planTierMod,
+		quotaCacheMod,
+		quotaOverviewMod,
+		themeMod,
+	] = await loadDistModules(
+		[
+			"storage.js",
+			"codex-usage.js",
+			"shutdown.js",
+			"logger.js",
+			"config.js",
+			"plan-allotment.js",
+			"auth/plan-tier.js",
+			"tui-quota-cache.js",
+			"tui-quota-overview.js",
+			"ui/theme.js",
+		],
+		"limits",
+	);
 	// Fetching usage can refresh (and therefore persist) a token, so the same
 	// process-owns-termination rule as `warm` applies.
 	shutdownMod.setShutdownOwnsProcess(true);
-	return { storageMod, usageMod, shutdownMod, loggerMod, configMod, planMod };
+	return {
+		storageMod,
+		usageMod,
+		shutdownMod,
+		loggerMod,
+		configMod,
+		planMod,
+		planTierMod,
+		quotaCacheMod,
+		quotaOverviewMod,
+		themeMod,
+	};
 }
 
 export async function runWarmCommand(parsed, options = {}) {
@@ -1112,10 +1166,13 @@ function printWarmResult(payload, json) {
 }
 
 /**
- * `limits` — show live 5-hour and weekly Codex usage per account (#209).
+ * `limits` — show 5-hour and weekly Codex usage per account (#209).
  *
- * Reuses the compiled `codex-usage` runtime so the CLI reports the same windows
- * as the in-conversation `codex-limits` tool. The locally persisted
+ * Reports the plugin's own last reading of each account by default, and reads
+ * an account live only when the plugin holds none for it or under
+ * `--refresh`. A live read goes through the compiled `codex-usage` runtime, so
+ * the CLI reports the same windows as the in-conversation `codex-limits`
+ * tool. The locally persisted
  * `rateLimitResetTimes` is carried in the payload as well: it is the only
  * rate-limit state available for an account whose live fetch fails, and
  * `--json` consumers of the previous behavior still find the field.
@@ -1133,8 +1190,31 @@ export async function runLimitsCommand(parsed, options = {}) {
 		return { exitCode: 1, action: "limits", storagePath };
 	}
 
-	const { storageMod, usageMod, loggerMod, configMod, planMod } = runtime;
-	const quotaDisplay = configMod.getQuotaDisplay(configMod.loadPluginConfig());
+	const {
+		storageMod,
+		usageMod,
+		loggerMod,
+		configMod,
+		planMod,
+		planTierMod,
+		quotaCacheMod,
+		quotaOverviewMod,
+		themeMod,
+	} = runtime;
+	const pluginConfig = configMod.loadPluginConfig();
+	const quotaDisplay = configMod.getQuotaDisplay(pluginConfig);
+	const configuredSort = configMod.getLimitsSort?.(pluginConfig) ?? { by: "account", direction: "asc" };
+	const sort = {
+		by: parsed.sort ?? configuredSort.by,
+		direction: parsed.direction ?? configuredSort.direction,
+	};
+	const render = {
+		usageMod,
+		quotaDisplay,
+		color: !parsed.json && (themeMod?.shouldUseColor?.(process.stdout, env) ?? false),
+	};
+	const planNameOf = (planType) =>
+		planTierMod?.formatPlanType?.(planType) ?? (typeof planType === "string" ? planType : null);
 	// The badge is decoration; the report is the point. A runtime that arrived
 	// without the plan module drops the `(5x)` rather than failing the account
 	// it was attached to - the per-account catch below would otherwise turn one
@@ -1173,6 +1253,8 @@ export async function runLimitsCommand(parsed, options = {}) {
 			// Same shape as a populated pool: `null` when nothing is readable.
 			pool: null,
 			poolSummary: null,
+			readings: null,
+			sort,
 			accounts: [],
 			message: "No accounts configured.",
 			nextAction: "Run opencode auth login.",
@@ -1189,12 +1271,87 @@ export async function runLimitsCommand(parsed, options = {}) {
 	// could have its refreshed credentials persisted.
 	const normalizedTag =
 		typeof parsed.tag === "string" ? parsed.tag.trim().toLowerCase() : "";
+	const stateDir = resolveOpenCodeStateDir(env);
+	const now = Date.now();
+	// The plugin already polls every account's usage for the pool status line
+	// and keeps the result on disk. Reading that instead of asking upstream
+	// again is what makes this report instant, and it spares a large pool a
+	// burst of usage requests. `--refresh` still reads every account live.
+	const previous = await readPluginQuotaReadings(quotaCacheMod, quotaOverviewMod, stateDir);
+	const cached = parsed.refresh ? undefined : previous;
 	const results = [];
 	// Only accounts that answered contribute to the pool total. An account that
 	// failed to report is left out entirely rather than counted as full or as
 	// empty, since either would state capacity nobody measured.
 	const poolMembers = [];
+	const sortKeys = new Map();
+	const entryAccounts = new Map();
+	const entryWorkspaceIds = new Map();
+	const liveOverviewAccounts = [];
 	let failedCount = 0;
+
+	const readLive = async (account, index, entry) => {
+		const { accessToken } = await usageMod.ensureCodexUsageAccessToken({ storage, account });
+		const accountId = usageMod.resolveCodexUsageAccountId({ account, accessToken });
+		if (!accountId) {
+			throw new Error("could not resolve account id (re-login may be required)");
+		}
+		entryWorkspaceIds.set(entry, accountId);
+		const usage = usageMod.parseCodexUsagePayload(
+			await usageMod.fetchCodexUsage({
+				accountId,
+				accessToken,
+				organizationId: account.organizationId,
+			}),
+			quotaDisplay,
+		);
+		const quotaExhaustedResetAtMs = usageMod.getUsageQuotaExhaustedResetAtMs([
+			usage.primary,
+			usage.secondary,
+		]);
+		if (quotaExhaustedResetAtMs !== undefined) {
+			try {
+				await usageMod.persistUsageQuotaExhaustion(account, quotaExhaustedResetAtMs);
+			} catch (error) {
+				loggerMod.logWarn(
+					`[${PACKAGE_NAME}] Failed to persist exhausted usage quota: ${formatErrorForLog(error)}`,
+				);
+			}
+		}
+		if (usageMod.isUsageQuotaRecovered([usage.primary, usage.secondary])) {
+			try {
+				await usageMod.persistUsageQuotaRecovery(account);
+			} catch {
+				loggerMod.logWarn("Failed to persist recovered usage quota");
+			}
+		}
+		const overviewAccount = quotaOverviewMod?.toOverviewAccount?.({
+			// Taken after the fetch: a refresh above rotates the token the
+			// fingerprint is derived from.
+			fingerprint: usageMod.createUsageAccountFingerprint(account),
+			index: index + 1,
+			usage,
+			email: account.email,
+			label: account.accountLabel,
+		});
+		if (overviewAccount) liveOverviewAccounts.push({ ...overviewAccount, fetchedAt: now });
+		return {
+			source: "live",
+			readAt: now,
+			planType: usage.planType,
+			windows: [usage.primary, usage.secondary],
+			limits: usage.limits,
+			credits: usage.credits,
+			// Raw counts stay in `resetCredits` and the rendered line lives in
+			// its own field: embedding the English summary inside the counts
+			// object would make `--json` consumers parse presentation text to
+			// reach a number that is already beside it.
+			resetCredits: usage.resetCredits,
+			resetCreditsSummary: usage.resetCredits
+				? usageMod.formatResetCredits(usage.resetCredits)
+				: null,
+		};
+	};
 
 	for (const index of indices) {
 		const account = accounts[index];
@@ -1215,57 +1372,31 @@ export async function runLimitsCommand(parsed, options = {}) {
 			rateLimitResetTimes: account.rateLimitResetTimes ?? {},
 			quotaExhaustedUntil: account.quotaExhaustedUntil,
 		};
+		entryAccounts.set(entry, account);
+		entryWorkspaceIds.set(entry, account.accountId);
 		try {
-			const { accessToken } = await usageMod.ensureCodexUsageAccessToken({ storage, account });
-			const accountId = usageMod.resolveCodexUsageAccountId({ account, accessToken });
-			if (!accountId) {
-				throw new Error("could not resolve account id (re-login may be required)");
-			}
-			const usage = usageMod.parseCodexUsagePayload(
-				await usageMod.fetchCodexUsage({
-					accountId,
-					accessToken,
-					organizationId: account.organizationId,
-				}),
-				quotaDisplay,
-			);
-			const quotaExhaustedResetAtMs = usageMod.getUsageQuotaExhaustedResetAtMs([
-				usage.primary,
-				usage.secondary,
-			]);
-			if (quotaExhaustedResetAtMs !== undefined) {
-				try {
-					await usageMod.persistUsageQuotaExhaustion(account, quotaExhaustedResetAtMs);
-				} catch (error) {
-					loggerMod.logWarn(
-						`[${PACKAGE_NAME}] Failed to persist exhausted usage quota: ${formatErrorForLog(error)}`,
-					);
-				}
-			}
-			if (usageMod.isUsageQuotaRecovered([usage.primary, usage.secondary])) {
-				try {
-					await usageMod.persistUsageQuotaRecovery(account);
-				} catch {
-					loggerMod.logWarn("Failed to persist recovered usage quota");
-				}
-			}
+			// An account the plugin has no reading for (added since its last
+			// poll, or a different pool than the one it polled) is read live
+			// rather than left blank.
+			const cachedAccount = cached && findPluginQuotaReading(cached, account, usageMod);
+			const reading = cachedAccount
+				? toCachedLimitsReading(cachedAccount, usageMod, quotaDisplay)
+				: await readLive(account, index, entry);
 			poolMembers.push({
-				planType: usage.planType,
-				primary: usage.primary,
-				secondary: usage.secondary,
+				planType: reading.planType,
+				primary: reading.windows[0] ?? {},
+				secondary: reading.windows[1] ?? {},
 			});
-			entry.planType = usage.planType;
-			entry.planMultiplier = planMultiplierOf(usage.planType);
-			entry.credits = usage.credits;
-			// Raw counts stay in `resetCredits` and the rendered line lives in
-			// its own field: embedding the English summary inside the counts
-			// object would make `--json` consumers parse presentation text to
-			// reach a number that is already beside it.
-			entry.resetCredits = usage.resetCredits;
-			entry.resetCreditsSummary = usage.resetCredits
-				? usageMod.formatResetCredits(usage.resetCredits)
-				: null;
-			entry.limits = usage.limits;
+			sortKeys.set(entry, readLimitsSortKeys(usageMod, reading.windows));
+			entry.source = reading.source;
+			entry.readAt = reading.readAt;
+			entry.planType = reading.planType;
+			entry.planName = planNameOf(reading.planType);
+			entry.planMultiplier = planMultiplierOf(reading.planType);
+			entry.credits = reading.credits;
+			entry.resetCredits = reading.resetCredits;
+			entry.resetCreditsSummary = reading.resetCreditsSummary;
+			entry.limits = reading.limits;
 		} catch (error) {
 			// `ensureCodexUsageAccessToken` can surface a raw OAuth refresh
 			// response, so the message is redacted through the logger's token
@@ -1277,6 +1408,72 @@ export async function runLimitsCommand(parsed, options = {}) {
 		results.push(entry);
 	}
 
+	await attachWorkspaceNames({
+		results,
+		entryAccounts,
+		entryWorkspaceIds,
+		stateDir,
+		refresh: parsed.refresh,
+		lookup: async (account, readLive) => {
+			// An account reported from the plugin's readings is not worth a
+			// token refresh just to name it: only a stored token still valid
+			// is used, and the name waits for a run that reads it live.
+			const accessToken = readLive
+				? (await usageMod.ensureCodexUsageAccessToken({ storage, account })).accessToken
+				: typeof account.accessToken === "string" && account.expiresAt > Date.now()
+					? account.accessToken
+					: undefined;
+			if (!accessToken) return undefined;
+			const accountId = usageMod.resolveCodexUsageAccountId({ account, accessToken });
+			if (!accountId) throw new Error("could not resolve account id");
+			return usageMod.fetchCodexWorkspaceNames({
+				accountId,
+				accessToken,
+				organizationId: account.organizationId,
+				timeoutMs: WORKSPACE_NAME_LOOKUP_TIMEOUT_MS,
+			});
+		},
+		warn: (message) => loggerMod.logWarn(`[${PACKAGE_NAME}] ${loggerMod.maskString(message)}`),
+	});
+
+	// Hand a full live read back to the plugin, so its status line and the next
+	// `limits` see it too. Only a read of the plugin's own pool qualifies: a
+	// `--tag` subset would drop every other account from the snapshot, and a
+	// `--config-path` store is not the pool the status line describes.
+	const allLive = results.every((entry) => entry.source !== "cache");
+	if (!normalizedTag && !parsed.configPath && allLive && liveOverviewAccounts.length > 0) {
+		try {
+			await writePluginQuotaReadings({
+				quotaCacheMod,
+				stateDir,
+				now,
+				live: liveOverviewAccounts,
+				previous,
+				pool: indices.map((index) => ({ index, account: accounts[index] })).filter(({ account }) => account),
+				usageMod,
+			});
+		} catch (error) {
+			loggerMod.logWarn(
+				`[${PACKAGE_NAME}] Failed to cache the pool quota snapshot: ${formatErrorForLog(error)}`,
+			);
+		}
+	}
+
+	const cachedEntries = results.filter((entry) => entry.source === "cache");
+	const readings = results.some((entry) => entry.source)
+		? {
+			source: cachedEntries.length === 0
+				? "live"
+				: cachedEntries.length === results.filter((entry) => entry.source).length
+					? "cache"
+					: "mixed",
+			// The newest reading names the report; any account read at another
+			// moment carries its own time.
+			readAt: cachedEntries.length === 0
+				? now
+				: Math.max(...cachedEntries.map((entry) => entry.readAt)),
+		}
+		: null;
 	const pool = usageMod.summarizeUsagePool(poolMembers);
 	const payload = {
 		command: "limits",
@@ -1296,49 +1493,421 @@ export async function runLimitsCommand(parsed, options = {}) {
 		poolSummary: pool
 			? usageMod.formatUsagePoolSummary(pool, quotaDisplay)
 			: null,
-		accounts: results,
+		readings,
+		sort,
+		accounts: sortLimitsEntries(results, sortKeys, sort),
 	};
-	printLimitsResult(payload, parsed.json);
+	printLimitsResult(payload, parsed.json, render);
 	return { exitCode: failedCount > 0 ? 1 : 0, action: "limits", storagePath };
 }
 
-function printLimitsResult(payload, json) {
+/** Where OpenCode keeps its state, and so where the plugin's quota caches live. */
+function resolveOpenCodeStateDir(env) {
+	const explicit = env.OPENCODE_STATE_DIR?.trim();
+	if (explicit) return explicit;
+	const stateHome = env.XDG_STATE_HOME?.trim() || join(resolveHomeDirectory(env), ".local", "state");
+	return join(stateHome, "opencode");
+}
+
+/**
+ * The plugin's last reading of the pool: the snapshot its status line polls,
+ * with the request path's newer reading of the serving account folded in.
+ */
+async function readPluginQuotaReadings(quotaCacheMod, quotaOverviewMod, stateDir) {
+	if (!quotaCacheMod?.readTuiQuotaOverviewSnapshot) return undefined;
+	const raw = await quotaCacheMod.readTuiQuotaOverviewSnapshot(
+		quotaCacheMod.getTuiQuotaOverviewCachePath(stateDir),
+	);
+	if (!raw) return undefined;
+	const latest = await quotaCacheMod.readTuiQuotaSnapshot(
+		quotaCacheMod.getTuiQuotaCachePath(stateDir),
+	);
+	const snapshot = quotaOverviewMod?.mergeOverviewWithLatestAccount?.(raw, latest) ?? raw;
+	return { raw, snapshot };
+}
+
+/**
+ * Pair an account with its entry in a plugin snapshot, by the credential
+ * fingerprint alone. Pool position and email do not identify an account: one
+ * email can hold a personal account and several workspace seats, so a looser
+ * match could report one seat's quota as another's. An account whose token
+ * has rotated since the plugin's poll is simply read live.
+ */
+function findPluginQuotaEntry(snapshot, account, usageMod) {
+	const fingerprint = usageMod.createUsageAccountFingerprint(account);
+	return snapshot.accounts.find((candidate) => candidate.fingerprint === fingerprint);
+}
+
+function findPluginQuotaReading(readings, account, usageMod) {
+	const found = findPluginQuotaEntry(readings.snapshot, account, usageMod);
+	if (!found) return undefined;
+	return { account: found, readAt: found.fetchedAt ?? readings.snapshot.fetchedAt };
+}
+
+/**
+ * A window nobody has drawn from reports "now plus the window" as its reset.
+ * The plugin now drops that reset, but a snapshot an older build wrote still
+ * carries it, so it is recognized by lying a whole window after the reading.
+ */
+function isCachedWindowNotStarted(limit, readAt) {
+	if (limit.usedPercent !== 0) return false;
+	if (limit.resetAtMs === undefined) return true;
+	const windowMs = (limit.windowMinutes ?? 0) * 60_000;
+	return windowMs > 0 && limit.resetAtMs - readAt >= windowMs - 60_000;
+}
+
+function toCachedLimitsReading(reading, usageMod, quotaDisplay) {
+	const windows = reading.account.limits.map((limit) => {
+		const usedPercent =
+			typeof limit.usedPercent === "number"
+				? limit.usedPercent
+				: typeof limit.leftPercent === "number"
+					? 100 - limit.leftPercent
+					: undefined;
+		const window = { usedPercent, windowMinutes: limit.windowMinutes };
+		if (isCachedWindowNotStarted({ ...limit, usedPercent }, reading.readAt)) {
+			return { ...window, notStarted: true };
+		}
+		return { ...window, resetAtMs: limit.resetAtMs };
+	});
+	const count = reading.account.resetCredits;
+	const applicable = reading.account.resetCreditsApplicable;
+	return {
+		source: "cache",
+		readAt: reading.readAt,
+		planType: reading.account.planType ?? null,
+		windows,
+		limits: windows.map((window) =>
+			usageMod.toUsageLimitPayload(
+				usageMod.formatUsageLimitTitle(window.windowMinutes),
+				window,
+				quotaDisplay,
+			),
+		),
+		// The snapshot keeps neither the credit balance nor the banked total
+		// beside the redeemable count, so only what it does keep is reported.
+		credits: null,
+		resetCredits: null,
+		resetCreditsSummary:
+			typeof count === "number" && count > 0
+				? `${count} ${typeof applicable === "number" ? "applicable now" : "banked"}`
+				: null,
+	};
+}
+
+/**
+ * Write a live read of the whole pool as the plugin's snapshot, in the shape
+ * its poller writes. The file is shared by every OpenCode window on the
+ * machine, so it is written only when the result is at least as complete and
+ * as current as what it replaces:
+ *
+ * - an account this run failed to read keeps its previous entry, and the
+ *   snapshot then keeps the older time, exactly as the poller does; an account
+ *   with no previous entry to keep means no write, because a snapshot missing
+ *   an account would judge the pool on a subset;
+ * - a previous snapshot that describes a different pool is left alone, judged
+ *   by fingerprint or by pool position and email, since a rotated token
+ *   changes a fingerprint without changing the pool;
+ * - a snapshot another process wrote while this run was reading is left
+ *   alone, since it is as new as this one or newer.
+ */
+async function writePluginQuotaReadings({ quotaCacheMod, stateDir, now, live, previous, pool, usageMod }) {
+	if (!quotaCacheMod?.writeTuiQuotaOverviewSnapshot) return;
+	const samePoolAs = (entry) =>
+		pool.some(({ index, account }) =>
+			entry.fingerprint === usageMod.createUsageAccountFingerprint(account) ||
+			(entry.index === index + 1 &&
+				typeof account.email === "string" &&
+				entry.email?.trim().toLowerCase() === account.email.trim().toLowerCase()),
+		);
+	if (previous && !previous.raw.accounts.every(samePoolAs)) return;
+	const accounts = [...live];
+	let carriedOver = false;
+	for (const { index, account } of pool) {
+		if (accounts.some((entry) => entry.index === index + 1)) continue;
+		const kept = previous && findPluginQuotaEntry(previous.raw, account, usageMod);
+		if (!kept) return;
+		accounts.push({ ...kept, fetchedAt: kept.fetchedAt ?? previous.raw.fetchedAt });
+		carriedOver = true;
+	}
+	accounts.sort((left, right) => left.index - right.index);
+	const path = quotaCacheMod.getTuiQuotaOverviewCachePath(stateDir);
+	const current = await quotaCacheMod.readTuiQuotaOverviewSnapshot(path);
+	if (JSON.stringify(current) !== JSON.stringify(previous?.raw)) return;
+	await quotaCacheMod.writeTuiQuotaOverviewSnapshot(
+		{
+			version: quotaCacheMod.TUI_QUOTA_CACHE_VERSION,
+			fetchedAt: carriedOver && previous ? Math.min(previous.raw.fetchedAt, now) : now,
+			accounts,
+		},
+		path,
+	);
+}
+
+const WORKSPACE_NAME_CACHE_FILE = "oc-codex-multi-auth-workspace-names.json";
+const WORKSPACE_NAME_CACHE_VERSION = 1;
+// The name is decoration, so a slow lookup gives up long before a usage fetch
+// would.
+const WORKSPACE_NAME_LOOKUP_TIMEOUT_MS = 5_000;
+
+async function readWorkspaceNameCache(stateDir) {
+	const names = new Map();
+	try {
+		const parsed = JSON.parse(await readFile(join(stateDir, WORKSPACE_NAME_CACHE_FILE), "utf-8"));
+		if (parsed?.version !== WORKSPACE_NAME_CACHE_VERSION || typeof parsed.accounts !== "object") {
+			return names;
+		}
+		for (const [id, record] of Object.entries(parsed.accounts ?? {})) {
+			const name = record?.name;
+			if (name === null) names.set(id, null);
+			else if (typeof name === "string") {
+				names.set(id, name.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim() || null);
+			}
+		}
+	} catch {
+		// A missing or unreadable cache is an empty one.
+	}
+	return names;
+}
+
+async function writeWorkspaceNameCache(stateDir, names, now) {
+	const accounts = Object.fromEntries(
+		[...names].map(([id, name]) => [id, { name, checkedAt: now }]),
+	);
+	await writeFileAtomic(
+		join(stateDir, WORKSPACE_NAME_CACHE_FILE),
+		`${JSON.stringify({ version: WORKSPACE_NAME_CACHE_VERSION, accounts }, null, 2)}\n`,
+	);
+}
+
+/**
+ * Name the Business workspace each account belongs to.
+ *
+ * Names are remembered on disk, because a workspace is renamed far more
+ * rarely than `limits` is run: an account is asked about only the first time
+ * it is seen, or under `--refresh`. One answer lists every workspace the login
+ * is a member of, so an id another account already named is not asked about
+ * again, and a personal account is remembered as having no name. The lookup
+ * is decoration: a failure only drops the line.
+ */
+async function attachWorkspaceNames({ results, entryAccounts, entryWorkspaceIds, stateDir, refresh, lookup, warn }) {
+	const known = refresh ? new Map() : await readWorkspaceNameCache(stateDir);
+	let changed = false;
+	for (const entry of results) {
+		const workspaceId = entryWorkspaceIds.get(entry);
+		if (!workspaceId || known.has(workspaceId) || entry.error) continue;
+		try {
+			const names = await lookup(entryAccounts.get(entry), entry.source === "live");
+			if (!names) continue;
+			for (const [id, name] of names) known.set(id, name);
+			if (!known.has(workspaceId)) known.set(workspaceId, null);
+			changed = true;
+		} catch (error) {
+			warn(`Failed to read workspace names: ${formatErrorForLog(error)}`);
+		}
+	}
+	for (const entry of results) {
+		const workspaceId = entryWorkspaceIds.get(entry);
+		entry.workspaceName = (workspaceId && known.get(workspaceId)) ?? null;
+	}
+	if (!changed) return;
+	try {
+		await writeWorkspaceNameCache(stateDir, known, Date.now());
+	} catch (error) {
+		warn(`Failed to cache workspace names: ${formatErrorForLog(error)}`);
+	}
+}
+
+/**
+ * What `--sort usage` and `--sort reset` compare: the account's governing
+ * window, the one with the least headroom, since that is the one that stops a
+ * request. Ties go to the later reset, so an account with both windows spent
+ * is ranked by when it actually becomes usable again. Only the two windows
+ * that govern ordinary requests count, matching the pool total, and a window
+ * that has not started has no renewal to rank by.
+ */
+function readLimitsSortKeys(usageMod, windows) {
+	let governing;
+	for (const window of windows) {
+		if (!usageMod.hasUsageWindow(window) || !Number.isFinite(window.usedPercent)) continue;
+		if (
+			!governing ||
+			window.usedPercent > governing.usedPercent ||
+			(window.usedPercent === governing.usedPercent &&
+				(window.resetAtMs ?? -Infinity) > (governing.resetAtMs ?? -Infinity))
+		) {
+			governing = window;
+		}
+	}
+	return {
+		usedPercent: governing?.usedPercent,
+		resetAtMs: governing && !governing.notStarted && Number.isFinite(governing.resetAtMs)
+			? governing.resetAtMs
+			: undefined,
+	};
+}
+
+/**
+ * Accounts whose key is unknown (a failed fetch, a window not yet started)
+ * sort last in either direction, and ties fall back to the account number so
+ * the order is stable between runs.
+ */
+function sortLimitsEntries(entries, sortKeys, sort) {
+	const keyOf = (entry) => {
+		if (sort.by === "account") return entry.index;
+		const keys = sortKeys.get(entry);
+		return sort.by === "usage" ? keys?.usedPercent : keys?.resetAtMs;
+	};
+	const direction = sort.direction === "desc" ? -1 : 1;
+	return [...entries].sort((left, right) => {
+		const leftKey = keyOf(left);
+		const rightKey = keyOf(right);
+		if (leftKey === undefined && rightKey !== undefined) return 1;
+		if (rightKey === undefined && leftKey !== undefined) return -1;
+		if (leftKey !== undefined && leftKey !== rightKey) {
+			return direction * (leftKey - rightKey);
+		}
+		return left.index - right.index;
+	});
+}
+
+const LIMITS_USAGE_COLORS = [
+	[99, "\u001b[31m"],
+	[80, "\u001b[38;5;208m"],
+	[60, "\u001b[33m"],
+	[0, "\u001b[32m"],
+];
+
+/**
+ * Colour keyed on consumption whatever `quotaDisplay` words it as. It follows
+ * the rounded figure printed beside it, so `99% used` is never shown orange.
+ */
+function colorLimitsPercent(text, usedPercent, render) {
+	if (!render?.color) return text;
+	const code = LIMITS_USAGE_COLORS.find(([floor]) => usedPercent >= floor)?.[1];
+	return code ? `${code}${text}\u001b[0m` : text;
+}
+
+function formatLimitsPercent(limit, render) {
+	if (typeof limit.leftPercent !== "number") return "unavailable";
+	const mode = render?.quotaDisplay ?? "free";
+	const usedPercent = 100 - limit.leftPercent;
+	const text = mode === "used" ? `${usedPercent}% used` : `${limit.leftPercent}% left`;
+	return colorLimitsPercent(text, usedPercent, render);
+}
+
+function formatLimitsRenewal(limit, render, now) {
+	if (limit.notStarted) return "not started (the window opens on first use)";
+	const usageMod = render?.usageMod;
+	if (!Number.isFinite(limit.resetAtMs) || !usageMod?.formatUsageResetTimestamp) return undefined;
+	const at = usageMod.formatUsageResetTimestamp(limit.resetAtMs);
+	if (!at) return undefined;
+	if (limit.resetAtMs <= now) return `${at} (passed since this reading)`;
+	const countdown = usageMod.formatUsageCountdown(limit.resetAtMs - now);
+	return countdown ? `${at} (in ${countdown})` : at;
+}
+
+/** `2026-09-27 13:17:22 (14m ago)`. */
+function formatLimitsReadTime(readAt, render, now) {
+	const usageMod = render?.usageMod;
+	if (!Number.isFinite(readAt) || !usageMod?.formatUsageResetTimestamp) return undefined;
+	const at = usageMod.formatUsageResetTimestamp(Math.floor(readAt / 1000) * 1000);
+	const age = now - readAt >= 60_000 ? `${usageMod.formatUsageCountdown(now - readAt)} ago` : "just now";
+	return `${at} (${age})`;
+}
+
+function describeLimitsReadings(readings, render, now) {
+	const at = readings && formatLimitsReadTime(readings.readAt, render, now);
+	if (!at) return undefined;
+	if (readings.source === "live") return `read live at ${at}`;
+	return `the plugin's last readings, taken ${at}; --refresh reads every account live`;
+}
+
+function buildLimitsAccountRows(account, render, now, readings) {
+	const rows = [];
+	if (account.workspaceName) rows.push(["Business account", account.workspaceName]);
+	if (account.error) {
+		rows.push(["Error", account.error]);
+		return rows;
+	}
+	for (const limit of account.limits ?? []) {
+		rows.push([limit.name, formatLimitsPercent(limit, render)]);
+		const renewal = formatLimitsRenewal(limit, render, now);
+		if (renewal) rows.push(["Renews", renewal]);
+	}
+	if ((account.limits ?? []).length === 0) rows.push([null, "No usage windows reported yet."]);
+	const planName = account.planName ?? account.planType;
+	if (planName) {
+		const allotment = account.planMultiplier ? ` (${account.planMultiplier})` : "";
+		rows.push(["Plan", `${planName}${allotment}`]);
+	}
+	if (account.credits) rows.push(["Credits", account.credits]);
+	const hasResets = account.resetCredits
+		? account.resetCredits.available > 0
+		: Boolean(account.resetCreditsSummary);
+	if (hasResets) rows.push(["Resets", account.resetCreditsSummary]);
+	// Only a reading taken at a different moment from the one the header
+	// names gets its own time.
+	if (readings && Number.isFinite(account.readAt) && account.readAt !== readings.readAt) {
+		const at = formatLimitsReadTime(account.readAt, render, now);
+		if (at) rows.push(["Read", account.source === "live" ? `${at}, live` : at]);
+	}
+	return rows;
+}
+
+function limitsKeyWidth(rows) {
+	return Math.max(0, ...rows.filter(([key]) => key !== null).map(([key]) => key.length));
+}
+
+function printLimitsRows(rows, indent, width = limitsKeyWidth(rows)) {
+	for (const [key, value] of rows) {
+		console.log(key === null ? `${indent}${value}` : `${indent}${`${key}:`.padEnd(width + 1)} ${value}`);
+	}
+}
+
+function printLimitsResult(payload, json, render) {
 	if (json) {
 		console.log(JSON.stringify(payload, null, 2));
 		return;
 	}
 	console.log(`oc-codex-multi-auth limits`);
 	if (payload.message) console.log(payload.message);
-	console.log(`Storage: ${payload.storagePath}`);
 	if (payload.error) {
-		console.log(`Error: ${payload.error}`);
+		printLimitsRows([["Storage", payload.storagePath], ["Error", payload.error]], "");
 		return;
 	}
-	console.log(`Accounts: ${payload.totalAccounts}`);
-	for (const account of payload.accounts ?? []) {
+	const now = Date.now();
+	const readings = describeLimitsReadings(payload.readings, render, now);
+	const header = [
+		["Storage", payload.storagePath],
+		["Accounts", String(payload.totalAccounts)],
+		...(payload.sort ? [["Sort", `${payload.sort.by} (${payload.sort.direction})`]] : []),
+		...(readings ? [["Readings", readings]] : []),
+	];
+	const footer = [
+		...(payload.poolSummary ? [["Pool", payload.poolSummary]] : []),
+		...(payload.nextAction ? [["Next", payload.nextAction]] : []),
+	];
+	// The header and the pool total share one column, and every account's rows
+	// share another, so the report reads down straight edges rather than each
+	// block lining up only with itself.
+	const topWidth = limitsKeyWidth([...header, ...footer]);
+	printLimitsRows(header, "", topWidth);
+	const accountRows = (payload.accounts ?? []).map((account) => ({
+		account,
+		rows: buildLimitsAccountRows(account, render, now, payload.readings),
+	}));
+	const rowWidth = limitsKeyWidth(accountRows.flatMap(({ rows }) => rows));
+	for (const { account, rows } of accountRows) {
+		console.log("");
 		const label = account.email ? `${account.label} (${account.email})` : account.label;
 		console.log(`- [${account.index}] ${label}`);
-		if (account.error) {
-			console.log(`  Error: ${account.error}`);
-			continue;
-		}
-		for (const limit of account.limits ?? []) {
-			console.log(`  ${limit.name}: ${limit.summary}`);
-		}
-		if ((account.limits ?? []).length === 0) {
-			console.log("  No usage windows reported yet.");
-		}
-		if (account.planType) {
-			const allotment = account.planMultiplier ? ` (${account.planMultiplier})` : "";
-			console.log(`  Plan: ${account.planType}${allotment}`);
-		}
-		if (account.credits) console.log(`  Credits: ${account.credits}`);
-		if (account.resetCredits && account.resetCredits.available > 0) {
-			console.log(`  Resets: ${account.resetCreditsSummary}`);
-		}
+		printLimitsRows(rows, "  ", rowWidth);
 	}
-	if (payload.poolSummary) console.log(`Pool: ${payload.poolSummary}`);
-	if (payload.nextAction) console.log(`Next: ${payload.nextAction}`);
+	if (footer.length > 0) {
+		console.log("");
+		printLimitsRows(footer, "", topWidth);
+	}
 }
 
 export async function runStandaloneCommand(command, argv = [], options = {}) {

@@ -332,7 +332,7 @@ Most of these also run as a **direct CLI** with no agent or model involvement, s
 - `reasoning.encrypted_content` is preserved for multi-turn continuity
 - GPT-6 Astra/Sol/Luna, the Daybreak tiers and the GPT-5.6 tiers use the responses-lite request shape and default client identity `opencode`; other models default to `codex_cli_rs`
 - account rotation is health-aware (`rotationStrategy` default `hybrid`) and avoids repeatedly selecting cooling accounts
-- The quota guard checks each enabled account at a bounded interval (30 minutes by default). When it finds a fully spent 5-hour or weekly subscription quota, rotation skips that account until its reported reset instead of drawing from paid Credits. `codex-limits` applies the same guard immediately when run manually. After running standalone `limits`, restart an already-running OpenCode instance or wait for its next quota poll to reload the updated account state.
+- The quota guard checks each enabled account at a bounded interval (30 minutes by default). When it finds a fully spent 5-hour or weekly subscription quota, rotation skips that account until its reported reset instead of drawing from paid Credits. `codex-limits` applies the same guard immediately when run manually. After running standalone `limits --refresh` (a plain `limits` reports the plugin's last readings and reads live only accounts it has none for), restart an already-running OpenCode instance or wait for its next quota poll to reload the updated account state.
 - same-host OpenCode processes sharing an account file serialize refresh-token exchange and commit so one current single-use token is exchanged once
 - 5xx bursts, network failures, and quota responses penalize account health
 - token refresh is queued to avoid refresh races
