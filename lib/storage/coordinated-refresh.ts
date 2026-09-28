@@ -479,41 +479,67 @@ async function readPendingRotationJournal(
  *   stranded records would keep pointing at a dead token forever.
  */
 async function recoverPendingRotation(storagePath: string): Promise<boolean> {
-	let complete = true;
+	const pending: { path: string; journal: PendingRotationJournal }[] = [];
 	for (const journalPath of await listPendingRotationJournals(storagePath)) {
 		const journal = await readPendingRotationJournal(journalPath);
-		if (!journal) continue;
-
-		let replayed = true;
-		for (const store of ["accounts", "flagged"] as const) {
-			try {
-				const healed = await applyRotationToStore(
-					store,
-					journal.consumedRefreshToken,
-					journal.memberId,
-					journal.rotatedRefreshToken,
-				);
-				if (healed > 0) {
-					logInfo(
-						`Recovered ${healed} record(s) in the ${store} store from a pending rotation journal`,
+		if (journal) pending.push({ path: journalPath, journal });
+	}
+	// Chain order: a journal whose consumed token another pending journal
+	// PRODUCES must wait. Replaying `b→c` before `a→b` in directory order
+	// could delete both while a record is stranded on `b` — `b→c` heals
+	// nothing yet (nobody holds `b`), `a→b` then heals a record onto `b`,
+	// and with `b→c` already gone the account's next refresh presents the
+	// dead `b` (greptile P1 on PR #280). A producer that cannot replay keeps
+	// its successors pending too: they may become healable once it lands.
+	let remaining = pending;
+	let progressed = true;
+	while (progressed && remaining.length > 0) {
+		progressed = false;
+		const survivors: typeof remaining = [];
+		for (const entry of remaining) {
+			const waitsForProducer = remaining.some(
+				(other) =>
+					other !== entry &&
+					other.journal.rotatedRefreshToken ===
+						entry.journal.consumedRefreshToken,
+			);
+			if (waitsForProducer) {
+				survivors.push(entry);
+				continue;
+			}
+			let replayed = true;
+			for (const store of ["accounts", "flagged"] as const) {
+				try {
+					const healed = await applyRotationToStore(
+						store,
+						entry.journal.consumedRefreshToken,
+						entry.journal.memberId,
+						entry.journal.rotatedRefreshToken,
 					);
+					if (healed > 0) {
+						logInfo(
+							`Recovered ${healed} record(s) in the ${store} store from a pending rotation journal`,
+						);
+					}
+				} catch (error) {
+					logWarn(
+						`Failed to replay the pending rotation journal against the ${store} store; leaving it for the next refresh: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+					replayed = false;
 				}
-			} catch (error) {
-				logWarn(
-					`Failed to replay the pending rotation journal against the ${store} store; leaving it for the next refresh: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-				replayed = false;
+			}
+			if (replayed) {
+				await deletePendingRotationJournal(entry.path);
+				progressed = true;
+			} else {
+				survivors.push(entry);
 			}
 		}
-		if (replayed) {
-			await deletePendingRotationJournal(journalPath);
-		} else {
-			complete = false;
-		}
+		remaining = survivors;
 	}
-	return complete;
+	return remaining.length === 0;
 }
 
 /**

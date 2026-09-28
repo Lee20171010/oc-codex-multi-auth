@@ -979,6 +979,30 @@ describe('Logger Module', () => {
 			// Masked head + ellipsis + tail pattern (from maskToken long branch).
 			expect(out).toMatch(/"access_token":"access...4321"/);
 		});
+
+		it('masks the entire local part of an overlong (>64 char) email address', async () => {
+			const { __testOnly } = await import('../lib/logger.js');
+			// The old `{1,64}`-bounded local part let the match start mid-way
+			// through a longer local part — the first N-64 chars then stayed
+			// visible in masked error text (greptile P1 on PR #280).
+			const local = 'x'.repeat(90);
+			const input = `upstream error for ${local}@example.com received`;
+			const out = __testOnly.maskString(input);
+			// No run of more than maskEmail's 2-char prefix may survive.
+			expect(out).not.toContain('xxx');
+			expect(out).toContain('xx***@***.com');
+		});
+
+		it('does not start an email match inside a longer identifier run', async () => {
+			const { __testOnly } = await import('../lib/logger.js');
+			// A host-like run glued to the local part (e.g. `user-service@x.io`)
+			// is one identifier — masking must cover the whole local half, not
+			// just the suffix past the 64-char bound.
+			const input = `id=${'p'.repeat(200)}@mail.io`;
+			const out = __testOnly.maskString(input);
+			expect(out).not.toContain('ppp');
+			expect(out).toContain('pp***@***.io');
+		});
 	});
 
 	// Audit fix #7: structured `email` keys must use domain-preserving maskEmail,

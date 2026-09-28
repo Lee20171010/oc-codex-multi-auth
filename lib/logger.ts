@@ -61,11 +61,15 @@ const TOKEN_PATTERNS: Array<RegExp | { pattern: RegExp; group: number }> = [
 	},
 ];
 
-// The local part is bounded at the RFC 5321 64-octet limit, not just for
-// correctness: an unbounded `+` before `@` backtracks once per remaining
-// character at every start position, so a `@`-free 256KB body made
-// maskString() take ~24s (quadratic). Bounded, the same scan is linear.
-const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// The lookbehind does the bounding the `{1,64}` used to fake: a match can
+// only start at a real local-part boundary, so interior positions of an
+// overlong local part can never start a match — a 90-char local masks whole
+// instead of leaving its first 26 chars visible (greptile P1 on PR #280).
+// It also keeps the scan linear: non-boundary positions fail the lookbehind
+// instantly, so a `@`-free 256KB body no longer pays a backtrack attempt at
+// every offset (the original quadratic ~24s scan).
+const EMAIL_PATTERN =
+	/(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
 const SENSITIVE_KEYS = new Set([
 	"access",
