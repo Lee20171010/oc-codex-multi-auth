@@ -147,11 +147,7 @@ function sanitizeAccountNumericState(account: AccountMetadataV3): AccountMetadat
         cleaned[key] = value;
       }
     }
-    if (Object.keys(cleaned).length > 0) {
-      next.rateLimitResetTimes = cleaned;
-    } else {
-      delete next.rateLimitResetTimes;
-    }
+    next.rateLimitResetTimes = cleaned;
   }
 
   return next;
