@@ -421,6 +421,11 @@ async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Pr
   // keychain like the main account store. Flagged records carry raw refresh
   // tokens (required to restore via verify-flagged), so writing them as
   // plaintext JSON would defeat the keychain protection the user opted into.
+  // Deferred stale-entry retire (same contract as the main store): a refused
+  // keychain write leaves an entry that can never be updated, but it is also
+  // the only surviving copy until the JSON fallback lands — retire it only
+  // after that write is durable.
+  let retireFlaggedKeychainProjectKey: string | null | undefined;
   if (isKeychainOptInEnabled()) {
     const projectKey = getCurrentProjectStorageKey();
     // Same contract as the main store: retire the on-disk JSON BEFORE the
@@ -439,12 +444,24 @@ async function saveFlaggedAccountsUnlocked(storage: FlaggedAccountStorageV1): Pr
       await syncKeychainMigrationMarkers(path, content);
       return;
     }
+    if (result.refused) {
+      retireFlaggedKeychainProjectKey = projectKey;
+    }
     log.warn("keychain: flagged write failed; falling back to JSON for this save", {
       error: result.error,
     });
   }
 
   await writeFlaggedJsonToDisk(path, normalized, content);
+  if (retireFlaggedKeychainProjectKey !== undefined) {
+    const cleared = await deleteFlaggedFromKeychain(
+      retireFlaggedKeychainProjectKey,
+    );
+    log.warn("keychain: retired stale flagged entry after write refusal", {
+      staleEntryCleared: cleared.deleted,
+      ...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
+    });
+  }
 }
 
 export async function loadFlaggedAccounts(): Promise<FlaggedAccountStorageV1> {

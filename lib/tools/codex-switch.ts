@@ -14,6 +14,7 @@ import {
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
+import { rethrowIfRetryable, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
@@ -27,7 +28,7 @@ export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Switch active Codex account by index (1-based) or interactive picker when index is omitted.",
 		args: {
@@ -135,6 +136,9 @@ export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
 					try {
 						await persist(storage);
 					} catch (saveError) {
+						// Lease compromise surfaces through persist() — let it escape
+						// so the wrapper reports a retryable contention error.
+						rethrowIfRetryable(saveError);
 						logWarn("Failed to save account switch", {
 							error: String(saveError),
 						});
@@ -212,4 +216,5 @@ export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
 			return `Switched to account: ${outcome.label}`;
 		},
 	});
+	return withToolErrorEnvelope("codex-switch", definition);
 }

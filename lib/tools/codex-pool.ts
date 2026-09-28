@@ -24,6 +24,7 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { redactHomePaths, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 type CodexPoolAction = "status" | ModelAccountPoolMutation;
@@ -221,7 +222,7 @@ function renderPoolStatusText(
 }
 
 export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
-	return tool({
+	const definition = tool({
 		description:
 			"Inspect and manage model-specific account pools. Account numbers are 1-based inputs; stable account IDs are persisted.",
 		args: {
@@ -357,9 +358,15 @@ export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
 						),
 						// Same identifier the class and the logs use, so a caller that
 						// greps for what it saw in tool JSON actually finds something.
+						// `ok`/`tool`/`nextAction`/`path` bring this payload onto the
+						// shared tool error-envelope contract.
+						ok: false,
+						tool: "codex-pool",
 						error: ErrorCode.CONFIG_LOCK_CONTENTION,
 						retryable: true,
 						message,
+						nextAction: "Retry shortly — the lock is transient.",
+						path: error.path ? redactHomePaths(error.path) : null,
 					});
 				}
 				return `Could not update the account pool for ${model}: ${message}`;
@@ -401,4 +408,5 @@ export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-pool", definition);
 }

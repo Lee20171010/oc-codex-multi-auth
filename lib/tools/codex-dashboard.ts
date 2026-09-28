@@ -21,6 +21,10 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import {
+	sanitizeToolErrorMessage,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
@@ -39,7 +43,7 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 		beginnerSafeModeRef,
 		cachedAccountManagerRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Show a live Codex dashboard: account eligibility, retry budgets, and refresh queue health.",
 		args: {
@@ -65,6 +69,12 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 			const includeSensitiveOutput = includeSensitive === true;
 			const storage = await loadAccounts();
 			const beginnerSafeModeEnabled = beginnerSafeModeRef.current;
+			// `lastError` carries an upstream failure message — mask + truncate it
+			// once so every emit site renders the safe form.
+			const lastErrorMessage =
+				runtimeMetrics.lastError === null
+					? null
+					: sanitizeToolErrorMessage(runtimeMetrics.lastError);
 			if (!storage || storage.accounts.length === 0) {
 				if (outputFormat === "json") {
 					return renderJsonOutput({
@@ -80,10 +90,10 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 						accountEligibility: [],
 						recommendedNextAction: "Run opencode auth login",
 						lastError:
-							runtimeMetrics.lastError === null
+							lastErrorMessage === null
 								? null
 								: {
-										message: runtimeMetrics.lastError,
+										message: lastErrorMessage,
 										category: runtimeMetrics.lastErrorCategory,
 									},
 					});
@@ -152,10 +162,10 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 					})),
 					recommendedNextAction,
 					lastError:
-						runtimeMetrics.lastError === null
+						lastErrorMessage === null
 							? null
 							: {
-									message: runtimeMetrics.lastError,
+									message: lastErrorMessage,
 									category: runtimeMetrics.lastErrorCategory,
 								},
 				});
@@ -219,11 +229,11 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 				lines.push(...formatUiSection(ui, "Recommended next step"));
 				lines.push(formatUiItem(ui, recommendedNextAction, "accent"));
 
-				if (runtimeMetrics.lastError) {
+				if (lastErrorMessage) {
 					lines.push("");
 					lines.push(...formatUiSection(ui, "Last error"));
 					lines.push(
-						formatUiItem(ui, runtimeMetrics.lastError, "danger"),
+						formatUiItem(ui, lastErrorMessage, "danger"),
 					);
 					if (runtimeMetrics.lastErrorCategory) {
 						lines.push(
@@ -268,9 +278,9 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 			lines.push("");
 			lines.push(`Recommended next step: ${recommendedNextAction}`);
 
-			if (runtimeMetrics.lastError) {
+			if (lastErrorMessage) {
 				lines.push("");
-				lines.push(`Last error: ${runtimeMetrics.lastError}`);
+				lines.push(`Last error: ${lastErrorMessage}`);
 				if (runtimeMetrics.lastErrorCategory) {
 					lines.push(`Category: ${runtimeMetrics.lastErrorCategory}`);
 				}
@@ -279,4 +289,5 @@ export function createCodexDashboardTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-dashboard", definition);
 }

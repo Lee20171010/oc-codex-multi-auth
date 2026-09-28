@@ -73,6 +73,7 @@
     "audit:all": "npm audit --audit-level=high",
     "audit:dev:allowlist": "node scripts/audit-dev-allowlist.js",
     "audit:ci": "npm run audit:prod && npm run audit:dev:allowlist",
+    "bench": "npm run build && node --expose-gc test/perf/bench.mjs",
     "prepublishOnly": "npm run build",
     "prepare": "husky"
   },

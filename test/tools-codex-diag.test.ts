@@ -1,12 +1,19 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	clearCircuitBreakers,
 	getCircuitBreaker,
 } from "../lib/circuit-breaker.js";
 import type { ToolContext } from "../lib/tools/index.js";
+import type { AccountStorageV3 } from "../lib/storage.js";
 import { createCodexDiagTool } from "../lib/tools/codex-diag.js";
 import type { RuntimeMetrics, RoutingVisibilitySnapshot } from "../lib/runtime.js";
+
+vi.mock("../lib/storage.js", () => ({
+	loadAccounts: vi.fn(),
+}));
+
+import { loadAccounts } from "../lib/storage.js";
 
 function buildRuntimeMetrics(
 	overrides: Partial<RuntimeMetrics> = {},
@@ -78,11 +85,26 @@ function buildRouting(
 
 function buildCtx(options: {
 	accountCount?: number;
+	storageError?: Error;
 	metrics?: RuntimeMetrics;
 	routing?: RoutingVisibilitySnapshot;
 }): ToolContext {
 	const metrics = options.metrics ?? buildRuntimeMetrics();
 	const routing = options.routing ?? buildRouting();
+	if (options.storageError) {
+		vi.mocked(loadAccounts).mockRejectedValue(options.storageError);
+	} else {
+		// `accounts.count` is sourced from a fresh storage read; the cached
+		// manager is only the fallback for an unreadable store.
+		vi.mocked(loadAccounts).mockResolvedValue({
+			version: 3,
+			activeIndex: 0,
+			accounts: Array.from(
+				{ length: options.accountCount ?? 0 },
+				(_, index) => ({ refreshToken: `r${index}` }),
+			),
+		} as unknown as AccountStorageV3);
+	}
 	const ctx = {
 		cachedAccountManagerRef: {
 			current:
@@ -103,6 +125,7 @@ function buildCtx(options: {
 describe("codex-diag tool", () => {
 	beforeEach(() => {
 		clearCircuitBreakers();
+		vi.mocked(loadAccounts).mockReset();
 	});
 
 	it("returns JSON with the expected top-level keys", async () => {
@@ -135,6 +158,23 @@ describe("codex-diag tool", () => {
 		const raw = await tool.execute({}, {} as never);
 		const parsed = JSON.parse(raw);
 		expect(parsed.accounts.count).toBe(0);
+	});
+
+	it("falls back to the cached manager count and reports storageError when the store is unreadable", async () => {
+		const tool = createCodexDiagTool(
+			buildCtx({
+				accountCount: 5,
+				storageError: new Error(
+					"unexpected EOF\nrefresh_token=abcdef123456789",
+				),
+			}),
+		);
+		const raw = await tool.execute({}, {} as never);
+		const parsed = JSON.parse(raw);
+		expect(parsed.accounts.count).toBe(5);
+		expect(typeof parsed.accounts.storageError).toBe("string");
+		expect(parsed.accounts.storageError).not.toContain("\n");
+		expect(parsed.accounts.storageError).not.toContain("abcdef123456789");
 	});
 
 	it("summarizes circuit breakers by group without leaking keys", async () => {

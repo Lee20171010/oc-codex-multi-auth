@@ -13,6 +13,11 @@ import {
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
+import {
+	rethrowIfRetryable,
+	withToolErrorEnvelope,
+} from "./output.js";
+import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
@@ -27,7 +32,7 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description: "Set or clear account tags for filtering and grouping.",
 		args: {
 			index: tool.schema
@@ -91,18 +96,27 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 
 			const account = storage.accounts[targetIndex];
 			if (!account) return `Account ${resolvedIndex} not found.`;
-			const normalizedTags = normalizeAccountTags(tags ?? "");
+			// Tags are echoed back into tool output — strip whole escape
+			// sequences (not just control bytes, which would leave "[8m"
+			// literal text) so a crafted tag cannot persist concealment.
+			const normalizedTags = normalizeAccountTags(tags ?? "")
+				.map((entry) => sanitizeDisplayText(entry.trim()) ?? "")
+				.filter((entry) => entry.length > 0);
 			const identityKey = getWorkspaceIdentityKey(account);
 			let previousTags: string[] = [];
 			let persistedAccount = account;
 
-			try {
-				await withAccountStorageTransaction(async (current, persist) => {
+			// Same contract as codex-note: the handler reports its outcome so only
+			// real transaction failures (e.g. lock contention) escape and surface
+			// as retryable, machine-readable errors through the registry wrapper.
+			type TagOutcome = "ok" | "account-changed" | "persist-failed";
+			const outcome = await withAccountStorageTransaction<TagOutcome>(
+				async (current, persist) => {
 					const currentAccount = current?.accounts.find(
 						(candidate) => getWorkspaceIdentityKey(candidate) === identityKey,
 					);
 					if (!current || !currentAccount) {
-						throw new Error("Account changed before tags could be updated");
+						return "account-changed";
 					}
 					previousTags = Array.isArray(currentAccount.accountTags)
 						? [...currentAccount.accountTags]
@@ -112,11 +126,26 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 					} else {
 						currentAccount.accountTags = normalizedTags;
 					}
-					await persist(current);
+					try {
+						await persist(current);
+					} catch (error) {
+						// A compromised transaction lease surfaces through persist()
+						// too — let it escape so the wrapper marks the call retryable.
+						rethrowIfRetryable(error);
+						logWarn("Failed to save account tag update", {
+							error: String(error),
+						});
+						return "persist-failed";
+					}
 					persistedAccount = currentAccount;
-				});
-			} catch (error) {
-				logWarn("Failed to save account tag update", { error: String(error) });
+					return "ok";
+				},
+			);
+
+			if (outcome === "account-changed") {
+				return "Account changed before tags could be updated. Retry codex-list and pick the account again.";
+			}
+			if (outcome === "persist-failed") {
 				return "Tag update failed to persist. Changes may be lost on restart.";
 			}
 
@@ -155,4 +184,5 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 			return `Updated tags for ${accountLabel}\nPrevious tags: ${previousText}\nCurrent tags: ${nextText}`;
 		},
 	});
+	return withToolErrorEnvelope("codex-tag", definition);
 }

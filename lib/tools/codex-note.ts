@@ -8,6 +8,10 @@ import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
 import { AccountManager } from "../accounts.js";
 import { logWarn } from "../logger.js";
 import { getWorkspaceIdentityKey } from "../storage/identity.js";
+import {
+	rethrowIfRetryable,
+	withToolErrorEnvelope,
+} from "./output.js";
 import { sanitizeDisplayText } from "../ui/display-text.js";
 import type { ToolContext } from "./index.js";
 
@@ -21,7 +25,7 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description: "Set or clear an account note for reminders.",
 		args: {
 			index: tool.schema
@@ -69,36 +73,56 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 			if (!account) return `Account ${resolvedIndex} not found.`;
 			const identityKey = getWorkspaceIdentityKey(account);
 
-			// Notes persist and are later rendered — strip escapes/controls at
-			// write time so a note cannot carry concealment or cursor movement.
+			// Notes persist and are later rendered — strip the full escape
+			// sequence (not just the ESC byte) at write time so a note cannot
+			// carry concealment or cursor movement. Cap at 241 so the
+			// over-length check below still fires.
 			const normalizedNote =
-				sanitizeDisplayText((note ?? "").trim(), { maxLength: 240 }) ?? "";
+				sanitizeDisplayText((note ?? "").trim(), { maxLength: 241 }) ?? "";
 			if (normalizedNote.length > 240) {
 				return "Note is too long (max 240 characters).";
 			}
 
 			let persistedAccount = account;
 
-			try {
-				await withAccountStorageTransaction(async (current, persist) => {
+			// The handler reports its outcome instead of throwing so only real
+			// transaction failures (e.g. StorageTransactionContentionError) escape
+			// — the registry wrapper surfaces them as retryable, machine-readable
+			// errors instead of a success-looking "failed to persist" string.
+			type NoteOutcome = "ok" | "account-changed" | "persist-failed";
+			const outcome = await withAccountStorageTransaction<NoteOutcome>(
+				async (current, persist) => {
 					const currentAccount = current?.accounts.find(
 						(candidate) => getWorkspaceIdentityKey(candidate) === identityKey,
 					);
 					if (!current || !currentAccount) {
-						throw new Error("Account changed before its note could be updated");
+						return "account-changed";
 					}
 					if (normalizedNote.length === 0) {
 						delete currentAccount.accountNote;
 					} else {
 						currentAccount.accountNote = normalizedNote;
 					}
-					await persist(current);
+					try {
+						await persist(current);
+					} catch (error) {
+						// A compromised transaction lease surfaces through persist()
+						// too — let it escape so the wrapper marks the call retryable.
+						rethrowIfRetryable(error);
+						logWarn("Failed to save account note update", {
+							error: String(error),
+						});
+						return "persist-failed";
+					}
 					persistedAccount = currentAccount;
-				});
-			} catch (error) {
-				logWarn("Failed to save account note update", {
-					error: String(error),
-				});
+					return "ok";
+				},
+			);
+
+			if (outcome === "account-changed") {
+				return "Account changed before its note could be updated. Retry codex-list and pick the account again.";
+			}
+			if (outcome === "persist-failed") {
 				return "Note update failed to persist. Changes may be lost on restart.";
 			}
 
@@ -118,4 +142,5 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 			return `Saved note for ${accountLabel}: ${normalizedNote}`;
 		},
 	});
+	return withToolErrorEnvelope("codex-note", definition);
 }

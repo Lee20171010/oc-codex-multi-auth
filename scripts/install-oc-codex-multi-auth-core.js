@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { chmod, copyFile, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -59,21 +59,49 @@ function parseStandaloneArgs(argv) {
 		const arg = argv[index];
 		if (arg === "--json") options.json = true;
 		else if (arg === "--refresh") options.refresh = true;
-		else if (arg === "--sort") options.sort = parseLimitsSortField(argv[++index]);
+		else if (arg === "--sort") {
+			options.sort = parseLimitsSortField(takeFlagValue(argv, index, arg));
+			index += 1;
+		}
 		else if (arg.startsWith("--sort=")) options.sort = parseLimitsSortField(arg.slice("--sort=".length));
 		else if (arg === "--asc") options.direction = "asc";
 		else if (arg === "--desc") options.direction = "desc";
 		else if (arg === "--include-sensitive") options.includeSensitive = true;
 		else if (arg === "--deep") options.deep = true;
 		else if (arg === "--fix") options.fix = true;
-		else if (arg === "--tag") options.tag = argv[++index];
+		else if (arg === "--tag") {
+			options.tag = takeFlagValue(argv, index, arg);
+			index += 1;
+		}
 		else if (arg.startsWith("--tag=")) options.tag = arg.slice("--tag=".length);
-		else if (arg === "--config-path") options.configPath = argv[++index];
+		else if (arg === "--config-path") {
+			options.configPath = takeFlagValue(argv, index, arg);
+			index += 1;
+		}
 		else if (arg.startsWith("--config-path=")) options.configPath = arg.slice("--config-path=".length);
 		else if (arg === "--help" || arg === "-h") options.help = true;
 		else throw new Error(`Unknown option for standalone command: ${arg}`);
 	}
+	// An empty --config-path used to fall through to project/global resolution
+	// and silently report on the wrong pool; refuse it like a missing value.
+	if (options.configPath !== undefined && options.configPath.trim() === "") {
+		throw new Error("--config-path requires a non-empty path.");
+	}
 	return options;
+}
+
+/**
+ * The value after a space-separated flag: absent or another `--flag` means the
+ * caller never supplied one (`--config-path --json` must not swallow `--json`
+ * as a path). Bare `-x` values stay legal — account file names can start with
+ * a dash, and only the `--` spellings are ambiguous with this CLI's options.
+ */
+function takeFlagValue(argv, index, flag) {
+	const value = argv[index + 1];
+	if (value === undefined || value.startsWith("--")) {
+		throw new Error(`Missing value for ${flag}.`);
+	}
+	return value;
 }
 
 const LIMITS_SORT_ALIASES = new Map([
@@ -115,8 +143,8 @@ export function isDirectRunPath(argvPath, modulePath, resolveRealPath = realpath
 	);
 }
 
-function printHelp() {
-	console.log(`Usage: ${PACKAGE_NAME} [command] [options]\n\n` +
+function printHelp(write = console.log) {
+	write(`Usage: ${PACKAGE_NAME} [command] [options]\n\n` +
 		"Commands:\n" +
 		"  install             Register plugin entries (default with no command)\n" +
 		"  update              Refresh the cached package without changing OpenCode config\n" +
@@ -190,13 +218,34 @@ function formatErrorForLog(error) {
 }
 
 function resolveHomeDirectory(env = process.env) {
-	if (env.HOME || env.USERPROFILE) {
-		return env.HOME || env.USERPROFILE;
+	// Every write this CLI makes is rooted at the home directory, so a
+	// relative or empty HOME/USERPROFILE is not "home-shaped": resolving it
+	// would drop `.config` and `.opencode` into whatever directory the command
+	// happened to run from. Only absolute values are honored.
+	const provided = [env.HOME, env.USERPROFILE].filter(
+		(value) => typeof value === "string" && value.trim() !== "",
+	);
+	const absolute = provided.find((value) => isAbsolute(value));
+	if (absolute !== undefined) {
+		return absolute;
 	}
 	const detected = homedir();
+	// os.homedir() echoes $HOME verbatim on POSIX, so the same relative/empty
+	// value can come straight back; refuse rather than write cwd-relative.
+	if (!isAbsolute(detected)) {
+		throw new Error(
+			`Cannot resolve an absolute home directory (HOME=${JSON.stringify(env.HOME)}, ` +
+				`USERPROFILE=${JSON.stringify(env.USERPROFILE)}). ` +
+				"Set HOME to an absolute path; refusing to write config relative to the working directory.",
+		);
+	}
 	// A silent passwd-database home is surprising in a CLI whose writes all
 	// live under the home directory: say where files will actually go.
-	log(`Warning: neither HOME nor USERPROFILE is set; using the OS-reported home directory (${detected}).`);
+	log(
+		provided.length > 0
+			? `Warning: the configured home directory ${JSON.stringify(provided[0])} is not an absolute path; using the OS-reported home directory (${detected}).`
+			: `Warning: neither HOME nor USERPROFILE is set; using the OS-reported home directory (${detected}).`,
+	);
 	return detected;
 }
 
@@ -209,12 +258,17 @@ function buildPaths(homeDir) {
 		configPath: join(configDir, "opencode.json"),
 		jsoncConfigPath: join(configDir, "opencode.jsonc"),
 		tuiConfigPath: join(configDir, "tui.json"),
+		tuiJsoncPath: join(configDir, "tui.jsonc"),
 		cacheDir,
 		cacheNodeModulesPaths: getManagedPackageNames().map((name) => join(cacheDir, "node_modules", name)),
 		cachePackagePaths: getManagedPackageNames().flatMap((name) => [
 			join(cacheDir, "packages", name),
 			join(cacheDir, "packages", `${name}@latest`),
 		]),
+		// OpenCode 2.x installs config-file plugins through its own npm cache:
+		// `npm/<specifier>/<timestamp>/` (e.g. npm/oc-codex-multi-auth@latest/<ts>/).
+		// Leaving it behind is a stale tree `update` never cleared.
+		cacheNpmDir: join(cacheDir, "npm"),
 		cacheBunLock: join(cacheDir, "bun.lock"),
 		cachePackageJson: join(cacheDir, "package.json"),
 		originHistoryPath: join(homeDir, ".opencode", ORIGIN_HISTORY_FILE_NAME),
@@ -430,7 +484,10 @@ function managedNameFromPathSpelling(entryPath) {
 
 function readDeclaredPackageName(directoryPath) {
 	try {
-		const parsed = JSON.parse(readFileSync(join(directoryPath, "package.json"), "utf8"));
+		const manifestPath = join(directoryPath, "package.json");
+		// A FIFO/device manifest would block readFileSync on open forever.
+		if (specialFileError(manifestPath)) return null;
+		const parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
 		const name = parsed?.name;
 		return typeof name === "string" && name.trim() ? name.trim() : null;
 	} catch {
@@ -510,9 +567,21 @@ function classifyPluginEntry(entry, options = {}) {
  * canonical form every config is rewritten into.
  */
 function normalizePluginList(list, onNotice, options = {}) {
-	const entries = Array.isArray(list)
-		? list.filter((entry) => entry !== null && entry !== undefined && entry !== "")
-		: [];
+	let entries;
+	if (Array.isArray(list)) {
+		entries = list.filter((entry) => entry !== null && entry !== undefined && entry !== "");
+	} else if (list === undefined || list === null || list === "") {
+		entries = [];
+	} else {
+		// `"plugin": "some-plugin"` / `42` / `{...}` is not the list OpenCode
+		// loads, but it is still a value the user wrote — folding it into the
+		// managed list keeps it instead of silently dropping it.
+		onNotice?.(
+			`Warning: the existing "plugin" value is ${typeof list === "object" ? "an object" : `a ${typeof list}`}, not a list; ` +
+				"it is being wrapped into the plugin list so the prior value is kept alongside the managed registration.",
+		);
+		entries = [list];
+	}
 	const classifications = entries.map((entry) => classifyPluginEntry(entry, options));
 	// A checkout of this package already IS the registration, so a published
 	// entry beside it is a second copy of the same plugin for OpenCode to load.
@@ -566,6 +635,9 @@ function normalizePluginList(list, onNotice, options = {}) {
 
 function readLocalCheckoutSightings(historyPath) {
 	try {
+		// Same FIFO guard as the other metadata reads: this file sits under
+		// ~/.opencode and a special file there must not hang the installer.
+		if (specialFileError(historyPath)) return [];
 		const parsed = JSON.parse(readFileSync(historyPath, "utf8"));
 		const sightings = parsed?.sightings;
 		if (!Array.isArray(sightings)) return [];
@@ -609,7 +681,11 @@ function findUnregisteredLocalCheckout(pluginList, historyPath, options = {}) {
 }
 
 function mergeTuiConfig(existingConfig, onNotice, options = {}) {
-	const existing = isPlainObject(existingConfig) ? { ...existingConfig } : {};
+	// Same unsafe-key drop as the V1 merge below: a `__proto__`/`constructor`/
+	// `prototype` own key would otherwise be copied verbatim into tui.json.
+	const existing = isPlainObject(existingConfig)
+		? Object.fromEntries(Object.entries(existingConfig).filter(([key]) => !isUnsafeMergeKey(key)))
+		: {};
 	const next = { ...existing };
 	if (typeof next.$schema !== "string" || !next.$schema.trim()) {
 		next.$schema = "https://opencode.ai/tui.json";
@@ -620,6 +696,36 @@ function mergeTuiConfig(existingConfig, onNotice, options = {}) {
 
 function formatJson(obj) {
 	return `${JSON.stringify(obj, null, 2)}\n`;
+}
+
+/**
+ * Key paths whose value is a non-finite number (Infinity/NaN from e.g.
+ * `1e400` in the user's file). JSON.stringify renders those as `null`, so
+ * the merge must warn before writing rather than silently changing data.
+ * The scan is best-effort: recursion is capped well below the depth
+ * JSON.stringify itself survives, so the warning pass can never be the
+ * first thing to blow the stack on a deeply nested file.
+ */
+const NONFINITE_SCAN_MAX_DEPTH = 500;
+
+function findNonFiniteNumberPaths(value, path = "$", found = [], depth = 0) {
+	if (found.length >= 8 || depth > NONFINITE_SCAN_MAX_DEPTH) return found;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) found.push(path);
+		return found;
+	}
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index += 1) {
+			findNonFiniteNumberPaths(value[index], `${path}[${index}]`, found, depth + 1);
+		}
+		return found;
+	}
+	if (isPlainObject(value)) {
+		for (const [key, item] of Object.entries(value)) {
+			findNonFiniteNumberPaths(item, `${path}.${key}`, found, depth + 1);
+		}
+	}
+	return found;
 }
 
 // --- Per-project account pool resolution --------------------------------------
@@ -672,16 +778,23 @@ function isStandaloneProjectDirectory(dir) {
 	return STANDALONE_PROJECT_MARKERS.some((marker) => existsSync(join(dir, marker)));
 }
 
-function findStandaloneProjectRoot(startDir) {
-	let current = startDir;
-	const root = dirname(current) === current ? current : null;
-	while (current) {
+/**
+ * Walk upward from `startDir` looking for a project marker, but never past —
+ * or at — the resolved home directory. `~/.opencode` is the global state
+ * directory, not a project marker, so reaching $HOME must end the walk;
+ * otherwise every command run anywhere under ~ would resolve a phantom
+ * `projects/<home-key>/` pool and hide the global accounts file.
+ */
+function findStandaloneProjectRoot(startDir, homeDir = resolveHomeDirectory()) {
+	let current = resolve(startDir);
+	const home = resolve(homeDir);
+	for (;;) {
+		if (current === home) return null;
 		if (isStandaloneProjectDirectory(current)) return current;
 		const parent = dirname(current);
-		if (parent === current) break;
+		if (parent === current) return null;
 		current = parent;
 	}
-	return root && isStandaloneProjectDirectory(root) ? root : null;
 }
 
 /**
@@ -697,9 +810,11 @@ function resolvePerProjectAccounts(env, opencodeDir) {
 	const envValue = env.CODEX_AUTH_PER_PROJECT_ACCOUNTS;
 	if (envValue !== undefined) return envValue === "1";
 	try {
-		const parsed = JSON.parse(
-			readFileSync(join(opencodeDir, STANDALONE_PLUGIN_CONFIG_FILE_NAME), "utf-8"),
-		);
+		const configPath = join(opencodeDir, STANDALONE_PLUGIN_CONFIG_FILE_NAME);
+		// A FIFO/device here would block readFileSync forever; treat a
+		// non-regular file the same as an unreadable one and keep the default.
+		if (specialFileError(configPath)) return true;
+		const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
 		if (isPlainObject(parsed) && typeof parsed.perProjectAccounts === "boolean") {
 			return parsed.perProjectAccounts;
 		}
@@ -719,6 +834,12 @@ function resolvePerProjectAccounts(env, opencodeDir) {
  *     off or no project root resolves.
  */
 function resolveStandaloneStorage(options, env = process.env, projectDir) {
+	// An explicitly supplied-but-empty path must not quietly fall through to
+	// project/global resolution and then report on a pool the caller never
+	// selected.
+	if (options.configPath !== undefined && options.configPath !== null && String(options.configPath).trim() === "") {
+		throw new Error("--config-path requires a non-empty path.");
+	}
 	if (options.configPath) {
 		return { storagePath: resolve(options.configPath), scope: "explicit", projectRoot: null };
 	}
@@ -726,7 +847,8 @@ function resolveStandaloneStorage(options, env = process.env, projectDir) {
 	// `join(os.homedir(), ".opencode")` in lib/storage/paths.ts. Deriving it
 	// from `resolveHomeDirectory(env)` (which prefers env.HOME) can diverge
 	// from homedir() under a redirected HOME, e.g. Windows shells, and the
-	// CLI would report a different pool than the plugin actually uses.
+	// CLI would report a different pool than the plugin actually uses. The
+	// project-root bound uses the same home for the same reason.
 	const homeDir = homedir();
 	// homedir() bypasses resolveHomeDirectory's absolute-path check — on
 	// POSIX it echoes $HOME verbatim, so a relative or empty HOME yields a
@@ -743,7 +865,7 @@ function resolveStandaloneStorage(options, env = process.env, projectDir) {
 		const startDir = typeof projectDir === "string" && projectDir.trim()
 			? projectDir
 			: process.cwd();
-		const projectRoot = findStandaloneProjectRoot(startDir);
+		const projectRoot = findStandaloneProjectRoot(startDir, homeDir);
 		if (projectRoot) {
 			return {
 				storagePath: join(
@@ -781,38 +903,184 @@ function resolveStandaloneStorageFile(storagePath, kind = "main") {
 	return storagePath;
 }
 
+function describeSpecialFile(stat) {
+	if (stat.isDirectory()) return "a directory";
+	if (stat.isFIFO()) return "a named pipe (FIFO)";
+	if (stat.isSocket()) return "a socket";
+	if (stat.isCharacterDevice() || stat.isBlockDevice()) return "a device";
+	return "a special file";
+}
+
+/**
+ * Reading a FIFO, socket, or device as a config/storage file blocks the
+ * process forever on open, and reading a directory just confuses the caller.
+ * statSync follows symlinks so a link to a real file still reads fine; a
+ * dangling link stats as ENOENT and the caller's normal missing-file path
+ * handles it. Returns null for regular files and for unstat-able paths.
+ */
+function specialFileError(filePath) {
+	let stat;
+	try {
+		stat = statSync(filePath);
+	} catch {
+		return null;
+	}
+	if (stat.isFile()) return null;
+	return new Error(
+		`${filePath} is ${describeSpecialFile(stat)}, not a regular file; refusing to read it as JSON.`,
+	);
+}
+
+/**
+ * `JSON.parse` errors on some engines embed a quoted excerpt of the raw file
+ * (`Unexpected token 'x', "...<file bytes>..." is not valid JSON`). Account
+ * files hold credentials, so quoted blobs and email-shaped text are stripped
+ * out of the message before it is ever shown; the position/line/column tail
+ * stays, which is the part that actually helps fix the file.
+ */
+function sanitizeJsonReadError(error) {
+	return formatErrorForLog(error)
+		.replace(/,?\s*"[^"\r\n]*"(?:\s*\.{3})?\s*is not valid JSON\b/i, "… is not valid JSON")
+		.replace(/"[^"\r\n]{16,}"/g, '"…"')
+		.replace(
+			/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+			(match) => {
+				const atIndex = match.indexOf("@");
+				const tld = match.split(".").pop();
+				return `${match.slice(0, Math.min(2, atIndex))}***@***.${tld}`;
+			},
+		);
+}
+
+/**
+ * Every storage-read failure points at the same recovery direction the
+ * plugin itself uses: the credential snapshots under `backups/` beside the
+ * accounts file, or the in-conversation repair pass.
+ */
+const STORAGE_READ_REMEDIATION =
+	"To recover, restore the newest codex-credential-snapshot-* file under the backups/ " +
+	"directory beside the storage file, or run `codex-doctor`/`oc-codex-multi-auth doctor --fix`.";
+
+function standaloneStorageError(message) {
+	return `${message} ${STORAGE_READ_REMEDIATION}`;
+}
+
+/**
+ * `codex-keychain migrate` renames the on-disk pool to
+ * `<name>.migrated-to-keychain.<ts>` next to the original path. When the
+ * resolved file is absent but such a sibling exists, the pool was not lost —
+ * it moved into the OS keychain, and reporting "0 accounts" would hide that.
+ */
+async function findKeychainMigratedSibling(filePath) {
+	const prefix = `${basename(filePath)}${KEYCHAIN_MIGRATION_MARKER}`;
+	try {
+		const names = await readdir(dirname(filePath));
+		return names.find((name) => name.startsWith(prefix)) ?? null;
+	} catch {
+		return null;
+	}
+}
+
+function keychainMigratedPoolError(filePath, backupName) {
+	return (
+		`${filePath} was migrated to the OS keychain; its JSON copy was renamed to ` +
+		`${join(dirname(filePath), backupName)}. The authoritative account pool now lives in ` +
+		"the keychain, so this file is a rollback artifact, not live storage. Restore it " +
+		"with `codex-keychain rollback` inside OpenCode, or set CODEX_KEYCHAIN=1 so the " +
+		"plugin reads the keychain copy."
+	);
+}
+
 async function readStandaloneStorage(path, kind = "main") {
 	const filePath = resolveStandaloneStorageFile(path, kind);
+	// A `.migrated-to-keychain.<ts>` path spelled by hand is still readable:
+	// it is a valid frozen V3 copy and read-only commands may inspect it.
+	// Mutating commands refuse it via keychainSelectedFileError instead, so a
+	// repair/warm/limits run can never clobber the rollback artifact. The
+	// dangerous case is the auto-resolved path below - the primary file is
+	// absent but a migrated sibling exists - which is handled in the ENOENT
+	// branch so the migrated pool is reported rather than "0 accounts".
+	const special = specialFileError(filePath);
+	if (special) {
+		return { storage: null, error: standaloneStorageError(special.message) };
+	}
 	try {
 		const raw = await readFile(filePath, "utf-8");
-		const parsed = JSON.parse(raw);
+		// The runtime load layer strips a BOM before parsing; mirror that so a
+		// file the plugin accepts does not fail only in the CLI.
+		const parsed = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
 		// Shape validation, not just parse validation: a JSON array, scalar, or
 		// object without an `accounts` array is unreadable by the plugin runtime
 		// too (normalizeAccountStorage rejects it), so reporting it as a healthy
 		// empty pool (exit 0, "No accounts configured") hides the corruption
 		// from scripted callers that key on exit codes.
 		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			return { storage: null, error: "Storage file must be a JSON object with an accounts array." };
+			return {
+				storage: null,
+				error: standaloneStorageError("Storage file must be a JSON object with an accounts array."),
+			};
 		}
-		// Forward-compat mirror of the runtime guard: a newer schema version
-		// must not be shown as readable accounts by this build.
+		// Version handling mirrors normalizeAccountStorage in
+		// lib/storage/normalize.ts: only v1 and v3 are readable, a finite
+		// version above 3 is a newer-plugin file, and v2 has no migrator so it
+		// is refused explicitly. Anything else (absent, string, fractional)
+		// is unknown — surfaced as an error rather than read as a pool the
+		// runtime itself would refuse to trust.
 		const version = parsed.version;
 		if (typeof version === "number" && Number.isFinite(version) && version > 3) {
 			return {
 				storage: null,
-				error: `Unsupported account storage schema version ${version}; this build supports up to version 3.`,
+				error: standaloneStorageError(
+					`Unsupported account storage schema version ${version}; this build supports up to version 3.`,
+				),
+			};
+		}
+		if (version === 2) {
+			// Copy mirrors buildV2RejectionMessage in lib/storage/migrations.ts.
+			return {
+				storage: null,
+				error: standaloneStorageError(
+					"Unsupported account storage schema version 2; this plugin only ships " +
+					"migrations for v1 and v3. V2 files were produced by an intermediate " +
+					"4.x build that never documented its shape, so migrating blindly would " +
+					"risk silent account corruption.",
+				),
+			};
+		}
+		if (version !== 1 && version !== 3) {
+			const described = version === undefined ? "absent" : JSON.stringify(version);
+			return {
+				storage: null,
+				error: standaloneStorageError(
+					`Unknown account storage schema version ${described}; this build only reads versions 1 and 3.`,
+				),
 			};
 		}
 		if (!Array.isArray(parsed.accounts)) {
-			return { storage: null, error: "Storage file must be a JSON object with an accounts array." };
+			return {
+				storage: null,
+				error: standaloneStorageError("Storage file must be a JSON object with an accounts array."),
+			};
 		}
 		return {
 			storage: normalizeStandaloneStorage(parsed),
 			error: null,
 		};
 	} catch (error) {
-		if (error?.code === "ENOENT") return { storage: null, error: null };
-		return { storage: null, error: formatErrorForLog(error) };
+		if (error?.code === "ENOENT") {
+			// A missing file is a legitimate empty pool — unless the sibling
+			// shows the pool was migrated to the keychain, which is a state
+			// the JSON read path can never see.
+			const migratedName = await findKeychainMigratedSibling(filePath);
+			if (migratedName) {
+				return { storage: null, error: keychainMigratedPoolError(filePath, migratedName) };
+			}
+			return { storage: null, error: null };
+		}
+		return {
+			storage: null,
+			error: standaloneStorageError(sanitizeJsonReadError(error)),
+		};
 	}
 }
 
@@ -1158,6 +1426,9 @@ function summarizeStandaloneAccounts(storage, includeSensitive, tag) {
 
 function printStandaloneResult(command, payload, json) {
 	if (json) {
+		// --json output is the stdout contract: one parseable payload, and
+		// nothing else. Even a failure stays inside the JSON (callers read the
+		// `error` field and the nonzero exit code).
 		console.log(JSON.stringify(payload, null, 2));
 		return;
 	}
@@ -1178,13 +1449,16 @@ function printStandaloneResult(command, payload, json) {
 			console.log(`- [${account.index}] ${name} enabled=${account.enabled} refresh=${account.hasRefreshToken} access=${account.hasAccessToken}`);
 		}
 	}
-	if (payload.error) console.log(`Error: ${payload.error}`);
+	// Failure and repair diagnostics go to stderr so `status 2>/dev/null`
+	// stays a clean report and `… | jq` never ingests an "Error:" line.
+	if (payload.warning) console.error(`Warning: ${payload.warning}`);
+	if (payload.error) console.error(`Error: ${payload.error}`);
 	if (payload.flagged) {
 		console.log(`Flagged: ${payload.flagged.totalAccounts} account(s) in ${payload.flagged.storagePath}`);
-		if (payload.flagged.error) console.log(`Flagged pool error: ${payload.flagged.error}`);
+		if (payload.flagged.error) console.error(`Flagged pool error: ${payload.flagged.error}`);
 	}
 	for (const fix of payload.appliedFixes ?? []) console.log(`Fixed: ${fix}`);
-	for (const error of payload.fixErrors ?? []) console.log(`Repair failed: ${error}`);
+	for (const error of payload.fixErrors ?? []) console.error(`Repair failed: ${error}`);
 	if (payload.nextAction) console.log(`Next: ${payload.nextAction}`);
 }
 
@@ -1207,7 +1481,7 @@ async function loadDistModules(relativePaths, label) {
 }
 
 async function loadWarmRuntime(env) {
-	const [storageMod, usageMod, warmReqMod, warmMod, shutdownMod, recoveryMod] = await loadDistModules(
+	const [storageMod, usageMod, warmReqMod, warmMod, shutdownMod, recoveryMod, loggerMod] = await loadDistModules(
 		[
 			"storage.js",
 			"codex-usage.js",
@@ -1215,6 +1489,7 @@ async function loadWarmRuntime(env) {
 			"accounts/warm.js",
 			"shutdown.js",
 			"accounts/warm-recovery.js",
+			"logger.js",
 		],
 		"warm",
 	);
@@ -1223,7 +1498,7 @@ async function loadWarmRuntime(env) {
 	// Refreshing a token here persists credentials, which registers the
 	// shutdown handler via the storage lock.
 	shutdownMod.setShutdownOwnsProcess(true);
-	return { storageMod, usageMod, warmReqMod, warmMod, shutdownMod, recoveryMod };
+	return { storageMod, usageMod, warmReqMod, warmMod, shutdownMod, recoveryMod, loggerMod };
 }
 
 async function loadLimitsRuntime(env) {
@@ -1356,7 +1631,15 @@ async function runWarmCommandInner(parsed, options = {}) {
 		return { exitCode: 1, action: "warm", storagePath, storageScope: resolution.scope };
 	}
 
-	const { storageMod, usageMod, warmReqMod, warmMod, recoveryMod } = runtime;
+	const { storageMod, usageMod, warmReqMod, warmMod, recoveryMod, loggerMod } = runtime;
+	// Refresh and upstream failure text can carry raw response bodies —
+	// bearer tokens, emails, JWTs. `limits` already routes those through the
+	// logger's maskString; warm must do the same for every detail/error field
+	// that can contain upstream text.
+	const maskDetail = (value) => {
+		const text = formatErrorForLog(value);
+		return typeof loggerMod?.maskString === "function" ? loggerMod.maskString(text) : text;
+	};
 	// Point dist storage at the resolved accounts file so a refreshed token is
 	// persisted to the SAME file the rest of the toolchain reads.
 	pointStorageModuleAtResolution(storageMod, resolution);
@@ -1367,7 +1650,7 @@ async function runWarmCommandInner(parsed, options = {}) {
 	} catch (error) {
 		// Typed storage errors (e.g. UNSUPPORTED_SCHEMA_VERSION) carry the
 		// upgrade hint; surface them rather than crashing the CLI.
-		const rendered = formatErrorForLog(error);
+		const rendered = maskDetail(error);
 		// StorageError.message already embeds its hint — do not print it twice.
 		const hint = error && typeof error.hint === "string" && !rendered.includes(error.hint) ? ` ${error.hint}` : "";
 		const payload = { command: "warm", storagePath, storageScope: resolution.scope, error: `${rendered}${hint}` };
@@ -1420,7 +1703,7 @@ async function runWarmCommandInner(parsed, options = {}) {
 			organizationId: account.organizationId,
 		});
 		if (result.status === "exhausted") {
-			return { status: "failed", detail: result.detail ?? "quota/usage limit reached" };
+			return { status: "failed", detail: maskDetail(result.detail ?? "quota/usage limit reached") };
 		}
 		if (!result.rateLimited && result.model) succeeded.push({
 			account: { ...snapshot, refreshToken: account.refreshToken }, model: result.model, accessToken,
@@ -1455,7 +1738,9 @@ async function runWarmCommandInner(parsed, options = {}) {
 			index: r.index,
 			email: maskValue(accounts[r.index]?.email, parsed.includeSensitive),
 			status: r.status,
-			detail: r.detail,
+			// warmOne failures can embed an upstream error body — mask it the
+			// same way `limits` masks refresh errors before it reaches output.
+			detail: r.detail === undefined ? undefined : maskDetail(r.detail),
 		})),
 	};
 	printWarmResult(payload, parsed.json);
@@ -1471,7 +1756,7 @@ function printWarmResult(payload, json) {
 	if (payload.message) console.log(payload.message);
 	console.log(`Storage: ${payload.storagePath}`);
 	if (payload.error) {
-		console.log(`Error: ${payload.error}`);
+		console.error(`Error: ${payload.error}`);
 		return;
 	}
 	console.log(`Accounts: ${payload.totalAccounts}`);
@@ -1482,7 +1767,7 @@ function printWarmResult(payload, json) {
 	}
 	console.log(`Summary: ${payload.warmed} warmed, ${payload.failed} failed, ${payload.skipped} skipped`);
 	console.log(`Blocks cleared: ${payload.blocksCleared ?? 0}`);
-	if (payload.blockClearError) console.log(payload.blockClearError);
+	if (payload.blockClearError) console.error(payload.blockClearError);
 	if (payload.nextAction) console.log(`Next: ${payload.nextAction}`);
 }
 
@@ -1995,7 +2280,10 @@ const WORKSPACE_NAME_LOOKUP_TIMEOUT_MS = 5_000;
 async function readWorkspaceNameCache(stateDir) {
 	const names = new Map();
 	try {
-		const parsed = JSON.parse(await readFile(join(stateDir, WORKSPACE_NAME_CACHE_FILE), "utf-8"));
+		const cachePath = join(stateDir, WORKSPACE_NAME_CACHE_FILE);
+		// A FIFO here would block the read forever; treat it as an empty cache.
+		if (specialFileError(cachePath)) return names;
+		const parsed = JSON.parse(await readFile(cachePath, "utf-8"));
 		if (parsed?.version !== WORKSPACE_NAME_CACHE_VERSION || typeof parsed.accounts !== "object") {
 			return names;
 		}
@@ -2215,7 +2503,10 @@ function printLimitsResult(payload, json, render) {
 	console.log(`oc-codex-multi-auth limits`);
 	if (payload.message) console.log(payload.message);
 	if (payload.error) {
-		printLimitsRows([["Storage", payload.storagePath], ["Error", payload.error]], "");
+		// Failure text belongs on stderr; the JSON contract above already
+		// covers machine consumers.
+		console.error(`Storage: ${payload.storagePath}`);
+		console.error(`Error: ${payload.error}`);
 		return;
 	}
 	const now = Date.now();
@@ -2257,10 +2548,15 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 	try {
 		parsed = parseStandaloneArgs(argv);
 	} catch (error) {
-		printHelp();
+		// With --json on the line the caller expects parseable stdout, so
+		// usage text must not contaminate it — it goes to stderr either way.
+		printHelp(argv.includes("--json") ? console.error : undefined);
 		throw error;
 	}
+	const invokedCommand = command;
 	if (command === "diag") {
+		// diag is the deep-doctor alias; the payload still names the command
+		// the user actually invoked so `diag --json` reports "diag".
 		command = "doctor";
 		parsed.deep = true;
 	}
@@ -2278,10 +2574,18 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 	const resolution = resolveStandaloneStorage(parsed, env, options.projectDir);
 	const storagePath = resolution.storagePath;
 	const repairRequested = command === "doctor" && parsed.fix;
-	// The write-capable paths refuse a `.migrated-to-keychain.<ts>` selection:
-	// it is a rollback artifact, and persisting to it would rename/overwrite
-	// the user's own backup (read-only commands may still inspect it).
+	// A `.migrated-to-keychain.<ts>` selection is a rollback artifact. Mutating
+	// commands (doctor --fix; warm and limits carry their own checks) must
+	// never write to it, so they are refused outright. Read-only commands may
+	// still inspect the frozen copy the operator explicitly named - the file
+	// is a valid V3 pool snapshot - with a warning that the live pool moved.
 	const selectedFileError = repairRequested ? keychainSelectedFileError(parsed) : null;
+	const selectedFileWarning =
+		!repairRequested && parsed.configPath && isKeychainMigratedBackupPath(parsed.configPath)
+			? `${resolve(parsed.configPath)} is a keychain-migration backup ` +
+				`(${KEYCHAIN_MIGRATION_MARKER} suffix): a frozen copy, not the live pool. ` +
+				"Restore it through the codex-keychain rollback flow."
+			: null;
 	let storage = null;
 	let error = null;
 	if (!selectedFileError && (parsed.configPath || !repairRequested)) {
@@ -2358,7 +2662,7 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		? summarizeStandaloneAccounts(flaggedProbe.storage, parsed.includeSensitive, parsed.tag)
 		: [];
 	const payload = {
-		command,
+		command: invokedCommand,
 		storagePath,
 		storageScope: resolution.scope,
 		totalAccounts,
@@ -2367,6 +2671,7 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		activeIndexByFamily: storage?.activeIndexByFamily ?? {},
 		accounts,
 		error,
+		warning: selectedFileWarning ?? undefined,
 	};
 	if (command === "dashboard") {
 		payload.message = "Standalone dashboard server is not launched by this safe CLI; use status/list/limits/health or OpenCode codex-dashboard.";
@@ -2392,11 +2697,11 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 	} else if (command === "status") {
 		payload.message = totalAccounts > 0 ? "Account storage loaded." : "No accounts configured.";
 	}
-	printStandaloneResult(command, payload, parsed.json);
+	printStandaloneResult(invokedCommand, payload, parsed.json);
 	const flaggedError = payload.flagged?.error;
 	return {
 		exitCode: error || fixErrors.length > 0 || flaggedError ? 1 : 0,
-		action: command,
+		action: invokedCommand,
 		storagePath,
 		storageScope: resolution.scope,
 	};
@@ -2463,6 +2768,13 @@ function mergeOpenaiProvider(existingOpenai, templateOpenai, options = {}) {
 	}
 
 	// 3. Merge `models` by id: template wins on collision, user-added ids survive.
+	// A non-object `models` (array, string, number) cannot be merged - it is
+	// replaced wholesale, and that loss must be announced rather than silent.
+	if (existingSafe.models !== undefined && !isPlainObject(existingSafe.models)) {
+		onNotice?.(
+			"Warning: existing provider.openai.models is not a JSON object; it will be replaced by the template catalog.",
+		);
+	}
 	const existingModels = isPlainObject(existingSafe.models) ? existingSafe.models : {};
 	const templateModels = isPlainObject(templateSafe.models) ? templateSafe.models : {};
 	const prunedExistingModels = Object.fromEntries(
@@ -2672,6 +2984,16 @@ function stripJsonComments(source) {
 		index += 1;
 	}
 
+	// A comment or string left open at EOF means the file is truncated, not
+	// merely commented: `{"a":1} /* never ends` would otherwise parse as a
+	// healthy config and the merge would then overwrite the real tail bytes.
+	if (inBlockComment) {
+		throw new SyntaxError("Unterminated block comment in JSONC input.");
+	}
+	if (inString) {
+		throw new SyntaxError("Unterminated string literal in JSONC input.");
+	}
+
 	return result;
 }
 
@@ -2738,8 +3060,23 @@ function parseJsonc(content) {
 }
 
 async function readJson(filePath) {
-	const content = await readFile(filePath, "utf-8");
-	return parseJsonc(content.charCodeAt(0) === 0xfeff ? content.slice(1) : content);
+	// A named pipe/socket/device would block forever in readFile; refuse it
+	// before touching the fd. Dangling/absent paths stay on the caller's
+	// normal ENOENT handling.
+	const special = specialFileError(filePath);
+	if (special) throw special;
+	try {
+		const content = await readFile(filePath, "utf-8");
+		return parseJsonc(content.charCodeAt(0) === 0xfeff ? content.slice(1) : content);
+	} catch (error) {
+		// Config files can hold apiKey material; a parse message that embeds a
+		// raw excerpt of the file must not reach the terminal. IO errors
+		// (ENOENT/EACCES) carry no file bytes and pass through as-is.
+		if (error instanceof SyntaxError) {
+			throw new SyntaxError(sanitizeJsonReadError(error));
+		}
+		throw error;
+	}
 }
 
 /**
@@ -2826,8 +3163,17 @@ async function writeFileAtomic(filePath, content) {
 			// file there: a symlink is not followed, it is replaced by a regular
 			// file. That silently changes the layout the user configured, so the
 			// replacement is announced while the write itself still proceeds.
-			if (lstatSync(filePath).isSymbolicLink()) {
+			const existing = lstatSync(filePath);
+			if (existing.isSymbolicLink()) {
 				log(`Warning: ${filePath} is a symbolic link; it will be replaced by a regular file.`);
+			} else if (existing.isFile()) {
+				// The temp file is always 0600; renaming it over the destination
+				// must not silently tighten or loosen permissions the file was
+				// carrying (e.g. an admin-pinned 0444 becoming 0600).
+				const existingMode = existing.mode & 0o777;
+				if (existingMode !== 0o600) {
+					await chmod(tempPath, existingMode);
+				}
 			}
 		} catch (statError) {
 			if (statError?.code !== "ENOENT") throw statError;
@@ -2962,6 +3308,28 @@ function isEvictableCachePath(cachePath, cacheRoot) {
 	}
 }
 
+/**
+ * OpenCode 2.x installs config-file plugins through its own npm cache:
+ * `~/.cache/opencode/npm/<name>@<spec>/<timestamp>/`. The managed package's
+ * entry directories are the ones spelled `<name>` or `<name>@<spec>`;
+ * unrelated packages under npm/ are left alone, and each candidate still has
+ * to pass the same resolve-inside-cache check as the other targets.
+ */
+async function collectManagedNpmCacheTargets(paths) {
+	let names;
+	try {
+		names = await readdir(paths.cacheNpmDir);
+	} catch {
+		return [];
+	}
+	const managed = getManagedPackageNames();
+	return names
+		.filter((name) =>
+			managed.some((pkg) => name === pkg || name.startsWith(`${pkg}@`)),
+		)
+		.map((name) => join(paths.cacheNpmDir, name));
+}
+
 async function clearCache(paths, dryRun, skipCacheClear) {
 	if (skipCacheClear) {
 		log("Skipping cache clear (--no-cache-clear).");
@@ -2969,9 +3337,11 @@ async function clearCache(paths, dryRun, skipCacheClear) {
 		return;
 	}
 
+	const cacheNpmTargets = await collectManagedNpmCacheTargets(paths);
 	const cacheTargets = [
 		...paths.cacheNodeModulesPaths,
 		...paths.cachePackagePaths,
+		...cacheNpmTargets,
 		paths.cacheBunLock,
 	];
 
@@ -2981,6 +3351,9 @@ async function clearCache(paths, dryRun, skipCacheClear) {
 		}
 		for (const cachePackagePath of paths.cachePackagePaths) {
 			log(`[dry-run] Would remove ${cachePackagePath}`);
+		}
+		for (const cacheNpmTarget of cacheNpmTargets) {
+			log(`[dry-run] Would remove ${cacheNpmTarget}`);
 		}
 		log(`[dry-run] Would remove ${paths.cacheBunLock}`);
 	} else {
@@ -3007,7 +3380,8 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		return runStandaloneCommand(split.command, split.argv, options);
 	}
 	if (split.kind === "unknown") {
-		printHelp();
+		// --json anywhere on the line means stdout must stay machine-clean.
+		printHelp(argv.includes("--json") ? console.error : undefined);
 		throw new Error(`Unknown command: ${split.command}`);
 	}
 	const { env = process.env } = options;
@@ -3017,7 +3391,7 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		try {
 			parsedUpdate = parseUpdateArgs(split.argv);
 		} catch (error) {
-			printHelp();
+			printHelp(split.argv.includes("--json") ? console.error : undefined);
 			throw error;
 		}
 		if (parsedUpdate.wantsHelp) {
@@ -3038,7 +3412,7 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	} catch (error) {
 		// An unrecognized/conflicting flag gets the usage text on the way out;
 		// the thrown error still fails the process.
-		printHelp();
+		printHelp(split.argv.includes("--json") ? console.error : undefined);
 		throw error;
 	}
 	if (parsed.wantsHelp) {
@@ -3061,9 +3435,15 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		if (Array.isArray(existing.plugin) && existing.plugin.length > 0) {
 			throw new Error("OpenCode V1 plugin entries are present. Use a separate V2 config or migrate them manually; --v2 will not remove your V1 registration.");
 		}
-		const next = { ...existing, plugins: normalizePluginList(existing.plugins, log, {
+		// Same engine-key drop as the V1 merge: `__proto__`/`constructor`/
+		// `prototype` arrive as own data keys via spread and would land in the
+		// written file verbatim.
+		const next = Object.fromEntries(
+			Object.entries(existing).filter(([key]) => !isUnsafeMergeKey(key)),
+		);
+		next.plugins = normalizePluginList(existing.plugins, log, {
 			baseDirectory: paths.configDir, cacheDirectory: paths.cacheDir,
-		}) };
+		});
 		next.$schema ??= "https://opencode.ai/config.json";
 		if (dryRun) log(`[dry-run] Would register V2 plugin in ${paths.configPath}`);
 		else if (formatJson(existing) !== formatJson(next)) {
@@ -3155,6 +3535,15 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	} else {
 		log("No existing TUI config found. Creating new global TUI config.");
 	}
+	// A tui.jsonc twin is shadow configuration: OpenCode loads tui.json, so
+	// whatever is in the .jsonc file never takes effect. Surface it instead
+	// of silently merging beside (or over) a file the user may be editing.
+	if (existsSync(paths.tuiJsoncPath)) {
+		log(
+			`Note: ${paths.tuiJsoncPath} exists, but OpenCode loads ${basename(paths.tuiConfigPath)}; ` +
+				"the JSONC twin is left unchanged and TUI settings are written to tui.json.",
+		);
+	}
 
 	// A checkout of this package registered in either file already loads the
 	// plugin, so the published name must not be written beside it anywhere -
@@ -3200,7 +3589,16 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 						"OpenAI credential fields; the catalog replaces them and they will be removed.",
 				);
 			}
-			const provider = (existingConfig.provider && typeof existingConfig.provider === "object")
+			if (existingConfig.provider !== undefined && existingConfig.provider !== null && !isPlainObject(existingConfig.provider)) {
+				// `typeof [] === "object"` let an array provider through and
+				// produced {"0": ..., "1": ...} junk keys; only a plain object
+				// can merge, anything else is replaced but never silently.
+				log(
+					`Warning: existing "provider" in ${v1ConfigPath} is not a JSON object; ` +
+						"its value cannot be merged, so the managed provider catalog replaces it.",
+				);
+			}
+			const provider = isPlainObject(existingConfig.provider)
 				? Object.fromEntries(
 						Object.entries(existingConfig.provider).filter(([key]) => !isUnsafeMergeKey(key)),
 					)
@@ -3220,6 +3618,21 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 	}
 
 	const nextTuiConfig = mergeTuiConfig(existingTuiConfig, log, normalizeOptions);
+
+	// JSON cannot express Infinity/NaN: a user who wrote `1e400` (which parses
+	// to Infinity) would get `"null"` written back with no explanation. Name
+	// each affected key path rather than silently degrading the value.
+	for (const [target, filePath] of [
+		[nextConfig, v1ConfigPath],
+		[nextTuiConfig, paths.tuiConfigPath],
+	]) {
+		for (const keyPath of findNonFiniteNumberPaths(target)) {
+			log(
+				`Warning: ${keyPath} in ${filePath} is not a finite number; ` +
+					"JSON cannot represent it and it will be written as null.",
+			);
+		}
+	}
 
 	const unregisteredCheckout = findUnregisteredLocalCheckout(nextConfig.plugin, paths.originHistoryPath, {
 		baseDirectory: paths.configDir,
@@ -3333,6 +3746,8 @@ export const __test = {
 	backupConfig,
 	classifyPluginEntry,
 	copyFileWithWindowsRetry,
+	findKeychainMigratedSibling,
+	findNonFiniteNumberPaths,
 	findStandaloneProjectRoot,
 	findUnregisteredLocalCheckout,
 	formatConfigDiff,
@@ -3348,6 +3763,7 @@ export const __test = {
 	normalizePluginList,
 	parseCliArgs,
 	parseJsonc,
+	parseStandaloneArgs,
 	readJson,
 	readStandaloneStorage,
 	removeWithWindowsRetry,
@@ -3355,6 +3771,8 @@ export const __test = {
 	resolveStandaloneStorage,
 	resolveStandaloneStorageFile,
 	runStandaloneCommand,
+	sanitizeJsonReadError,
+	specialFileError,
 	splitCommandArgv,
 	stripJsonComments,
 	stripJsonTrailingCommas,

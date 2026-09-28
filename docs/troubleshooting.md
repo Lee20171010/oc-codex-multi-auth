@@ -26,15 +26,11 @@ Machine-readable output for every read-only command: append `--json` (CLI) or
 
 ## Error codes
 
-Structured errors carry a `code`. The ones you will see:
+Structured errors carry a `code`. The codes the current build emits:
 
 | Code | Meaning |
 | --- | --- |
 | `CODEX_AUTH_ERROR` | OAuth/token problem — re-login usually fixes it |
-| `CODEX_RATE_LIMIT` | Upstream rate limit or quota exhaustion |
-| `CODEX_NETWORK_ERROR` | Request never completed (DNS, TLS, proxy) |
-| `CODEX_TIMEOUT` | Request or SSE stream stalled past the timeout |
-| `CODEX_API_ERROR` | Backend returned an error response |
 | `CODEX_VALIDATION_ERROR` | Response failed schema validation (usually transient) |
 | `CODEX_CONFIG_ERROR` | Plugin config file failed to parse |
 | `CODEX_STORAGE_ERROR` | Account storage could not be read or written |
@@ -42,6 +38,12 @@ Structured errors carry a `code`. The ones you will see:
 | `CODEX_CONFIG_LOCK_CONTENTION` | Another process is writing plugin config; retry shortly |
 | `CODEX_STORAGE_TRANSACTION_CONTENTION` | Another process holds the account-store lease; retry shortly |
 | `CODEX_RECOVERY_ERROR`, `CODEX_PROMPT_ERROR`, `CODEX_REQUEST_ERROR` | Recovery, prompt-cache, or request-transform failures |
+
+`CODEX_NETWORK_ERROR`, `CODEX_API_ERROR`, `CODEX_RATE_LIMIT`, and
+`CODEX_TIMEOUT` are declared in `lib/errors.ts` but are **reserved**: no code
+path throws them today. Network, HTTP, rate-limit, and timeout failures are
+handled by the retry/rotation pipeline and surface as plain errors (or get
+absorbed by a retry), not as dedicated `CODEX_*` codes.
 
 ## Install and loading
 
@@ -59,7 +61,10 @@ Structured errors carry a `code`. The ones you will see:
 **Installer refuses to write.**
 
 - A config it cannot parse is never overwritten — fix the JSON/JSONC syntax
-  first or move the file aside. `--dry-run` shows what would change.
+  first or move the file aside. `--dry-run` shows what would change. A JSONC
+  file whose block comment never closes counts as unparseable: an
+  unterminated `/*` is refused rather than silently blanked to end-of-file
+  and overwritten.
 - Unknown flags are errors; check spelling against `--help`.
 - `--v2` refuses an existing `opencode.jsonc` and any V1 `plugin` entries;
   edit the JSONC `plugins` list by hand or keep separate V1/V2 configs.
@@ -117,14 +122,16 @@ store, remove stale duplicates, then run
 
 ## Rate limits and retries
 
-A `CODEX_RATE_LIMIT` means the account's 5-hour or weekly window is spent.
+A rate limit means the account's 5-hour or weekly window is spent.
 Options: wait for the reset (`codex-limits` shows times), add or switch
 accounts (`opencode auth login`, `codex-switch`), or change model family.
 
 When **every** account is limited, the wait-and-retry loop honors
 `retryAllAccountsMaxWaitMs`; a configured `0` is bounded by a 10-minute
 interactive ceiling because upstream quota blocks can stretch for days.
-`CODEX_RETRY_ALL_UNBOUNDED=1` restores truly unbounded waits.
+`CODEX_RETRY_ALL_UNBOUNDED=1` restores truly unbounded waits. The
+"Waiting (… remaining)" countdown sleeps on elapsed time rather than wall
+clock, so a system-clock jump neither stretches nor cancels the wait.
 
 The quota guard polls enabled accounts (30 minutes by default) and skips
 fully spent ones until their reset so rotation never draws paid Credits.
@@ -162,7 +169,10 @@ login.
 **Lock contention.** `CODEX_CONFIG_LOCK_CONTENTION` means another process is
 updating `openai-codex-auth-config.json`; `CODEX_STORAGE_TRANSACTION_CONTENTION`
 means another holds the account-store lease. Nothing partial was applied —
-retry shortly, or stop the other session.
+retry shortly, or stop the other session. A refresh that succeeded upstream but
+could not be committed to the pool is journaled in a `<accounts-file>.refresh.pending`
+file beside the accounts file, so the rotated credential is applied on the next
+load instead of being lost to a crash or a lost lease.
 
 **"Multi-worktree collision detected".** Advisory only: another live process
 uses the same accounts file. Refresh exchange and commits still serialize

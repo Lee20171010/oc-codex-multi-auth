@@ -93,3 +93,9 @@ with `oc-codex-multi-auth`.
 [Tools and CLI](tools-and-cli.md) covers all 24 `codex-*` tools and the eight
 standalone commands (`doctor`, `status`, `list`, `limits`, `dashboard`,
 `health`, `diag`, `warm`).
+
+## How do I uninstall or disable it?
+
+There is no `uninstall` command — remove the plugin entries from
+`opencode.json`/`tui.json` by hand and delete state under `~/.opencode` if you
+want it gone. Step-by-step: [Uninstall / disable](getting-started.md#uninstall--disable).

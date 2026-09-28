@@ -23,6 +23,7 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import { sanitizeToolErrorMessage, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
@@ -34,7 +35,7 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 		buildJsonAccountIdentity,
 		reloadCachedAccountManager,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Check health of all Codex accounts by validating refresh tokens.",
 		args: {
@@ -61,6 +62,8 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 			const storage = await loadAccounts();
 			if (!storage || storage.accounts.length === 0) {
 				if (outputFormat === "json") {
+					// Emit the same keys the populated branch does — including all
+					// five *Slots arrays — so consumers get one stable schema.
 					return renderJsonOutput({
 						message:
 							"No Codex accounts configured. Run: opencode auth login",
@@ -68,6 +71,11 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 						healthyCount: 0,
 						unhealthyCount: 0,
 						skippedCount: 0,
+						staleRecoverableSlots: [],
+						quotaExhaustedSlots: [],
+						disabledDuplicateSlots: [],
+						businessMemberConflictSlots: [],
+						disabledWithFreshCredentialSlots: [],
 						accounts: [],
 					});
 				}
@@ -144,10 +152,13 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 							peerAccounts: storage.accounts,
 						}),
 						status: "unhealthy",
-						error: outcome.error,
+						// Upstream error bodies are masked + truncated before they reach
+						// tool output — raw refresh failures can carry credential-shaped
+						// fragments or emails.
+						error: sanitizeToolErrorMessage(outcome.error),
 					});
 					results.push(
-						`  ${getStatusMarker(ui, "error")} ${displayLabel}: ${outcome.error}`,
+						`  ${getStatusMarker(ui, "error")} ${displayLabel}: ${sanitizeToolErrorMessage(outcome.error)}`,
 					);
 					unhealthyCount++;
 				}
@@ -229,4 +240,5 @@ export function createCodexHealthTool(ctx: ToolContext): ToolDefinition {
 			return results.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-health", definition);
 }

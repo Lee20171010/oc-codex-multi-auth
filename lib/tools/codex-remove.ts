@@ -14,6 +14,7 @@ import {
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
+import { rethrowIfRetryable, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexRemoveTool(ctx: ToolContext): ToolDefinition {
@@ -27,7 +28,7 @@ export function createCodexRemoveTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Remove one Codex account entry by index (1-based) or interactive picker when index is omitted. " +
 			"Requires confirm=true to proceed; this is a destructive operation and OAuth state cannot be recovered.",
@@ -184,6 +185,9 @@ export function createCodexRemoveTool(ctx: ToolContext): ToolDefinition {
 					try {
 						await persist(storage);
 					} catch (saveError) {
+						// Lease compromise surfaces through persist() — let it escape
+						// so the wrapper reports a retryable contention error.
+						rethrowIfRetryable(saveError);
 						logWarn("Failed to save account removal", {
 							error: String(saveError),
 						});
@@ -303,4 +307,5 @@ export function createCodexRemoveTool(ctx: ToolContext): ToolDefinition {
 			].join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-remove", definition);
 }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { LOG_DIR } from "../lib/logger.js";
 
 const { rewriteUrlForCodexMock } = vi.hoisted(() => ({
 	rewriteUrlForCodexMock: vi.fn((url: string) => url),
@@ -203,27 +204,34 @@ vi.mock("../lib/request/request-transformer.js", () => ({
 	upsertBackendModelIdentityMessage: (input: unknown) => input,
 }));
 
-vi.mock("../lib/logger.js", () => ({
-	initLogger: vi.fn(),
-	LOG_DIR: "/mock/logs/codex-plugin",
-	logRequest: vi.fn(),
-	logDebug: vi.fn(),
-	logInfo: vi.fn(),
-	logWarn: vi.fn(),
-	logError: vi.fn(),
-	// auth/device-code import maskString; keep it a passthrough in tests.
-	maskString: vi.fn((value: string) => value),
-	setCorrelationId: vi.fn(() => "test-correlation-id"),
-	clearCorrelationId: vi.fn(),
-	createLogger: vi.fn(() => ({
-		debug: vi.fn(),
-		info: vi.fn(),
-		warn: vi.fn(),
-		error: vi.fn(),
-		time: vi.fn(() => vi.fn(() => 0)),
-		timeEnd: vi.fn(),
-	})),
-}));
+vi.mock("../lib/logger.js", async (importOriginal) => {
+	// Keep the real redaction helpers — tool error paths call maskString so
+	// upstream failure text stays masked/truncated under this mock too.
+	const actual = await importOriginal<typeof import("../lib/logger.js")>();
+	return {
+		initLogger: vi.fn(),
+		logRequest: vi.fn(),
+		logDebug: vi.fn(),
+		logInfo: vi.fn(),
+		logWarn: vi.fn(),
+		logError: vi.fn(),
+		setCorrelationId: vi.fn(() => "test-correlation-id"),
+		clearCorrelationId: vi.fn(),
+		createLogger: vi.fn(() => ({
+			debug: vi.fn(),
+			info: vi.fn(),
+			warn: vi.fn(),
+			error: vi.fn(),
+			time: vi.fn(() => vi.fn(() => 0)),
+			timeEnd: vi.fn(),
+		})),
+		maskString: actual.maskString,
+		maskEmail: actual.maskEmail,
+		sanitizeValue: actual.sanitizeValue,
+		formatDuration: actual.formatDuration,
+		LOG_DIR: actual.LOG_DIR,
+	};
+});
 
 vi.mock("../lib/auto-update-checker.js", () => ({
 	checkAndNotify: vi.fn(async () => {}),
@@ -2601,7 +2609,11 @@ describe("OpenAIOAuthPlugin", () => {
 			const result = await plugin.tool["codex-limits"].execute();
 
 			expect(result).toContain("Error: HTTP 401:");
-			expect(result).toContain("Bearer [redacted]");
+			// The upstream layer emits "Bearer [redacted]"; the shared tool-level
+			// sanitizer then re-masks that marker via its generic Bearer pattern
+			// (maskToken keeps first-6/last-4 → "Bearer...ted]"). Either way the
+			// secret itself must never survive into tool output.
+			expect(result).toContain("Bearer...ted]");
 			expect(result).toContain("[redacted-token]");
 			expect(result).not.toContain("secret-token");
 			expect(result).not.toContain(fakeJwt);
@@ -3902,12 +3914,13 @@ describe("OpenAIOAuthPlugin", () => {
 				new Error("Pre-import backup failed: backup locked by antivirus"),
 			);
 
-			const result = await plugin.tool["codex-import"].execute({
-				path: "/tmp/backup.json",
-			});
-
-			expect(result).toContain("Import failed");
-			expect(result).toContain("Pre-import backup failed");
+			// The tool contract has no isError flag, so a failed import rejects
+			// rather than returning a success-looking "Import failed: ..." string.
+			await expect(
+				plugin.tool["codex-import"].execute({
+					path: "/tmp/backup.json",
+				}),
+			).rejects.toThrow(/Import failed: Pre-import backup failed/);
 		});
 
 		it("delegates backup+apply sequencing to storage import to avoid race windows", async () => {
@@ -4483,10 +4496,12 @@ describe("OpenAIOAuthPlugin edge cases", () => {
 		const { OpenAIOAuthPlugin } = await import("../index.js");
 		const plugin = await OpenAIOAuthPlugin({ client: mockClient } as never) as unknown as PluginType;
 
-		const result = await plugin.tool["codex-export"].execute({
-			path: "/tmp/backup.json",
-		});
-		expect(result).toContain("Export failed");
+		// The tool contract has no isError flag — a failed export rejects.
+		await expect(
+			plugin.tool["codex-export"].execute({
+				path: "/tmp/backup.json",
+			}),
+		).rejects.toThrow(/Export failed/);
 	});
 
 	it("handles import errors", async () => {
@@ -4498,10 +4513,11 @@ describe("OpenAIOAuthPlugin edge cases", () => {
 		const { OpenAIOAuthPlugin } = await import("../index.js");
 		const plugin = await OpenAIOAuthPlugin({ client: mockClient } as never) as unknown as PluginType;
 
-		const result = await plugin.tool["codex-import"].execute({
-			path: "/tmp/backup.json",
-		});
-		expect(result).toContain("Import failed");
+		await expect(
+			plugin.tool["codex-import"].execute({
+				path: "/tmp/backup.json",
+			}),
+		).rejects.toThrow(/Import failed/);
 	});
 
 	it("handles health check failures", async () => {
@@ -7131,7 +7147,7 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			expect(body).toEqual({
 				error: {
 					code: "all_accounts_failed",
-					message: "All 1 account(s) failed (server errors or auth issues). Check account health with `codex-health`. Request logs live in /mock/logs/codex-plugin (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).",
+					message: `All 1 account(s) failed (server errors or auth issues). Check account health with \`codex-health\`. Request logs live in ${LOG_DIR} (enable with ENABLE_PLUGIN_REQUEST_LOGGING=1).`,
 				},
 			});
 		});

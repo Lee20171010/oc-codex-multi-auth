@@ -900,6 +900,12 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
   // other worktrees on their next acquire.
   await checkWorktreeLockForCurrentStorage("save");
 
+  // Deferred stale-entry retire: a refused keychain write leaves an entry
+  // that can never be updated and would shadow every later JSON save on
+  // keychain-first loads. It is also the only surviving credential copy
+  // until the JSON fallback lands — retire it only after that write is
+  // durable, never before.
+  let retireKeychainProjectKey: string | null | undefined;
   if (isKeychainOptInEnabled()) {
     // Credential snapshots are scoped to the JSON backend and do not cover
     // keychain mode. That is enforced inside the snapshotter itself rather
@@ -934,12 +940,22 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
       await syncKeychainMigrationMarkers(path, blob);
       return;
     }
+    if (result.refused) {
+      retireKeychainProjectKey = projectKey;
+    }
     log.warn("keychain: write failed; falling back to JSON for this save", {
       error: result.error,
     });
   }
 
   await writeAccountsToPathUnlocked(getStoragePath(), storage);
+  if (retireKeychainProjectKey !== undefined) {
+    const cleared = await deleteFromKeychain(retireKeychainProjectKey);
+    log.warn("keychain: retired stale entry after write refusal", {
+      staleEntryCleared: cleared.deleted,
+      ...(cleared.error ? { staleEntryDeleteError: cleared.error } : {}),
+    });
+  }
 }
 
 /**

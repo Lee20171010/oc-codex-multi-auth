@@ -8,7 +8,7 @@ Tools run inside OpenCode (agent/tool surface). The standalone bin is an install
 
 ## OpenCode tools (24)
 
-Registered from per-file factories under `lib/tools/` via `createToolRegistry` in `lib/tools/index.ts`. Account indices are **1-based**; `switch`, `label`, `tag`, `note`, and `remove` open an interactive picker when `index` is omitted and the terminal supports menus.
+Registered from per-file factories under `lib/tools/` via `createToolRegistry` in `lib/tools/index.ts`. Account numbers you **pass in** (`index`, `account`, `accounts[]`) are **1-based**; `switch`, `label`, `tag`, `note`, and `remove` open an interactive picker when `index` is omitted and the terminal supports menus. Numbers a command **prints back** are different: `Account N` labels and picker entries are 1-based, while JSON `index`/`activeIndex` fields and the standalone CLI's `[N]` labels are the account's raw **0-based** storage position (see [Account numbering](#account-numbering)).
 
 | Tool | Purpose |
 |------|---------|
@@ -80,6 +80,19 @@ codex-import path="~/backup.json" dryRun=true
 codex-keychain command="status"
 ```
 
+### Account numbering
+
+Two conventions coexist, and they are different on purpose:
+
+- **Inputs are 1-based.** `index`, `account`, and `accounts[]` arguments and
+  interactive pickers number accounts from 1 — the same numbers `codex-list`
+  prints and `Account N` fallbacks use.
+- **Stored/emitted positions are 0-based.** JSON `index`/`activeIndex` fields
+  (`format="json"` tool output, `--json` CLI output) and the standalone CLI's
+  `[N]` labels are the account's raw position in the storage array, so the
+  first account prints as `[0]`. When scripting, treat those fields as opaque
+  positions — feed tool arguments the 1-based number instead.
+
 ### Operational notes
 
 - **`codex-pool`** accepts 1-based numbers but persists **stable account IDs** in `~/.opencode/openai-codex-auth-config.json`. The fetch path re-reads plugin config each request, so mutations apply on the next request.
@@ -116,6 +129,12 @@ Bin: `oc-codex-multi-auth` (or `npx -y oc-codex-multi-auth@latest …`).
 2. the **per-project** pool for the current directory's project root when `perProjectAccounts` is on (the default) — `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` (`scope: project`);
 3. the global `~/.opencode/oc-codex-multi-auth-accounts.json` (`scope: global`).
 
+Project-root detection walks up looking for markers (`.git`, `package.json`,
+`go.mod`, `Cargo.toml`, `pyproject.toml`, `.opencode`) and stops at your home
+directory — a stray `.opencode` inside `$HOME` does not turn `~` into a project,
+so the CLI resolves the global pool from `$HOME` or a markerless directory. Run
+it from inside a real project to see that project's pool.
+
 A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the write-capable commands — restore it through `codex-keychain rollback` instead.
 
 ### Keychain routing per command
@@ -127,7 +146,7 @@ A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the 
 
 | Flag | Applies to | Effect |
 |------|-----------|--------|
-| `--json` | all standalone commands | Machine-readable JSON output |
+| `--json` | `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm` | Machine-readable JSON output (**not** `install`/`update` — they reject it as an unknown option) |
 | `--include-sensitive` | account listing output | Raw identity fields instead of masked |
 | `--tag <tag>` / `--tag=<tag>` | account listing (incl. `limits`) | Filter accounts by tag |
 | `--config-path <path>` / `--config-path=<path>` | all standalone commands | Explicit accounts file (see storage resolution) |

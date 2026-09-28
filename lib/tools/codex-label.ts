@@ -13,6 +13,10 @@ import {
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
+import {
+	rethrowIfRetryable,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
@@ -26,7 +30,7 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 		cachedAccountManagerRef,
 		accountManagerPromiseRef,
 	} = ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Set or clear a beginner-friendly display label for an account (interactive picker when index is omitted).",
 		args: {
@@ -103,10 +107,13 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 			}
 
 			// The label is persisted and later rendered into terminals by
-			// several paths — strip escapes/controls at write time so a label
-			// cannot store `ESC[8m` concealment or cursor movement at all.
+			// several paths — strip the full escape sequence (not just the
+			// ESC byte, which would leave "[8m" literal text) at write time
+			// so a label cannot store concealment or cursor movement at all.
+			// Cap at 61, not 60: the length check below must still reject
+			// over-limit labels rather than seeing a pre-truncated value.
 			const normalizedLabel =
-				sanitizeDisplayText((label ?? "").trim(), { maxLength: 60 }) ?? "";
+				sanitizeDisplayText((label ?? "").trim(), { maxLength: 61 }) ?? "";
 			if (normalizedLabel.length > 60) {
 				if (ui.v2Enabled) {
 					return [
@@ -160,6 +167,9 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 					try {
 						await persist(storage);
 					} catch (saveError) {
+						// Lease compromise surfaces through persist() — let it escape
+						// so the wrapper reports a retryable contention error.
+						rethrowIfRetryable(saveError);
 						logWarn("Failed to save account label update", {
 							error: String(saveError),
 						});
@@ -253,4 +263,5 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 			return `Set label for ${accountLabel} to "${normalizedLabel}"`;
 		},
 	});
+	return withToolErrorEnvelope("codex-label", definition);
 }

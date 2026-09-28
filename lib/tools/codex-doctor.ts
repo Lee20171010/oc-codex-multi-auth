@@ -52,6 +52,12 @@ import {
 	TOOL_OUTPUT_FORMAT_DESCRIPTION,
 	TOOL_OUTPUT_FORMAT_VALUES,
 } from "./args.js";
+import {
+	redactHomePaths,
+	redactPluginOrigin,
+	sanitizeToolErrorMessage,
+	withToolErrorEnvelope,
+} from "./output.js";
 import type { ToolContext } from "./index.js";
 
 interface DoctorDiagnostics {
@@ -73,7 +79,6 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 		buildRoutingVisibilitySnapshot,
 		appendRoutingVisibilityText,
 		appendRoutingVisibilityUi,
-		formatDoctorSeverity,
 		formatDoctorSeverityText,
 		runtimeMetrics,
 		cachedAccountManagerRef,
@@ -168,11 +173,14 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 			? findReplacedLocalCheckout(origin, readPluginOriginHistory())
 			: null;
 		if (replacedCheckout) {
+			// The checkout root is a user path — redact it like codex-diag does so
+			// findings stay safe to paste into bug reports.
+			const redactedRoot = redactHomePaths(replacedCheckout.root);
 			findings.push({
 				severity: "warning",
 				code: "plugin-origin-replaced",
-				summary: `This plugin now loads from the installed package, but ran from ${replacedCheckout.root} until ${replacedCheckout.lastSeen}.`,
-				action: `Point the OpenCode plugin entry back at ${replacedCheckout.root} if your own build should still be loaded.`,
+				summary: `This plugin now loads from the installed package, but ran from ${redactedRoot} until ${replacedCheckout.lastSeen}.`,
+				action: `Point the OpenCode plugin entry back at ${redactedRoot} if your own build should still be loaded.`,
 			});
 		}
 		findings.push(...extraFindings);
@@ -180,7 +188,7 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 		return { storage, activeIndex, snapshots, runtime, summary, findings, nextAction };
 	}
 
-	return tool({
+	const definition = tool({
 		description: "Run beginner-friendly diagnostics with clear fixes.",
 		args: {
 			deep: tool.schema
@@ -236,9 +244,11 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 						// On Windows this can fail with EBUSY (not ENOENT) if the TUI
 						// process holds the cache file open; surface it rather than throw.
 						fixErrors.push(
-							`Failed to clear TUI quota cache: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
+							`Failed to clear TUI quota cache: ${sanitizeToolErrorMessage(
+								redactHomePaths(
+									error instanceof Error ? error.message : String(error),
+								),
+							)}`,
 						);
 					}
 				}
@@ -312,9 +322,11 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 					}
 				} catch (error) {
 					fixErrors.push(
-						`Auto-switch evaluation failed: ${
-							error instanceof Error ? error.message : String(error)
-						}`,
+						`Auto-switch evaluation failed: ${sanitizeToolErrorMessage(
+							redactHomePaths(
+								error instanceof Error ? error.message : String(error),
+							),
+						)}`,
 					);
 				}
 
@@ -388,8 +400,8 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 						: null,
 					technicalSnapshot: deep
 						? {
-								storagePath: getStoragePath(),
-								pluginOrigin: getPluginOrigin(),
+								storagePath: redactHomePaths(getStoragePath()),
+								pluginOrigin: redactPluginOrigin(getPluginOrigin()),
 								runtimeFailures: {
 									failedRequests: runtime.failedRequests,
 									rateLimitedResponses: runtime.rateLimitedResponses,
@@ -448,7 +460,10 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 					lines.push(
 						formatUiItem(
 							ui,
-							`${formatDoctorSeverity(ui, finding.severity)} ${finding.summary}`,
+							// The badge shares the finding's tone, so inlining its
+							// text keeps the "badge summary" layout with the same
+							// styling — the sanitizer strips embedded SGR either way.
+							`${formatDoctorSeverityText(finding.severity)} ${finding.summary}`,
 							tone,
 						),
 					);
@@ -481,13 +496,13 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 					lines.push("");
 					lines.push(...formatUiSection(ui, "Technical snapshot"));
 					lines.push(
-						formatUiKeyValue(ui, "Storage", getStoragePath(), "muted"),
+						formatUiKeyValue(ui, "Storage", redactHomePaths(getStoragePath()), "muted"),
 					);
 					lines.push(
 						formatUiKeyValue(
 							ui,
 							"Running from",
-							describePluginOrigin(getPluginOrigin()),
+							redactHomePaths(describePluginOrigin(getPluginOrigin())),
 							"muted",
 						),
 					);
@@ -550,8 +565,8 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 			if (deep) {
 				lines.push("");
 				lines.push("Technical snapshot:");
-				lines.push(`  Storage: ${getStoragePath()}`);
-				lines.push(`  Running from: ${describePluginOrigin(getPluginOrigin())}`);
+				lines.push(`  Storage: ${redactHomePaths(getStoragePath())}`);
+				lines.push(`  Running from: ${redactHomePaths(describePluginOrigin(getPluginOrigin()))}`);
 				lines.push(
 					`  Runtime failures: failed=${runtime.failedRequests}, rateLimited=${runtime.rateLimitedResponses}, authRefreshFailed=${runtime.authRefreshFailures}, server=${runtime.serverErrors}, network=${runtime.networkErrors}`,
 				);
@@ -565,4 +580,5 @@ export function createCodexDoctorTool(ctx: ToolContext): ToolDefinition {
 			return lines.join("\n");
 		},
 	});
+	return withToolErrorEnvelope("codex-doctor", definition);
 }

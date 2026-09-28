@@ -23,11 +23,12 @@
  * Covered by `test/tools-codex-diff.test.ts`.
  */
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
 
+import { CodexValidationError } from "../errors.js";
 import { maskString } from "../logger.js";
+import { redactHomePaths, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export interface CodexDiffEntry {
@@ -58,35 +59,16 @@ export interface CodexDiffResult {
 }
 
 export interface CodexDiffError {
+	/** Stable failure discriminator shared with the tool error envelope. */
+	ok: false;
+	/** Registered tool id that produced the error. */
+	tool: "codex-diff";
 	error: "cannot-read" | "invalid-json";
 	side: "left" | "right";
 	path: string;
 	message: string;
 	redactionApplied: true;
 	generatedAt: string;
-}
-
-/**
- * Replace occurrences of the user's home directory with the placeholder
- * `<HOME>` so shared diff output never leaks the reporter's username.
- * Mirrors the logic in `codex-diag.ts` intentionally — the two tools
- * ship the same guarantee.
- */
-function redactHomePaths(input: string): string {
-	const home = homedir();
-	if (!home) return input;
-	const needles = new Set<string>();
-	needles.add(home);
-	needles.add(home.replace(/\\/g, "/"));
-	needles.add(home.replace(/\\/g, "\\\\"));
-	let output = input;
-	for (const needle of needles) {
-		if (!needle) continue;
-		while (output.includes(needle)) {
-			output = output.replace(needle, "<HOME>");
-		}
-	}
-	return output;
 }
 
 /** Redact a filesystem path for display in the diff output. */
@@ -330,7 +312,7 @@ export function createCodexDiffTool(_ctx: ToolContext): ToolDefinition {
 	// matches every other `codex-*` tool and future additions (e.g.
 	// routing-snapshot embedding) don't break callers.
 	void _ctx;
-	return tool({
+	const definition = tool({
 		description:
 			"Compare two JSON config/account snapshots and emit a redacted structural diff. Tokens, emails, and home paths are masked; output is safe to share.",
 		args: {
@@ -343,20 +325,28 @@ export function createCodexDiffTool(_ctx: ToolContext): ToolDefinition {
 					"Path to the right-hand JSON file (comparison target).",
 				),
 			section: tool.schema
-				.string()
+				.enum(["accounts", "config", "both"])
 				.optional()
 				.describe(
 					"Which part of the document to diff: 'accounts' (accounts array only), 'config' (everything except accounts), or 'both' (default, whole document).",
 				),
 		},
 		async execute({ left, right, section }) {
-			const normalized = (section ?? "both").trim().toLowerCase();
-			const effectiveSection: "accounts" | "config" | "both" =
-				normalized === "accounts" ||
-				normalized === "config" ||
-				normalized === "both"
-					? (normalized as "accounts" | "config" | "both")
-					: "both";
+			// The enum declares the contract; this check is the runtime backstop
+			// for callers that bypass schema validation — an invalid value is
+			// rejected, never silently coerced to "both".
+			if (
+				section !== undefined &&
+				section !== "accounts" &&
+				section !== "config" &&
+				section !== "both"
+			) {
+				throw new CodexValidationError(
+					`Invalid section "${section}". Expected "accounts", "config", or "both".`,
+					{ field: "section", expected: "accounts|config|both" },
+				);
+			}
+			const effectiveSection = section ?? "both";
 			const [leftResult, rightResult] = await Promise.all([
 				readJsonFile(left),
 				readJsonFile(right),
@@ -366,6 +356,8 @@ export function createCodexDiffTool(_ctx: ToolContext): ToolDefinition {
 
 			if (!leftResult.ok) {
 				const errorPayload: CodexDiffError = {
+					ok: false,
+					tool: "codex-diff",
 					error: leftResult.error,
 					side: "left",
 					path: redactPath(left),
@@ -379,6 +371,8 @@ export function createCodexDiffTool(_ctx: ToolContext): ToolDefinition {
 			}
 			if (!rightResult.ok) {
 				const errorPayload: CodexDiffError = {
+					ok: false,
+					tool: "codex-diff",
 					error: rightResult.error,
 					side: "right",
 					path: redactPath(right),
@@ -426,4 +420,6 @@ export function createCodexDiffTool(_ctx: ToolContext): ToolDefinition {
 			);
 		},
 	});
+	// codex-diff always renders JSON, so failures emit the envelope too.
+	return withToolErrorEnvelope("codex-diff", definition, { alwaysJson: true });
 }

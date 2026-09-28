@@ -195,7 +195,15 @@ describe("codex-reset tool", () => {
 		const invalidate = vi.spyOn(ctx, "invalidateAccountManagerCache");
 		const execute = createCodexResetTool(ctx).execute as ToolExecute;
 		const output = JSON.parse(await execute({ action: "consume", confirm: true, format: "json" }));
-		expect(output).toMatchObject({ redeemed: true, blocksCleared: true });
+		expect(output).toMatchObject({
+			redeemed: true,
+			blocksCleared: true,
+			// Post-consume inventory: the spent credit must not still show as
+			// available in the same payload that reports `redeemed: true`
+			// (greptile P1 on PR #282 — stale inventory invites a re-redeem).
+			availableCount: 0,
+			credits: [],
+		});
 		expect(current.accounts[0].quotaExhaustedStampAt).toBe(200);
 		expect(current.accounts[0].quotaExhaustedUntil).toBe(future);
 		expect(current.accounts[0].rateLimitResetTimes).toEqual({ codex: future + 60_000 });
@@ -291,7 +299,8 @@ describe("codex-reset tool", () => {
 
 		expect(parsed.redeemed).toBe(true);
 		expect(parsed.usageError).toContain("network down");
-		expect(parsed.error).toBeUndefined();
+		// The consume schema is stable: `error` is always present, null here.
+		expect(parsed.error).toBeNull();
 	});
 
 	it("sends a stable idempotency key derived from the credit id", async () => {
@@ -336,17 +345,65 @@ describe("codex-reset tool", () => {
 		) as {
 			redeemed: boolean | null;
 			reason?: string;
+			ok?: boolean;
+			tool?: string;
 			error?: string;
 			message?: string;
+			retryable?: boolean;
+			nextAction?: string | null;
+			path?: string | null;
 		};
 		expect(parsed.redeemed).toBeNull();
 		expect(parsed.reason).toBe("consume-failed");
-		expect(parsed.error).toContain("socket hang up");
+		// Shared-envelope semantics (greptile P2 on PR #282): `error` is the
+		// machine code — a TypeError has none, so the generic code applies —
+		// and `message` carries the masked prose plus the recovery guidance.
+		expect(parsed.error).toBe("CODEX_TOOL_ERROR");
+		expect(parsed.message).toContain("socket hang up");
 		expect(parsed.message).toContain("RateLimitResetCredit_1");
+		// The advertised envelope discriminator must be present (greptile P1
+		// on PR #282): a caller reading `ok` alone cannot miss the uncertain
+		// outcome and treat the pre-consume inventory as current.
+		expect(parsed.ok).toBe(false);
+		expect(parsed.tool).toBe("codex-reset");
+		expect(parsed.retryable).toBe(false);
+		expect(parsed).toHaveProperty("nextAction");
+		expect(parsed).toHaveProperty("path");
 
 		const text = await execute({ action: "consume", confirm: true });
 		expect(text).toContain("redemption outcome unknown");
 		expect(text).toContain("RateLimitResetCredit_1");
+	});
+
+	it("subtracts exactly one credit when the upstream lists the same id twice", async () => {
+		// A malformed upstream payload can carry repeated ids — one redemption
+		// spends ONE credit, so availableCount drops by one, not by the number
+		// of removed rows (greptile P2 on PR #282).
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url === CREDITS_URL) {
+				return jsonResponse({
+					available_count: 3,
+					credits: [
+						{ ...creditsPayload.credits[0] },
+						{ ...creditsPayload.credits[0] },
+					],
+				});
+			}
+			if (url === USAGE_URL) return jsonResponse(usagePayload);
+			if (url === CONSUME_URL) {
+				return jsonResponse({ code: "ok", windows_reset: ["primary"] });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		});
+		const execute = createCodexResetTool(buildCtx()).execute as ToolExecute;
+
+		const parsed = JSON.parse(
+			await execute({ action: "consume", confirm: true, format: "json" }),
+		) as { availableCount: number; credits: Array<{ id: string }> };
+
+		expect(parsed.availableCount).toBe(2);
+		expect(parsed.credits).toHaveLength(0);
 	});
 
 	it("does not read usage before deciding whether to redeem", async () => {
