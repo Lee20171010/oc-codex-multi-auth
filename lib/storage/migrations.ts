@@ -156,13 +156,15 @@ export interface AccountMetadataV3 {
    */
   quotaExhaustedClearedAt?: number;
   /**
-   * The weekly-window reset boundary an `autoRedeemResets` spend was already
-   * claimed for, recorded inside the storage transaction so two processes
-   * monitoring the same account cannot each spend a credit on one depleted
-   * window. Keyed on the window boundary, not the credit: a new weekly window
-   * resets it, a failed or completed spend inside the same window does not.
+   * When an `autoRedeemResets` spend was last claimed for this account,
+   * recorded inside the storage transaction so two processes monitoring the
+   * same account cannot each spend a credit on one depleted weekly window.
+   * Stamped with the claim's own timestamp rather than any server-reported
+   * reset boundary: `reset_at` can be absent and `reset_after_seconds`
+   * derivations drift with every poll, while a weekly window cannot
+   * legitimately deplete twice within a week.
    */
-  autoRedeemWeeklyResetAt?: number;
+  autoRedeemClaimedAt?: number;
 	cooldownReason?: CooldownReason;
 }
 

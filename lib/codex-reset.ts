@@ -340,19 +340,6 @@ function weeklyWindow(usage: CodexUsageSummary) {
 }
 
 /**
- * The key a cross-process redeem claim is stamped with. The weekly window's
- * own reset boundary when the server reports one; otherwise the current
- * calendar week, which still bounds the dedupe to one spend per week.
- */
-export function getWeeklyRedeemClaimKey(usage: CodexUsageSummary): number {
-	const resetAtMs = weeklyWindow(usage)?.resetAtMs;
-	if (typeof resetAtMs === "number" && Number.isFinite(resetAtMs) && resetAtMs > 0) {
-		return resetAtMs;
-	}
-	return Math.floor(Date.now() / (WEEKLY_WINDOW_MINUTES * 60_000));
-}
-
-/**
  * Spend one banked reset credit when the weekly quota is (nearly) gone.
  *
  * Opt-in (`quotaNotifications.autoRedeemResets`). A credit clears both windows

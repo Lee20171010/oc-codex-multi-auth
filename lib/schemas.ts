@@ -205,7 +205,7 @@ export const AccountMetadataV3Schema = z.object({
  	quotaExhaustedUntil: z.number().optional(),
  	quotaExhaustedStampAt: z.number().optional(),
  	quotaExhaustedClearedAt: z.number().optional(),
- 	autoRedeemWeeklyResetAt: z.number().optional(),
+ 	autoRedeemClaimedAt: z.number().optional(),
  	cooldownReason: CooldownReasonSchema.optional(),
 });
 

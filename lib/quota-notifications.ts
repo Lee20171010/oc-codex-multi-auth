@@ -25,7 +25,7 @@ import {
 	resolveCodexUsageAccountId,
 	type CodexUsageSummary,
 } from "./codex-usage.js";
-import { autoRedeemResetCredit, getWeeklyRedeemClaimKey } from "./codex-reset.js";
+import { autoRedeemResetCredit } from "./codex-reset.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
 import {
 	isDesktopNotificationSupported,
@@ -610,11 +610,10 @@ async function fetchUsageForAccount(
 				request: usageRequest,
 				belowPercent: autoRedeemBelowPercent,
 				label: `account …${accountId.slice(-6)}`,
-				// One spend per depleted weekly window across every monitor watching
-				// this account file — the stamp rides the same cross-process lock as
-				// the quota-exhaustion fields.
-				claimWindow: () =>
-					persistAutoRedeemWeeklyClaim(account, getWeeklyRedeemClaimKey(usage)),
+				// One spend attempt per depleted weekly window across every
+				// monitor watching this account file — the claim rides the same
+				// cross-process lock as the quota-exhaustion fields.
+				claimWindow: () => persistAutoRedeemWeeklyClaim(account),
 			}))
 		) {
 			// The credit already cleared both windows server-side, so lift any

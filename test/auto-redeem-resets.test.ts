@@ -1,13 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
 	autoRedeemResetCredit,
 	getWeeklyLeftPercent,
-	getWeeklyRedeemClaimKey,
 	resetAutoRedeemAttempts,
 } from "../lib/codex-reset.js";
-import { parseCodexUsagePayload } from "../lib/codex-usage.js";
+import {
+	AUTO_REDEEM_WEEKLY_COOLDOWN_MS,
+	parseCodexUsagePayload,
+	persistAutoRedeemWeeklyClaim,
+} from "../lib/codex-usage.js";
 import { getQuotaNotifications } from "../lib/config.js";
+import { loadAccounts, saveAccounts } from "../lib/storage.js";
+import { setStoragePathDirect } from "../lib/storage/state.js";
 
 const request = { accountId: "acct-1", accessToken: "access-token", organizationId: undefined };
 
@@ -133,29 +142,57 @@ describe("autoRedeemResetCredit", () => {
 		expect(posts()).toHaveLength(0);
 	});
 
-	it("keys the cross-process claim on the weekly window's reset boundary", () => {
-		const resetAt = Math.floor(Date.now() / 1000) + 86_400;
-		const usage = parseCodexUsagePayload({
-			rate_limit: {
-				secondary_window: {
-					used_percent: 100,
-					limit_window_seconds: 604_800,
-					reset_at: resetAt,
-				},
-			},
-		});
-		expect(getWeeklyRedeemClaimKey(usage)).toBe(resetAt * 1000);
+});
 
-		// No boundary reported: the calendar week still bounds the dedupe.
-		const weekMs = 7 * 24 * 60 * 60_000;
-		const unbounded = parseCodexUsagePayload({
-			rate_limit: {
-				secondary_window: { used_percent: 100, limit_window_seconds: 604_800 },
-			},
+describe("persistAutoRedeemWeeklyClaim", () => {
+	const directories: string[] = [];
+
+	afterEach(async () => {
+		setStoragePathDirect(null);
+		await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+	});
+
+	async function withAccount<T>(run: (account: {
+		refreshToken: string; accountId: string; addedAt: number; lastUsed: number;
+		autoRedeemClaimedAt?: number;
+	}) => Promise<T>): Promise<T> {
+		const directory = await mkdtemp(join(tmpdir(), "auto-redeem-claim-"));
+		directories.push(directory);
+		setStoragePathDirect(join(directory, "accounts.json"));
+		const account = {
+			refreshToken: "refresh-1",
+			accountId: "account-1",
+			addedAt: 0,
+			lastUsed: 0,
+		};
+		await saveAccounts({ version: 3, accounts: [account], activeIndex: 0 });
+		return run(account);
+	}
+
+	it("grants the first claim and denies every later claim inside the cooldown", async () => {
+		await withAccount(async (account) => {
+			expect(await persistAutoRedeemWeeklyClaim(account)).toBe(true);
+			// A second monitor — or a second poll — in the same window is denied.
+			expect(await persistAutoRedeemWeeklyClaim(account)).toBe(false);
+			const persisted = await loadAccounts();
+			expect(persisted?.accounts[0]?.autoRedeemClaimedAt).toEqual(expect.any(Number));
 		});
-		const key = getWeeklyRedeemClaimKey(unbounded);
-		expect(key).toBeGreaterThanOrEqual(Math.floor(Date.now() / weekMs) - 1);
-		expect(key).toBeLessThanOrEqual(Math.floor(Date.now() / weekMs) + 1);
+	});
+
+	it("arms the account again once the cooldown has passed", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "auto-redeem-claim-"));
+		directories.push(directory);
+		setStoragePathDirect(join(directory, "accounts.json"));
+		const account = {
+			refreshToken: "refresh-1",
+			accountId: "account-1",
+			addedAt: 0,
+			lastUsed: 0,
+			autoRedeemClaimedAt: Date.now() - AUTO_REDEEM_WEEKLY_COOLDOWN_MS - 60_000,
+		};
+		await saveAccounts({ version: 3, accounts: [account], activeIndex: 0 });
+
+		expect(await persistAutoRedeemWeeklyClaim(account)).toBe(true);
 	});
 });
 

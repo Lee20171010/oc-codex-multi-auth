@@ -353,10 +353,10 @@ weekly quota is at or below `autoRedeemResetsBelowPercent`, provided the server
 reports the credit as applicable now. Only the weekly window triggers it: the
 5-hour window refills within hours, the weekly one can lock an account out for
 days. A credit clears both windows and cannot be undone. At most one spend is
-attempted per depleted weekly window across all processes watching the account
-file — a claim is stamped under the storage lock before the credit is consumed
-— so two hosts holding the same low reading cannot each burn a credit, and a
-credit that fails to redeem is not retried until the next restart or window.
+attempted per account per week across all processes watching the account file
+— a claim is stamped under the storage lock before the credit is consumed —
+so two hosts holding the same low reading cannot each burn a credit, and a
+credit that fails to redeem is not retried until the next restart.
 
 When `enabled` is on, each threshold alerts once per window until the window
 rises above it after a reset. Each line reports the account with the most
