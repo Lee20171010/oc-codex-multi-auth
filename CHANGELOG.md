@@ -7,6 +7,19 @@ The current stable release line is `6.x`. This file is the complete release hist
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.26.0] - 2026-09-30
+
+### Added
+- Support for `gpt-6.1-sol`, the new default model in the OpenAI Codex catalog (openai/codex PR #49318, 2026-09-29): normalization with a bare `gpt-6.1` alias, its own model family and instruction slug, responses-lite request shaping, low–ultra reasoning variants in the shipped `modern`/`legacy` catalogs (now 11 bases / 59 selectors), and default fallback-chain coverage between `gpt-6-astra` and `gpt-6-sol`. ([#284](https://github.com/ndycode/oc-codex-multi-auth/issues/284))
+- `quotaNotifications.autoRedeemResets` (with `autoRedeemResetsBelowPercent`, default 10) lets the quota poll spend one banked rate-limit reset credit on an account whose weekly quota is nearly gone and the server reports the credit applicable now. ([#283](https://github.com/ndycode/oc-codex-multi-auth/issues/283), thanks @yuefdev)
+
+### Changed
+- Plan labels follow the upstream Codex Pro ladder (openai/codex #47971): `prolite` → "Pro", `pro` → "Pro (More)", `promax` → "Pro (Max)"; `promax` seats report ~$500/mo with no published allotment ratio. The default Codex client version now tracks the highest catalog `minimal_client_version` (0.155.0). ([#284](https://github.com/ndycode/oc-codex-multi-auth/issues/284))
+
+### Fixed
+- The quota monitor keeps polling when `autoRedeemResets` is the only enabled feature; a usage re-read failure after a successful redeem no longer leaves the account blocked, and the stale snapshot can't re-stamp the cleared block. A cross-process claim under the account-storage lock bounds auto-redeem to one spend attempt per account per week, so two hosts holding the same low-quota reading cannot each burn a credit. ([#283](https://github.com/ndycode/oc-codex-multi-auth/issues/283))
+- A custom fallback chain keyed `gpt-6.1` now resolves to the same `gpt-6.1-sol` node the request path normalizes to. ([#284](https://github.com/ndycode/oc-codex-multi-auth/issues/284))
+
 ## [6.25.2] - 2026-09-28
 
 ### Fixed
