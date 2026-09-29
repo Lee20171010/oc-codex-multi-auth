@@ -24,6 +24,7 @@ import {
 	resolveCodexUsageAccountId,
 	type CodexUsageSummary,
 } from "./codex-usage.js";
+import { autoRedeemResetCredit } from "./codex-reset.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
 import {
 	isDesktopNotificationSupported,
@@ -95,6 +96,7 @@ type MonitorDependencies = {
 		account: AccountMetadataV3 | undefined,
 		onCredentialsPersisted: () => void,
 		autoProtectCredits: boolean,
+		autoRedeemBelowPercent?: number,
 	) => Promise<AccountQuotaSummary | null>;
 	notify: DesktopNotifier;
 	notificationsSupported: () => boolean;
@@ -383,6 +385,9 @@ export function createQuotaMonitor(overrides: Partial<MonitorDependencies> = {})
 					storage.accounts[index],
 					markCredentialsPersisted,
 					config.autoProtectCredits !== false,
+					config.autoRedeemResets === true
+						? (config.autoRedeemResetsBelowPercent ?? 10)
+						: undefined,
 				)),
 			);
 			for (const summary of results) {
@@ -569,6 +574,7 @@ async function fetchUsageForAccount(
 	account: AccountMetadataV3 | undefined,
 	onCredentialsPersisted: () => void = () => undefined,
 	autoProtectCredits = true,
+	autoRedeemBelowPercent?: number,
 ): Promise<AccountQuotaSummary | null> {
 	if (!account) return null;
 	try {
@@ -578,12 +584,29 @@ async function fetchUsageForAccount(
 		if (credentials.persisted) onCredentialsPersisted();
 		const accountId = resolveCodexUsageAccountId({ account, accessToken: credentials.accessToken });
 		if (!accountId) return null;
-		const usage = parseCodexUsagePayload(await fetchCodexUsage({
+		const usageRequest = {
 			accountId,
 			accessToken: credentials.accessToken,
 			organizationId: account.organizationId,
+		};
+		const readUsage = async () => parseCodexUsagePayload(await fetchCodexUsage({
+			...usageRequest,
 			normalizeAccountErrors: true,
 		}));
+		let usage = await readUsage();
+		// Opt-in: spend a banked reset while the weekly quota is nearly gone, then
+		// re-read so the exhausted-quota handling below sees the refreshed windows.
+		if (
+			autoRedeemBelowPercent !== undefined &&
+			(await autoRedeemResetCredit({
+				usage,
+				request: usageRequest,
+				belowPercent: autoRedeemBelowPercent,
+				label: `account …${accountId.slice(-6)}`,
+			}))
+		) {
+			usage = await readUsage();
+		}
 		const quotaExhaustedResetAtMs = getUsageQuotaExhaustedResetAtMs([
 			usage.primary,
 			usage.secondary,

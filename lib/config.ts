@@ -1348,6 +1348,10 @@ export interface QuotaNotificationsConfig {
 	enabled: boolean;
 	/** Poll usage to block fully spent subscription quotas before they spend Credits. */
 	autoProtectCredits?: boolean;
+	/** Spend a banked rate-limit reset credit once the weekly quota runs low. */
+	autoRedeemResets?: boolean;
+	/** Weekly quota left (percent) at or below which a credit is spent. */
+	autoRedeemResetsBelowPercent?: number;
 	intervalMs: number;
 	notifyEveryCheck: boolean;
 	thresholds: number[];
@@ -1369,6 +1373,18 @@ export function getQuotaNotifications(
 		"CODEX_AUTH_AUTO_PROTECT_CREDITS",
 		config?.autoProtectCredits,
 		true,
+	);
+
+	const autoRedeemResets = resolveBooleanSetting(
+		"CODEX_AUTH_AUTO_REDEEM_RESETS",
+		config?.autoRedeemResets,
+		false,
+	);
+	const autoRedeemResetsBelowPercent = resolveNumberSetting(
+		"CODEX_AUTH_AUTO_REDEEM_RESETS_BELOW_PERCENT",
+		config?.autoRedeemResetsBelowPercent,
+		10,
+		{ min: 0, max: 100 },
 	);
 
 	const intervalMs = resolveDurationMsSetting(
@@ -1397,6 +1413,8 @@ export function getQuotaNotifications(
 	return {
 		enabled,
 		autoProtectCredits,
+		autoRedeemResets,
+		autoRedeemResetsBelowPercent,
 		intervalMs,
 		notifyEveryCheck: config?.notifyEveryCheck ?? false,
 		thresholds,

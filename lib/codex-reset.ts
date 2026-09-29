@@ -21,12 +21,15 @@
 import { createHash } from "node:crypto";
 
 import {
+	hasUsageWindow,
 	isCodexAbortError,
 	sanitizeCodexApiErrorMessage,
+	type CodexUsageSummary,
 } from "./codex-usage.js";
 import { getFetchTimeoutMs, loadPluginConfig } from "./config.js";
 import { CODEX_BASE_URL } from "./constants.js";
 import { createUsageRequestTimeoutError } from "./error-sentinels.js";
+import { logInfo, logWarn } from "./logger.js";
 import { createCodexHeaders } from "./request/fetch-helpers.js";
 
 /** Status string the backend uses for a credit that can still be redeemed. */
@@ -307,4 +310,73 @@ export function formatCodexResetConsumeResult(
 		parts.push(`windows_reset=${result.windows_reset}`);
 	}
 	return parts.length > 0 ? parts.join("  ") : "redeemed";
+}
+
+const WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
+
+/**
+ * Credit ids this process already tried to spend. A failed redemption is not
+ * retried on every poll: the credit stays put and a person can look at why.
+ */
+const autoRedeemAttemptedCreditIds = new Set<string>();
+
+/** Percent left in the weekly window, or `undefined` when there is none to read. */
+export function getWeeklyLeftPercent(usage: CodexUsageSummary): number | undefined {
+	for (const window of [usage.primary, usage.secondary]) {
+		if (!hasUsageWindow(window)) continue;
+		if ((window.windowMinutes ?? 0) < WEEKLY_WINDOW_MINUTES) continue;
+		if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
+		return Math.max(0, 100 - window.usedPercent);
+	}
+	return undefined;
+}
+
+/**
+ * Spend one banked reset credit when the weekly quota is (nearly) gone.
+ *
+ * Opt-in (`quotaNotifications.autoRedeemResets`). A credit clears both windows
+ * but the 5-hour one refills by itself within hours, so only the weekly window,
+ * which can shut an account out for days, triggers a redemption. The server's
+ * own `applicableNow` count decides whether a credit can be spent right now.
+ *
+ * Never throws: a failed redemption is logged and reported as `false`.
+ */
+export async function autoRedeemResetCredit(params: {
+	usage: CodexUsageSummary;
+	request: { accountId: string; accessToken: string; organizationId: string | undefined };
+	belowPercent: number;
+	label: string;
+}): Promise<boolean> {
+	const { usage, request, belowPercent, label } = params;
+	const applicableNow = usage.resetCredits?.applicableNow;
+	if (typeof applicableNow !== "number" || applicableNow <= 0) return false;
+	const weeklyLeft = getWeeklyLeftPercent(usage);
+	if (weeklyLeft === undefined || weeklyLeft > belowPercent) return false;
+	try {
+		const summary = parseCodexResetCredits(await fetchCodexResetCredits(request));
+		const selection = selectRedeemableCredit(summary);
+		if (selection.type !== "selected") return false;
+		const { credit } = selection;
+		if (autoRedeemAttemptedCreditIds.has(credit.id)) return false;
+		autoRedeemAttemptedCreditIds.add(credit.id);
+		const result = await consumeCodexResetCredit({
+			...request,
+			creditId: credit.id,
+			redeemRequestId: createRedeemRequestId(credit.id),
+		});
+		logInfo(
+			`Spent a banked rate-limit reset on ${label} (weekly quota ${Math.round(weeklyLeft)}% left): ${formatCodexResetConsumeResult(result)}`,
+		);
+		return true;
+	} catch (error) {
+		logWarn(
+			`Could not spend a banked rate-limit reset on ${label}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return false;
+	}
+}
+
+/** Test seam: forget which credits this process already tried. */
+export function resetAutoRedeemAttempts(): void {
+	autoRedeemAttemptedCreditIds.clear();
 }

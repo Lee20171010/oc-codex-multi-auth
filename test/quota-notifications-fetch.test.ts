@@ -239,6 +239,79 @@ describe("default quota fetch path", () => {
 		expect(persistUsageQuotaExhaustion).not.toHaveBeenCalled();
 	});
 
+	it("spends a banked reset and re-reads usage when auto-redeem is on", async () => {
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		const spent = {
+			rate_limit: {
+				primary_window: { used_percent: 10, limit_window_seconds: 18_000 },
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: Math.floor(Date.now() / 1000) + 86_400,
+				},
+			},
+			rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+		};
+		const refreshed = {
+			rate_limit: {
+				primary_window: { used_percent: 0, limit_window_seconds: 18_000 },
+				secondary_window: { used_percent: 0, limit_window_seconds: 604_800 },
+			},
+		};
+		fetchCodexUsage.mockResolvedValueOnce(spent).mockResolvedValue(refreshed);
+		const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+			init?.method === "POST"
+				? new Response(JSON.stringify({ code: "reset" }), { status: 200 })
+				: new Response(
+						JSON.stringify({ available_count: 1, credits: [{ id: "c1", status: "available" }] }),
+						{ status: 200 },
+					),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({
+				loadConfig: () => ({
+					enabled: true,
+					autoProtectCredits: true,
+					autoRedeemResets: true,
+					autoRedeemResetsBelowPercent: 10,
+					intervalMs: 1_000,
+					notifyEveryCheck: true,
+					thresholds: [25, 10, 0],
+				}),
+				notify: vi.fn().mockResolvedValue(true),
+			}).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+		expect(fetchCodexUsage).toHaveBeenCalledTimes(2);
+		// The refreshed windows are healthy, so nothing is blocked afterwards.
+		expect(persistUsageQuotaExhaustion).not.toHaveBeenCalled();
+	});
+
+	it("never spends a reset when auto-redeem is off", async () => {
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		fetchCodexUsage.mockResolvedValue({
+			rate_limit: {
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: Math.floor(Date.now() / 1000) + 86_400,
+				},
+			},
+			rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+		});
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({ notify: vi.fn().mockResolvedValue(true) }).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("clears recovered quota and invalidates cached routing", async () => {
 		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
 		fetchCodexUsage.mockResolvedValue({ rate_limit: {

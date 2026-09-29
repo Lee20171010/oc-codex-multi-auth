@@ -86,6 +86,8 @@ export const PluginConfigSchema = z.object({
 	quotaNotifications: z.object({
 		enabled: z.boolean().optional(),
 		autoProtectCredits: z.boolean().optional(),
+		autoRedeemResets: z.boolean().optional(),
+		autoRedeemResetsBelowPercent: z.number().min(0).max(100).optional(),
 		intervalMs: z.number().min(30_000).max(MAX_CONFIG_DURATION_MS).optional(),
 		notifyEveryCheck: z.boolean().optional(),
 		thresholds: z.array(z.number().min(0).max(100)).optional(),
