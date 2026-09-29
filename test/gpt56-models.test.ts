@@ -256,6 +256,7 @@ describe("GPT-5.6 Model Support", () => {
 			// The terminal goes up, leading with its catalog upgrade.
 			expect(DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN["gpt-5.6-luna"]).toEqual([
 				"gpt-6-luna",
+				"gpt-6.1-sol",
 				"gpt-6-sol",
 				"gpt-5.6-sol",
 				"gpt-5.6-terra",

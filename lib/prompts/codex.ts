@@ -239,6 +239,7 @@ export type ModelFamily =
 	| "codex-max"
 	| "codex"
 	| "gpt-6-astra"
+	| "gpt-6.1-sol"
 	| "gpt-6-sol"
 	| "gpt-6-luna"
 	| "gpt-daybreak-blue"
@@ -262,6 +263,7 @@ export const MODEL_FAMILIES: readonly ModelFamily[] = [
 	"codex-max",
 	"codex",
 	"gpt-6-astra",
+	"gpt-6.1-sol",
 	"gpt-6-sol",
 	"gpt-6-luna",
 	"gpt-daybreak-blue",
@@ -289,6 +291,7 @@ const PROMPT_FILES: Record<ModelFamily, string> = {
 	// instructions from the model catalog (see CATALOG_SLUGS); this file is used
 	// only when the release tag has no usable catalog entry for the slug.
 	"gpt-6-astra": "gpt_5_2_prompt.md",
+	"gpt-6.1-sol": "gpt_5_2_prompt.md",
 	"gpt-6-sol": "gpt_5_2_prompt.md",
 	"gpt-6-luna": "gpt_5_2_prompt.md",
 	"gpt-daybreak-blue": "gpt_5_2_prompt.md",
@@ -315,6 +318,7 @@ const CACHE_FILES: Record<ModelFamily, string> = {
 	"codex-max": "codex-max-instructions.md",
 	codex: "codex-instructions.md",
 	"gpt-6-astra": "gpt-6-astra-instructions.md",
+	"gpt-6.1-sol": "gpt-6.1-sol-instructions.md",
 	"gpt-6-sol": "gpt-6-sol-instructions.md",
 	"gpt-6-luna": "gpt-6-luna-instructions.md",
 	"gpt-daybreak-blue": "gpt-daybreak-blue-instructions.md",
@@ -363,6 +367,11 @@ const CATALOG_SLUGS: ReadonlySet<string> = new Set([
 	// that predates them has no entry, and they fall back to the prompt file.
 	"gpt-6-sol",
 	"gpt-6-luna",
+	// Added on main 2026-09-29 (openai/codex b1e72963, PR #49318) but not yet
+	// in a release tag at 6.25.x time — rust-v0.159.0 predates the commit.
+	// Until a tag ships it, `base_instructions`-less slug misses fall back to
+	// the prompt file, exactly like the Sol/Luna window above.
+	"gpt-6.1-sol",
 ]);
 
 const CATALOG_PATH = "codex-rs/models-manager/models.json";
@@ -569,6 +578,13 @@ export function getModelFamily(normalizedModel: string): ModelFamily {
 	// `gpt-5.6-cyber` for the Sol family and serve it Sol's instructions.
 	if (/\bgpt(?:-| )5\.6(?:-| )cyber(?:\b|[- ])/i.test(normalizedModel)) {
 		return "gpt-5.6-cyber";
+	}
+	// GPT-6.1 must precede the bare `gpt-6` branch: the `.` after `6` is a word
+	// boundary, so `gpt-6.1-sol` would otherwise be claimed for Astra and share
+	// its rotation state. Sol is the only shipping 6.1, so a bare `gpt-6.1`
+	// selector joins it here.
+	if (/\bgpt(?:-| )6\.1(?:\b|[- ])/i.test(normalizedModel)) {
+		return "gpt-6.1-sol";
 	}
 	// Sol and Luna must precede the bare `gpt-6` branch, which would otherwise
 	// claim both for Astra and share its rotation state.
@@ -1021,7 +1037,7 @@ export function prewarmCodexInstructions(models: string[] = []): void {
 	// The Daybreak tiers are deliberately absent: they are `visibility: "hide"`
 	// opt-in ids, so prewarming them for every user would warm a cache almost
 	// nobody reads. Callers that do use them pass them in explicitly.
-	const candidates = models.length > 0 ? models : ["gpt-5-codex", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-pro", "gpt-5.2", "gpt-5.1"];
+	const candidates = models.length > 0 ? models : ["gpt-5-codex", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-pro", "gpt-5.2", "gpt-5.1"];
 	for (const model of candidates) {
 		void getCodexInstructions(model).catch((error) => {
 			logDebug("Codex instruction prewarm failed", {

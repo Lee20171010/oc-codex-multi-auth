@@ -34,6 +34,7 @@ const LUNA_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** Every general model still `visibility: "list"` in the catalog. */
 const LIVE_GENERAL = [
 	"gpt-6-astra",
+	"gpt-6.1-sol",
 	SOL,
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",

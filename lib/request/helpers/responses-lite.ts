@@ -38,6 +38,7 @@ import {
 	GPT_6_ASTRA_MODEL_ID,
 	GPT_6_LUNA_MODEL_ID,
 	GPT_6_SOL_MODEL_ID,
+	GPT_61_SOL_MODEL_ID,
 	getNormalizedModel,
 } from "./model-map.js";
 import { stripEffortSuffix } from "./effort-suffix.js";
@@ -66,6 +67,10 @@ const RESPONSES_LITE_MODELS: ReadonlySet<string> = new Set([
 	// `use_responses_lite: true` in their catalog entries (openai/codex 49e95cc7).
 	GPT_6_SOL_MODEL_ID,
 	GPT_6_LUNA_MODEL_ID,
+	// `use_responses_lite: true` in its catalog entry (openai/codex b1e72963,
+	// PR #49318), alongside `tool_mode: "code_mode_only"` and
+	// `multi_agent_version: "v2"`.
+	GPT_61_SOL_MODEL_ID,
 ]);
 
 /** Header Codex sets on every responses-lite request. */

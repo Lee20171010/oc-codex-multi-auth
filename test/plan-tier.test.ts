@@ -63,7 +63,7 @@ describe("formatPlanType", () => {
 	 */
 	const OBSERVED: Array<{ planType: string; expected: string; groundTruth: string }> = [
 		{ planType: "free", expected: "Free", groundTruth: "personal free" },
-		{ planType: "pro", expected: "Pro", groundTruth: "personal $200/mo" },
+		{ planType: "pro", expected: "Pro (More)", groundTruth: "personal $200/mo" },
 		{ planType: "team", expected: "Business", groundTruth: "business seat, 1x allowance" },
 		{
 			planType: "self_serve_business_prolite",

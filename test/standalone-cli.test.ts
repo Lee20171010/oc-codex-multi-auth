@@ -1359,7 +1359,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes("/wham/usage"))).toHaveLength(0);
 		expect(output.readings).toEqual({ source: "cache", readAt: fetchedAt });
 		expect(output.accounts.map((account: { source: string }) => account.source)).toEqual(["cache", "cache", "cache"]);
-		expect(output.accounts[1]).toMatchObject({ planName: "Pro", readAt: fetchedAt });
+		expect(output.accounts[1]).toMatchObject({ planName: "Pro (More)", readAt: fetchedAt });
 		expect(output.accounts[1].limits[0]).toMatchObject({ name: "Weekly limit", leftPercent: 90 });
 		expect(output.pool).toMatchObject({ allotment: 22, countedAccounts: 3 });
 	});
@@ -1781,7 +1781,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
 		expect(printed).toMatch(/Renews:\s+not started/);
 		expect(printed).not.toMatch(/Renews:\s+\d{4}-/);
-		expect(printed).toMatch(/Plan:\s+Pro \(20x\)/);
+		expect(printed).toMatch(/Plan:\s+Pro \(More\) \(20x\)/);
 	});
 
 	it("limits: keeps a window used below one percent as started", async () => {
@@ -1976,7 +1976,7 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		});
 
 		const printed = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-		expect(printed).toMatch(/Plan:\s+Pro \(20x\)/);
+		expect(printed).toMatch(/Plan:\s+Pro \(More\) \(20x\)/);
 		expect(printed).toMatch(/Plan:\s+Plus \(1x\)/);
 		expect(printed).toMatch(/Pool:\s+5% left of 21x across 2 accounts/);
 	});

@@ -54,7 +54,7 @@ const WARM_MODEL: string = GPT_6_LUNA_MODEL_ID;
  * multiply by the account count. This bounds the batch even if the shared
  * chain later grows a long tail.
  */
-export const WARM_ATTEMPT_HARD_CEILING = 6;
+export const WARM_ATTEMPT_HARD_CEILING = 7;
 
 let cachedMaxModelAttempts: number | undefined;
 

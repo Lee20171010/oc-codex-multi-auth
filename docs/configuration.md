@@ -66,6 +66,7 @@ either way. Per-model options override global options — see
 
 | model | supported values |
 | --- | --- |
+| `gpt-6.1-sol` | low, medium, high, xhigh, max, ultra |
 | `gpt-6-astra` | low, medium, high, xhigh, max, ultra |
 | `gpt-6-sol` | low, medium, high, xhigh, max, ultra |
 | `gpt-6-luna` | low, medium, high, xhigh, max |
@@ -114,6 +115,7 @@ it; `minimal` floors to `low` on Codex and on the GPT-5.6 / GPT-6 tiers.
 The plugin normalizes the selected id before the upstream call. Highlights:
 
 - bare `gpt-6` maps to `gpt-6-astra`; `gpt-6-astra-pro*` collapses onto `gpt-6-astra` (not a Codex-routable id)
+- bare `gpt-6.1` maps to `gpt-6.1-sol` (the only shipping 6.1 tier; GPT-6.1 Astra was cancelled 2026-09-28 before it ever got a model id)
 - `gpt-daybreak-blue*` / `gpt-daybreak-red*` map to the catalog `-latest` ids; `gpt-5.6-cyber*` maps to itself, never to Sol
 - bare `gpt-5.6` maps to `gpt-5.6-sol`; `gpt-5.6-terra*`/`gpt-5.6-luna*` map to their own tiers
 - `gpt-5.5*`, `gpt-5.5-fast*`, and `gpt-5.5-pro*` normalize to `gpt-5.5` (GPT-5.5 Pro is ChatGPT-only)
@@ -124,8 +126,8 @@ The plugin normalizes the selected id before the upstream call. Highlights:
 
 ### Catalog notes
 
-- The shipped templates carry 10 base model families and 53 variants
-  (`--modern`) or 53 explicit selector entries (`--legacy` / added by `--full`).
+- The shipped templates carry 11 base model families and 59 variants
+  (`--modern`) or 59 explicit selector entries (`--legacy` / added by `--full`).
   The default install writes no catalog at all — it registers the plugin and
   preserves `provider.openai`.
 - `gpt-5.4-mini`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, and
@@ -385,16 +387,17 @@ attempts are exhausted; `unsupportedCodexFallbackChain` overrides the chain
 per model.
 
 Default chains (each row is the tail of the general order
-`gpt-6-astra > gpt-6-sol > gpt-5.6-sol > gpt-5.6-terra > gpt-5.5 > gpt-6-luna >
-gpt-5.6-luna` after its own model):
+`gpt-6-astra > gpt-6.1-sol > gpt-6-sol > gpt-5.6-sol > gpt-5.6-terra > gpt-5.5 >
+gpt-6-luna > gpt-5.6-luna` after its own model):
 
-- `gpt-6-astra → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
+- `gpt-6-astra → gpt-6.1-sol → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
+- `gpt-6.1-sol → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
 - `gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
 - `gpt-5.6-sol → gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
 - `gpt-5.6-terra → gpt-5.5 → gpt-6-luna → gpt-5.6-luna`
-- `gpt-5.5 → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-6-luna → gpt-5.6-luna`
-- `gpt-6-luna → gpt-5.6-luna → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5`
-- `gpt-5.6-luna → gpt-6-luna → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5`
+- `gpt-5.5 → gpt-6-sol → gpt-6.1-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-6-luna → gpt-5.6-luna`
+- `gpt-6-luna → gpt-5.6-luna → gpt-6.1-sol → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5`
+- `gpt-5.6-luna → gpt-6-luna → gpt-6.1-sol → gpt-6-sol → gpt-5.6-sol → gpt-5.6-terra → gpt-5.5`
 - `gpt-5-codex → gpt-5.6-terra → gpt-5.6-luna`
 - `gpt-5.4 → gpt-6-sol → gpt-5.6-terra → gpt-5.6-luna` (the successor its catalog entry names)
 - `gpt-5.4-mini`, `gpt-5.4-nano → gpt-6-luna → gpt-5.6-luna`
@@ -416,7 +419,7 @@ rode in on an entry id; a directly selected non-entry id stays strict. For upstr
 the fallback only moves to a model with an eligible account under that pool's
 policy — an unavailable strict pool stays a strict-pool error — and a shared
 subscription block follows the account to every model, so changing models
-cannot bypass it. A single request hops across at most 6 quota-exhausted
+cannot bypass it. A single request hops across at most 7 quota-exhausted
 models (`MAX_QUOTA_FALLBACK_SWITCHES` in `lib/constants.ts`).
 
 Custom chain example:

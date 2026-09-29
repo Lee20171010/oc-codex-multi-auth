@@ -1868,7 +1868,7 @@ describe("OpenAIOAuthPlugin", () => {
 
 			const result = await plugin.tool["codex-limits"].execute();
 
-			expect(result).toContain("Plan: Pro (20x)");
+			expect(result).toContain("Plan: Pro (More) (20x)");
 			expect(result).toContain("Plan: Business (1x)");
 			// A spent 20x seat beside an untouched 1x seat. A plain mean would
 			// call this pool half full; weighting reports the 5% it holds.

@@ -141,6 +141,14 @@ export function describePlanAllotment(
 	if (plan === "prolite" || plan === "pro lite") {
 		return { weight: 5, multiplier: "5x", monthlyUsd: 100 };
 	}
+	// `promax` is the "Pro (Max)" tier added to upstream PlanType on
+	// 2026-09-25 (openai/codex #47971) and already present in model-catalog
+	// `available_in_plans` lists. Reported at ~$500/mo; OpenAI has not
+	// published a seat ratio for it, so it carries a price but no weight —
+	// same treatment as Enterprise, not a guess.
+	if (plan === "promax" || plan === "pro max") {
+		return { monthlyUsd: 500 };
+	}
 	// Go, Free and Enterprise all reach here. The first two carry no Codex
 	// allotment worth weighting, and Enterprise is negotiated per contract, so
 	// none of them states a ratio this code could apply.
