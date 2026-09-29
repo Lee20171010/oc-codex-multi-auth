@@ -108,6 +108,7 @@ function sanitizeAccountNumericState(account: AccountMetadataV3): AccountMetadat
     "quotaExhaustedUntil",
     "quotaExhaustedStampAt",
     "quotaExhaustedClearedAt",
+    "autoRedeemClaimedAt",
   ] as const) {
     const value = next[key];
     if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {

@@ -10,6 +10,7 @@ const ensureCodexUsageAccessToken = vi.fn();
 const fetchCodexUsage = vi.fn();
 const persistUsageQuotaExhaustion = vi.fn();
 const persistUsageQuotaRecovery = vi.fn();
+const persistAutoRedeemWeeklyClaim = vi.fn();
 
 // Only the two network/credential seams are stubbed. Everything else in
 // `codex-usage.js` stays real so this exercises the default `fetchSummary`
@@ -19,6 +20,8 @@ vi.mock("../lib/codex-usage.js", async (importOriginal) => {
 	return {
 		...actual,
 		persistUsageQuotaRecovery: (...args: unknown[]) => persistUsageQuotaRecovery(...args),
+		persistAutoRedeemWeeklyClaim: (...args: unknown[]) =>
+			persistAutoRedeemWeeklyClaim(...args),
 		ensureCodexUsageAccessToken: (...args: unknown[]) =>
 			ensureCodexUsageAccessToken(...args) as unknown,
 		fetchCodexUsage: (...args: unknown[]) => fetchCodexUsage(...args) as unknown,
@@ -29,6 +32,7 @@ vi.mock("../lib/codex-usage.js", async (importOriginal) => {
 
 const { createQuotaMonitor } = await import("../lib/quota-notifications.js");
 const { setStoragePathDirect } = await import("../lib/storage/state.js");
+const { resetAutoRedeemAttempts } = await import("../lib/codex-reset.js");
 
 const storage: AccountStorageV3 = {
 	version: 3,
@@ -59,6 +63,8 @@ describe("default quota fetch path", () => {
 		vi.clearAllMocks();
 		persistUsageQuotaExhaustion.mockResolvedValue(false);
 		persistUsageQuotaRecovery.mockResolvedValue(false);
+		persistAutoRedeemWeeklyClaim.mockResolvedValue(true);
+		resetAutoRedeemAttempts();
 		const directory = await mkdtemp(join(tmpdir(), "quota-fetch-"));
 		directories.push(directory);
 		setStoragePathDirect(join(directory, "accounts.json"));
@@ -237,6 +243,167 @@ describe("default quota fetch path", () => {
 		await monitorWith({ notify: vi.fn().mockResolvedValue(true) }).runNow();
 
 		expect(persistUsageQuotaExhaustion).not.toHaveBeenCalled();
+	});
+
+	it("spends a banked reset and re-reads usage when auto-redeem is on", async () => {
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		const spent = {
+			rate_limit: {
+				primary_window: { used_percent: 10, limit_window_seconds: 18_000 },
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: Math.floor(Date.now() / 1000) + 86_400,
+				},
+			},
+			rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+		};
+		const refreshed = {
+			rate_limit: {
+				primary_window: { used_percent: 0, limit_window_seconds: 18_000 },
+				secondary_window: { used_percent: 0, limit_window_seconds: 604_800 },
+			},
+		};
+		fetchCodexUsage.mockResolvedValueOnce(spent).mockResolvedValue(refreshed);
+		const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+			init?.method === "POST"
+				? new Response(JSON.stringify({ code: "reset" }), { status: 200 })
+				: new Response(
+						JSON.stringify({ available_count: 1, credits: [{ id: "c1", status: "available" }] }),
+						{ status: 200 },
+					),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({
+				loadConfig: () => ({
+					enabled: true,
+					autoProtectCredits: true,
+					autoRedeemResets: true,
+					autoRedeemResetsBelowPercent: 10,
+					intervalMs: 1_000,
+					notifyEveryCheck: true,
+					thresholds: [25, 10, 0],
+				}),
+				notify: vi.fn().mockResolvedValue(true),
+			}).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+		expect(fetchCodexUsage).toHaveBeenCalledTimes(2);
+		// The refreshed windows are healthy, so nothing is blocked afterwards.
+		expect(persistUsageQuotaExhaustion).not.toHaveBeenCalled();
+	});
+
+	it("spends nothing when another process already claimed the weekly window", async () => {
+		persistAutoRedeemWeeklyClaim.mockResolvedValue(false);
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		fetchCodexUsage.mockResolvedValue({
+			rate_limit: {
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: Math.floor(Date.now() / 1000) + 86_400,
+				},
+			},
+			rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+		});
+		const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+			init?.method === "POST"
+				? new Response(JSON.stringify({ code: "reset" }), { status: 200 })
+				: new Response(
+						JSON.stringify({ available_count: 1, credits: [{ id: "c1", status: "available" }] }),
+						{ status: 200 },
+					),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({
+				loadConfig: () => ({
+					enabled: true,
+					autoProtectCredits: true,
+					autoRedeemResets: true,
+					autoRedeemResetsBelowPercent: 10,
+					intervalMs: 1_000,
+					notifyEveryCheck: true,
+					thresholds: [25, 10, 0],
+				}),
+				notify: vi.fn().mockResolvedValue(true),
+			}).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+	});
+
+	// The spend cleared the quota server-side. If the re-read that follows it
+	// fails, the account must come out unblocked anyway — and the stale spent
+	// snapshot must not re-stamp the exhaustion the credit just removed.
+	it("clears a stored quota block after a redeem even when the re-read fails", async () => {
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		fetchCodexUsage
+			.mockResolvedValueOnce({
+				rate_limit: {
+					secondary_window: {
+						used_percent: 100,
+						limit_window_seconds: 604_800,
+						reset_at: Math.floor(Date.now() / 1000) + 86_400,
+					},
+				},
+				rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+			})
+			.mockRejectedValue(new Error("usage endpoint down"));
+		const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+			init?.method === "POST"
+				? new Response(JSON.stringify({ code: "reset" }), { status: 200 })
+				: new Response(
+						JSON.stringify({ available_count: 1, credits: [{ id: "c1", status: "available" }] }),
+						{ status: 200 },
+					),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({
+				loadConfig: () => ({
+					enabled: true,
+					autoProtectCredits: true,
+					autoRedeemResets: true,
+					autoRedeemResetsBelowPercent: 10,
+					intervalMs: 1_000,
+					notifyEveryCheck: true,
+					thresholds: [25, 10, 0],
+				}),
+				notify: vi.fn().mockResolvedValue(true),
+			}).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true);
+		expect(persistUsageQuotaRecovery).toHaveBeenCalled();
+		expect(persistUsageQuotaExhaustion).not.toHaveBeenCalled();
+	});
+
+	it("never spends a reset when auto-redeem is off", async () => {
+		ensureCodexUsageAccessToken.mockResolvedValue({ accessToken: "access-1", persisted: false });
+		fetchCodexUsage.mockResolvedValue({
+			rate_limit: {
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: Math.floor(Date.now() / 1000) + 86_400,
+				},
+			},
+			rate_limit_reset_credits: { available_count: 1, applicable_available_count: 1 },
+		});
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			await monitorWith({ notify: vi.fn().mockResolvedValue(true) }).runNow();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("clears recovered quota and invalidates cached routing", async () => {

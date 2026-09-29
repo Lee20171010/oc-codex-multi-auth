@@ -904,6 +904,8 @@ describe('Plugin Configuration', () => {
 			expect(getQuotaNotifications({})).toEqual({
 				enabled: false,
 				autoProtectCredits: true,
+				autoRedeemResets: false,
+				autoRedeemResetsBelowPercent: 10,
 				intervalMs: 1_800_000,
 				notifyEveryCheck: false,
 				thresholds: [25, 10, 0],
@@ -921,6 +923,8 @@ describe('Plugin Configuration', () => {
 			})).toEqual({
 				enabled: true,
 				autoProtectCredits: false,
+				autoRedeemResets: false,
+				autoRedeemResetsBelowPercent: 10,
 				intervalMs: 30_000,
 				notifyEveryCheck: false,
 				thresholds: [25, 10, 0],

@@ -155,6 +155,16 @@ export interface AccountMetadataV3 {
    * Never set alongside a live stamp — stamp writers delete it.
    */
   quotaExhaustedClearedAt?: number;
+  /**
+   * When an `autoRedeemResets` spend was last claimed for this account,
+   * recorded inside the storage transaction so two processes monitoring the
+   * same account cannot each spend a credit on one depleted weekly window.
+   * Stamped with the claim's own timestamp rather than any server-reported
+   * reset boundary: `reset_at` can be absent and `reset_after_seconds`
+   * derivations drift with every poll, while a weekly window cannot
+   * legitimately deplete twice within a week.
+   */
+  autoRedeemClaimedAt?: number;
 	cooldownReason?: CooldownReason;
 }
 

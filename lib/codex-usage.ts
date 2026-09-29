@@ -631,6 +631,56 @@ export async function persistUsageQuotaRecovery(account: AccountMetadataV3): Pro
 }
 
 /**
+ * How long an `autoRedeemResets` claim blocks the next spend for an account.
+ * A weekly window cannot legitimately deplete twice within a week, so this
+ * bounds the feature to at most one spend attempt per depleted window.
+ */
+export const AUTO_REDEEM_WEEKLY_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Claim an `autoRedeemResets` spend for this account, inside the storage lock
+ * so two processes monitoring it cannot both pass. Returns `true` when this
+ * caller holds the claim and may spend the credit; `false` when a claim is
+ * already recorded inside the weekly cooldown.
+ *
+ * The claim stamps the attempt's own timestamp, not a server-reported window
+ * boundary — `reset_at` can be absent and `reset_after_seconds` derivations
+ * drift with every poll, so neither is a stable identity to key on.
+ *
+ * The claim is written BEFORE the credit is spent: marking only on success
+ * would reopen the race (a second process's check lands before the first
+ * process's marker). A failed spend therefore also burns the cooldown —
+ * matching the documented "a failed redemption is not retried" semantics,
+ * now across processes instead of only within one.
+ */
+export async function persistAutoRedeemWeeklyClaim(
+	account: AccountMetadataV3,
+): Promise<boolean> {
+	const usageKey = getUsageAccountDedupeKey(account);
+	if (!usageKey) return false;
+	const now = Date.now();
+	return withAccountStorageTransaction(async (current, persist) => {
+		if (!current) return false;
+		let changed = false;
+		for (const storedAccount of current.accounts) {
+			if (getUsageAccountDedupeKey(storedAccount) !== usageKey) continue;
+			const claimed = storedAccount.autoRedeemClaimedAt;
+			if (
+				typeof claimed === "number" &&
+				Number.isFinite(claimed) &&
+				now - claimed < AUTO_REDEEM_WEEKLY_COOLDOWN_MS
+			) {
+				return false;
+			}
+			storedAccount.autoRedeemClaimedAt = now;
+			changed = true;
+		}
+		if (changed) await persist(current);
+		return changed;
+	});
+}
+
+/**
  * Reduce a `/wham/usage` document to the summary the callers render.
  *
  * The parameter is whatever `response.json()` produced: {@link fetchCodexUsage}

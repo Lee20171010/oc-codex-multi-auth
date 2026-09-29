@@ -403,6 +403,35 @@ describe("quota monitor lifecycle", () => {
 		monitor.dispose();
 	});
 
+	// `autoRedeemResets` is an unattended feature like `autoProtectCredits`:
+	// with notifications off and protection disabled, the poll is the only
+	// thing that can ever spend the credit, so it must keep running.
+	it("keeps polling when auto-redeem is the only enabled feature", async () => {
+		vi.useFakeTimers();
+		const loadStorage = vi.fn().mockResolvedValue(null);
+		const monitor = createQuotaMonitor({
+			loadConfig: () => ({
+				enabled: false,
+				autoProtectCredits: false,
+				autoRedeemResets: true,
+				autoRedeemResetsBelowPercent: 10,
+				intervalMs: 1_000,
+				notifyEveryCheck: false,
+				thresholds: [25, 10, 0],
+			}),
+			loadStorage,
+			notificationsSupported: () => false,
+			initialDelayMs: 10,
+		});
+
+		monitor.start();
+		await vi.advanceTimersByTimeAsync(10);
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(loadStorage).toHaveBeenCalledTimes(2);
+		monitor.dispose();
+	});
+
 	it("does not poll a configuration that can never deliver", async () => {
 		vi.useFakeTimers();
 		const loadStorage = vi.fn().mockResolvedValue(null);

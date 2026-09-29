@@ -152,6 +152,8 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 | --- | --- | --- | --- | --- | --- |
 | `enabled` | `CODEX_AUTH_QUOTA_NOTIFICATIONS` | boolean | `false` | macOS only (`osascript`) | aggregate 5-hour and weekly pool quota alerts |
 | `autoProtectCredits` | `CODEX_AUTH_AUTO_PROTECT_CREDITS` | boolean | `true` | — | poll usage each `intervalMs` and exclude fully spent subscription quotas from rotation |
+| `autoRedeemResets` | `CODEX_AUTH_AUTO_REDEEM_RESETS` | boolean | `false` | — | spend one banked rate-limit reset credit when the weekly quota is at or below the threshold and the server reports it applicable now |
+| `autoRedeemResetsBelowPercent` | `CODEX_AUTH_AUTO_REDEEM_RESETS_BELOW_PERCENT` | number | `10` | 0–100 | weekly quota left (percent) at or below which `autoRedeemResets` spends a credit |
 | `intervalMs` | `CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS` | number (ms) | `1800000` | 30000–86400000 | quota poll interval |
 | `notifyEveryCheck` | (file only) | boolean | `false` | — | deliver after every poll, not only on threshold crossings |
 | `thresholds` | (file only) | number[] | `[25, 10, 0]` | each 0–100 | remaining-percent thresholds per window; deduped, sorted most-generous first; `[]` disables |

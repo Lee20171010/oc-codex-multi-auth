@@ -273,6 +273,8 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 | --- | --- | --- | --- | --- | --- |
 | `quotaNotifications.enabled` | `CODEX_AUTH_QUOTA_NOTIFICATIONS` | boolean | `false` | macOS only | aggregate 5-hour and weekly pool quota alerts via Notification Center |
 | `quotaNotifications.autoProtectCredits` | `CODEX_AUTH_AUTO_PROTECT_CREDITS` | boolean | `true` | — | poll usage each `intervalMs` and exclude fully spent subscription quotas from rotation before they spend paid Credits |
+| `quotaNotifications.autoRedeemResets` | `CODEX_AUTH_AUTO_REDEEM_RESETS` | boolean | `false` | — | let the poll spend one banked rate-limit reset credit when an account's weekly quota is at or below `autoRedeemResetsBelowPercent` and the server reports the credit applicable now |
+| `quotaNotifications.autoRedeemResetsBelowPercent` | `CODEX_AUTH_AUTO_REDEEM_RESETS_BELOW_PERCENT` | number | `10` | 0–100 | weekly quota left (percent) at or below which `autoRedeemResets` spends a credit |
 | `quotaNotifications.intervalMs` | `CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS` | number (ms) | `1800000` | 30000–86400000 | quota poll interval |
 | `quotaNotifications.notifyEveryCheck` | (file only) | boolean | `false` | — | deliver the aggregate message after every poll, not only on threshold crossings |
 | `quotaNotifications.thresholds` | (file only) | number[] | `[25, 10, 0]` | each 0–100 | remaining-percent alert thresholds per window; deduped and sorted most-generous first; `[]` disables threshold alerts |
@@ -346,6 +348,17 @@ excludes the account from every model-family rotation until the reported
 reset; failed or rate-limited usage queries fail open and never block. A
 manual `codex-limits` — or any account the standalone `limits` reads live —
 persists an observed exhaustion block immediately.
+
+`autoRedeemResets` (off by default) lets the same poll spend one banked
+rate-limit reset credit — the ones `codex-reset` lists — on an account whose
+weekly quota is at or below `autoRedeemResetsBelowPercent`, provided the server
+reports the credit as applicable now. Only the weekly window triggers it: the
+5-hour window refills within hours, the weekly one can lock an account out for
+days. A credit clears both windows and cannot be undone. At most one spend is
+attempted per account per week across all processes watching the account file
+— a claim is stamped under the storage lock before the credit is consumed —
+so two hosts holding the same low reading cannot each burn a credit, and a
+credit that fails to redeem is not retried until the next restart.
 
 When `enabled` is on, each threshold alerts once per window until the window
 rises above it after a reset. Each line reports the account with the most

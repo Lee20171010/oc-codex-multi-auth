@@ -201,6 +201,10 @@ export function normalizeFlaggedStorage(data: unknown, sourcePath?: string): Fla
         typeof rawAccount.quotaExhaustedStampAt === "number" ? rawAccount.quotaExhaustedStampAt : undefined,
       quotaExhaustedClearedAt:
         typeof rawAccount.quotaExhaustedClearedAt === "number" ? rawAccount.quotaExhaustedClearedAt : undefined,
+      // The auto-redeem claim travels with a quarantined account so a
+      // restore does not re-arm a spend another process already claimed.
+      autoRedeemClaimedAt:
+        typeof rawAccount.autoRedeemClaimedAt === "number" ? rawAccount.autoRedeemClaimedAt : undefined,
       cooldownReason,
       flaggedAt,
       flaggedReason: typeof rawAccount.flaggedReason === "string" ? rawAccount.flaggedReason : undefined,
