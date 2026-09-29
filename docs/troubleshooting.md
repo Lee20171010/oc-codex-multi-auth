@@ -39,11 +39,13 @@ Structured errors carry a `code`. The codes the current build emits:
 | `CODEX_STORAGE_TRANSACTION_CONTENTION` | Another process holds the account-store lease; retry shortly |
 | `CODEX_RECOVERY_ERROR`, `CODEX_PROMPT_ERROR`, `CODEX_REQUEST_ERROR` | Recovery, prompt-cache, or request-transform failures |
 
-`CODEX_NETWORK_ERROR`, `CODEX_API_ERROR`, `CODEX_RATE_LIMIT`, and
-`CODEX_TIMEOUT` are declared in `lib/errors.ts` but are **reserved**: no code
-path throws them today. Network, HTTP, rate-limit, and timeout failures are
-handled by the retry/rotation pipeline and surface as plain errors (or get
-absorbed by a retry), not as dedicated `CODEX_*` codes.
+`CODEX_API_ERROR` and `CODEX_RATE_LIMIT` are declared in `lib/errors.ts` but
+are **reserved**: no production code path throws them today.
+`CODEX_NETWORK_ERROR` and `CODEX_TIMEOUT` are live — the prompt-catalog
+fetch path throws them (`lib/prompts/codex.ts`, `lib/error-sentinels.ts`).
+Other network, HTTP, rate-limit, and timeout failures are handled by the
+retry/rotation pipeline and surface as plain errors (or get absorbed by a
+retry), not as dedicated `CODEX_*` codes.
 
 ## Install and loading
 
@@ -170,8 +172,8 @@ login.
 updating `openai-codex-auth-config.json`; `CODEX_STORAGE_TRANSACTION_CONTENTION`
 means another holds the account-store lease. Nothing partial was applied —
 retry shortly, or stop the other session. A refresh that succeeded upstream but
-could not be committed to the pool is journaled in a `<accounts-file>.refresh.pending`
-file beside the accounts file, so the rotated credential is applied on the next
+could not be committed to the pool is journaled in a `<accounts-file>.refresh.pending.<hash>`
+file (one per consumed token) beside the accounts file, so the rotated credential is applied on the next
 load instead of being lost to a crash or a lost lease.
 
 **"Multi-worktree collision detected".** Advisory only: another live process

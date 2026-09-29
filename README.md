@@ -11,6 +11,8 @@
 
 Use it when one ChatGPT account is not enough: you hit rate limits or quota windows, you split work across accounts and projects, or you run unattended agents that need JSON diagnostics and safe repair commands instead of one opaque auth file.
 
+Using the official Codex CLI rather than OpenCode? The sibling project [`codex-multi-auth`](https://github.com/ndycode/codex-multi-auth) manages the same kind of account pool for `codex` itself.
+
 ## What it does
 
 - **Account pool** — OAuth login for multiple ChatGPT accounts, stored locally under `~/.opencode`, with per-project pools under `projects/<project-key>/` on by default.
@@ -29,6 +31,9 @@ Requires Node.js `>=22.19` and [OpenCode](https://opencode.ai).
 ```bash
 npx -y oc-codex-multi-auth@latest
 ```
+
+> [!NOTE]
+> The former package name `oc-chatgpt-multi-auth` is retired. Install `oc-codex-multi-auth` for all new setups; see [docs/faq.md](docs/faq.md) for the rename details.
 
 With no flag, the installer only registers the plugin: it adds the plugin entry to `~/.config/opencode/opencode.json`, enables the TUI quota plugin in `~/.config/opencode/tui.json`, and refreshes the cached package. Your existing `provider.openai` model config is left alone. Add a flag to also install a model catalog:
 
@@ -79,7 +84,7 @@ OpenCode **2.0.16+** loads the plugin through a V2 adapter; the account pool, OA
 ```bash
 npx -y oc-codex-multi-auth@latest --v2
 opencode service restart
-opencode auth login   # OpenAI -> Codex OAuth (Add account - ChatGPT Plus/Pro)
+opencode auth login   # OpenAI -> Codex OAuth (Add account — ChatGPT Plus/Pro)
 ```
 
 `--v2` writes a `plugins` entry only — no model catalog — and refuses an existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them (edit the JSONC `plugins` list by hand instead). In V2, tool names normalize to `codex_list`, `codex_switch`, and so on; `/codex-accounts` and the **Codex accounts** palette command list the pool, and **Codex quota details** shows quota. V1's entrypoint remains for OpenCode 1.18.29+. See [Troubleshooting](docs/troubleshooting.md) for V2-specific issues.
@@ -184,6 +189,7 @@ Most issues resolve by signing in again or running `codex-doctor fix=true` insid
 
 | Doc | What it covers |
 | --- | --- |
+| [docs/README.md](docs/README.md) | Documentation portal and page inventory |
 | [docs/getting-started.md](docs/getting-started.md) | Install, login methods, first prompt, uninstall |
 | [docs/tools-and-cli.md](docs/tools-and-cli.md) | Full tool/CLI argument reference |
 | [docs/configuration.md](docs/configuration.md) | Every config key and env var |

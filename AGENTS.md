@@ -68,7 +68,7 @@ only the host contract differs. Per-location `createStorageScope`
 - Stateless Codex contract on every request: `store: false` plus the `reasoning.encrypted_content` include.
 - Responses-lite models (GPT-6 Astra/Sol/Luna, Daybreak, GPT-5.6 Sol/Terra/Luna) get lite body shaping and default client identity `opencode`; other models default to `codex_cli_rs`.
 - Boolean env overrides are truthy only for the literal `"1"` — never `"true"`/`"yes"`.
-- Credential writes are atomic: 0600 temp file (POSIX mode bits only — Windows uses profile ACLs), fsync, rename, parent-dir fsync. A refresh committed upstream but not yet saved to the pool is journaled in a `<accounts-file>.refresh.pending` file beside the accounts file and applied on the next load.
+- Credential writes are atomic: 0600 temp file (POSIX mode bits only — Windows uses profile ACLs), fsync, rename, parent-dir fsync. A refresh committed upstream but not yet saved to the pool is journaled in a `<accounts-file>.refresh.pending.<hash>` file (one per consumed token; legacy unsuffixed `.refresh.pending` still replayed) beside the accounts file and applied on the next load.
 - OS keychain backend is opt-in (`CODEX_KEYCHAIN=1`) and holds the same V3 JSON blob; any keychain failure falls back to the JSON path — never delete the JSON copy on a keychain error. On `win32`, Credential Manager's blob-size cap means oversized pools are size-checked and stay on the JSON path.
 
 ## ANTI-PATTERNS
@@ -111,7 +111,7 @@ kept as-is, including one pointing at a working checkout.
 ## NOTES
 
 - OAuth redirect `http://localhost:1455/auth/callback`; the callback server binds both `127.0.0.1` and `[::1]` on port 1455 (IPv6 bind failure is tolerated when IPv4 works).
-- State files: plugin config `~/.opencode/openai-codex-auth-config.json`; per-project accounts `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json`; global accounts `~/.opencode/oc-codex-multi-auth-accounts.json`; flagged accounts, credential snapshots (`backups/codex-credential-snapshot-*`), pending-rotation journals (`<accounts-file>.refresh.pending`), and quota-notification state sit beside the active accounts file; request logs `~/.opencode/logs/codex-plugin/` when enabled.
+- State files: plugin config `~/.opencode/openai-codex-auth-config.json`; per-project accounts `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json`; global accounts `~/.opencode/oc-codex-multi-auth-accounts.json`; flagged accounts, credential snapshots (`backups/codex-credential-snapshot-*`), pending-rotation journals (`<accounts-file>.refresh.pending.<hash>`), and quota-notification state sit beside the active accounts file; request logs `~/.opencode/logs/codex-plugin/` when enabled.
 - Model catalog: 10 modern bases / 53 variants; legacy template ships 53 explicit entries. Routed but unshipped (add by hand): `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-5.6-cyber`. Retired but still resolved/falling back: `gpt-5.4-mini`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`.
 - Prompt templates sync from Codex CLI GitHub releases with ETag caching; catalog instructions come from `model_messages.instructions_template` when `base_instructions` is empty; `BUNDLED_CODEX_INSTRUCTIONS` (`lib/prompts/codex-instructions.ts`) is the offline last resort.
 - 5xx server errors rotate accounts with the same health penalty as network errors; RFC 8594 deprecation headers are logged as warnings.

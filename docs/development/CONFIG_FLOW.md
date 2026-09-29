@@ -78,7 +78,7 @@ package takes effect after each OpenCode process restarts once.
 |---------|------|-------|
 | Provider/plugin/model catalog | `~/.config/opencode/opencode.json` | OpenCode host + installer |
 | TUI plugin entry | `~/.config/opencode/tui.json` | installer writes it |
-| OAuth tokens | `~/.opencode/auth/openai.json` | auth flow |
+| OAuth tokens | `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode/auth.json`) | auth flow |
 | Account pool (global) | `~/.opencode/oc-codex-multi-auth-accounts.json` | storage layer |
 | Account pool (per project) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | storage layer |
 | Flagged accounts, quota-notification state, credential snapshots | `*-flagged-accounts.json`, `*-quota-notifications.json`, `backups/codex-credential-snapshot-*.json` beside the **active** accounts file | storage layer |

@@ -68,7 +68,7 @@ Everything below lives on your machine. Mode bits (`0o600`/`0o700`) are applied
 | Per-project pool (default on) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | `0o600` / `0o700` |
 | Flagged (quarantined) accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active accounts file | `0o600` / `0o700` |
 | Credential snapshots (pre-write backups) | `backups/codex-credential-snapshot-*.json` beside the active accounts file | `0o600` / `0o700` |
-| Rotation journal | `<accounts-file>.refresh.pending` beside the active accounts file — a refresh committed upstream but not yet saved to the pool | `0o600` / `0o700` |
+| Rotation journal | `<accounts-file>.refresh.pending.<hash>` (one per consumed token) beside the active accounts file — a refresh committed upstream but not yet saved to the pool | `0o600` / `0o700` |
 | Storage locks | `<storage>.transaction.lock`, `<storage>.refresh.lock` beside the active accounts file | — |
 | Plugin config | `~/.opencode/openai-codex-auth-config.json` | — |
 | Quota notification state | `oc-codex-multi-auth-quota-notifications.json` beside the active accounts file | `0o600` / `0o700` |
@@ -76,7 +76,7 @@ Everything below lives on your machine. Mode bits (`0o600`/`0o700`) are applied
 | Prompt/catalog caches | `~/.opencode/cache/` (`catalog-*-instructions.md`, `*-meta.json`, `opencode-codex.txt`, `update-check-cache.json`) | — |
 | TUI quota caches | `oc-codex-multi-auth-tui-quota.json`, `oc-codex-multi-auth-tui-quota-overview.json`, `oc-codex-multi-auth-workspace-names.json` under `$OPENCODE_STATE_DIR` or `~/.local/state/opencode` | `0o600` |
 | Request logs (opt-in) | `~/.opencode/logs/codex-plugin/request-<n>-<stage>.json` | file `0o600`, dir `0o700` |
-| OpenCode host files | `~/.config/opencode/opencode.json`, `~/.config/opencode/tui.json`, `~/.opencode/auth/openai.json` | host-managed |
+| OpenCode host files | `~/.config/opencode/opencode.json`, `~/.config/opencode/tui.json`, `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode/auth.json`) | host-managed |
 | OS keychain (opt-in) | `CODEX_KEYCHAIN=1` → OS credential store, service `oc-codex-multi-auth`; JSON renamed `*.migrated-to-keychain.<ts>` | OS-managed |
 
 Account pools hold OAuth access/refresh tokens, account IDs, labels/tags/notes, rate-limit reset times, and rotation state. Legacy `openai-codex-*.json` files are read once for migration only.

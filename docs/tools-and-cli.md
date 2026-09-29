@@ -8,7 +8,7 @@ Tools run inside OpenCode (agent/tool surface). The standalone bin is an install
 
 ## OpenCode tools (24)
 
-Registered from per-file factories under `lib/tools/` via `createToolRegistry` in `lib/tools/index.ts`. Account numbers you **pass in** (`index`, `account`, `accounts[]`) are **1-based**; `switch`, `label`, `tag`, `note`, and `remove` open an interactive picker when `index` is omitted and the terminal supports menus. Numbers a command **prints back** are different: `Account N` labels and picker entries are 1-based, while JSON `index`/`activeIndex` fields and the standalone CLI's `[N]` labels are the account's raw **0-based** storage position (see [Account numbering](#account-numbering)).
+Registered from per-file factories under `lib/tools/` via `createToolRegistry` in `lib/tools/index.ts`. Account numbers you **pass in** (`index`, `account`, `accounts[]`) are **1-based**; `switch`, `label`, `tag`, `note`, and `remove` open an interactive picker when `index` is omitted and the terminal supports menus. Numbers a command **prints back** differ by surface: `Account N` labels, picker entries, and tool `format="json"` `index`/`activeIndex` fields are all 1-based (tool JSON also carries the storage position separately as `zeroBasedIndex`), while the standalone CLI's `[N]` labels and `--json` `index` fields are the account's raw **0-based** storage position (see [Account numbering](#account-numbering)).
 
 | Tool | Purpose |
 |------|---------|
@@ -87,11 +87,13 @@ Two conventions coexist, and they are different on purpose:
 - **Inputs are 1-based.** `index`, `account`, and `accounts[]` arguments and
   interactive pickers number accounts from 1 — the same numbers `codex-list`
   prints and `Account N` fallbacks use.
-- **Stored/emitted positions are 0-based.** JSON `index`/`activeIndex` fields
-  (`format="json"` tool output, `--json` CLI output) and the standalone CLI's
+- **Tool JSON output stays 1-based.** `format="json"` emits `index`/
+  `activeIndex` numbered like the pickers; the raw storage position is
+  emitted separately as `zeroBasedIndex`.
+- **Standalone CLI output is 0-based.** `--json` `index` fields and the
   `[N]` labels are the account's raw position in the storage array, so the
-  first account prints as `[0]`. When scripting, treat those fields as opaque
-  positions — feed tool arguments the 1-based number instead.
+  first account prints as `[0]`. When scripting, feed tool arguments the
+  1-based number — or read `zeroBasedIndex` if you need the storage offset.
 
 ### Operational notes
 

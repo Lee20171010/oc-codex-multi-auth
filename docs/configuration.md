@@ -660,7 +660,7 @@ Use `opencode debug config` to confirm merged model entries.
 | `~/.config/opencode/opencode.json` | OpenCode provider/plugin config |
 | `~/.config/opencode/tui.json` | OpenCode TUI plugin config |
 | `~/.opencode/openai-codex-auth-config.json` | plugin runtime config (this page) |
-| `~/.opencode/auth/openai.json` | OpenCode OAuth tokens |
+| `$XDG_DATA_HOME/opencode/auth.json` (`~/.local/share/opencode/auth.json` by default) | OpenCode OAuth tokens |
 | `~/.opencode/oc-codex-multi-auth-accounts.json` | global V3 account pool |
 | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | per-project account pool |
 | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-flagged-accounts.json` | flagged/deactivated account metadata, always written beside the active accounts file (so `~/.opencode/oc-codex-multi-auth-flagged-accounts.json` when project storage is off) |

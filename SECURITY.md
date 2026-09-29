@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | ------- | --------- |
-| Latest release on the current major line (`6.25.1`) | ✅ Active support |
+| Latest release on the current major line (`6.25.2`) | ✅ Active support |
 | Any earlier release | ❌ Upgrade first, then re-test |
 | `oc-chatgpt-multi-auth` (former package name) | ❌ Renamed; migrate to `oc-codex-multi-auth` |
 
