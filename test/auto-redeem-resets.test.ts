@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	autoRedeemResetCredit,
 	getWeeklyLeftPercent,
+	getWeeklyRedeemClaimKey,
 	resetAutoRedeemAttempts,
 } from "../lib/codex-reset.js";
 import { parseCodexUsagePayload } from "../lib/codex-usage.js";
@@ -102,6 +103,59 @@ describe("autoRedeemResetCredit", () => {
 	it("reports false instead of throwing when the credit list cannot be read", async () => {
 		fetchMock.mockRejectedValue(new Error("network down"));
 		await expect(run(usageWith({}))).resolves.toBe(false);
+	});
+
+	it("spends nothing when the cross-process window claim is denied", async () => {
+		const claimWindow = vi.fn().mockResolvedValue(false);
+		expect(
+			await autoRedeemResetCredit({
+				usage: usageWith({ weeklyUsed: 100 }),
+				request,
+				belowPercent: 10,
+				label: "account abc123",
+				claimWindow,
+			}),
+		).toBe(false);
+		expect(claimWindow).toHaveBeenCalledTimes(1);
+		expect(posts()).toHaveLength(0);
+	});
+
+	it("does not spend when the claim itself fails", async () => {
+		expect(
+			await autoRedeemResetCredit({
+				usage: usageWith({ weeklyUsed: 100 }),
+				request,
+				belowPercent: 10,
+				label: "account abc123",
+				claimWindow: () => Promise.reject(new Error("storage locked")),
+			}),
+		).toBe(false);
+		expect(posts()).toHaveLength(0);
+	});
+
+	it("keys the cross-process claim on the weekly window's reset boundary", () => {
+		const resetAt = Math.floor(Date.now() / 1000) + 86_400;
+		const usage = parseCodexUsagePayload({
+			rate_limit: {
+				secondary_window: {
+					used_percent: 100,
+					limit_window_seconds: 604_800,
+					reset_at: resetAt,
+				},
+			},
+		});
+		expect(getWeeklyRedeemClaimKey(usage)).toBe(resetAt * 1000);
+
+		// No boundary reported: the calendar week still bounds the dedupe.
+		const weekMs = 7 * 24 * 60 * 60_000;
+		const unbounded = parseCodexUsagePayload({
+			rate_limit: {
+				secondary_window: { used_percent: 100, limit_window_seconds: 604_800 },
+			},
+		});
+		const key = getWeeklyRedeemClaimKey(unbounded);
+		expect(key).toBeGreaterThanOrEqual(Math.floor(Date.now() / weekMs) - 1);
+		expect(key).toBeLessThanOrEqual(Math.floor(Date.now() / weekMs) + 1);
 	});
 });
 

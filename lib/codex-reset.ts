@@ -322,13 +322,34 @@ const autoRedeemAttemptedCreditIds = new Set<string>();
 
 /** Percent left in the weekly window, or `undefined` when there is none to read. */
 export function getWeeklyLeftPercent(usage: CodexUsageSummary): number | undefined {
+	const window = weeklyWindow(usage);
+	if (!window) return undefined;
+	if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) {
+		return undefined;
+	}
+	return Math.max(0, 100 - window.usedPercent);
+}
+
+function weeklyWindow(usage: CodexUsageSummary) {
 	for (const window of [usage.primary, usage.secondary]) {
 		if (!hasUsageWindow(window)) continue;
 		if ((window.windowMinutes ?? 0) < WEEKLY_WINDOW_MINUTES) continue;
-		if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
-		return Math.max(0, 100 - window.usedPercent);
+		return window;
 	}
 	return undefined;
+}
+
+/**
+ * The key a cross-process redeem claim is stamped with. The weekly window's
+ * own reset boundary when the server reports one; otherwise the current
+ * calendar week, which still bounds the dedupe to one spend per week.
+ */
+export function getWeeklyRedeemClaimKey(usage: CodexUsageSummary): number {
+	const resetAtMs = weeklyWindow(usage)?.resetAtMs;
+	if (typeof resetAtMs === "number" && Number.isFinite(resetAtMs) && resetAtMs > 0) {
+		return resetAtMs;
+	}
+	return Math.floor(Date.now() / (WEEKLY_WINDOW_MINUTES * 60_000));
 }
 
 /**
@@ -346,8 +367,14 @@ export async function autoRedeemResetCredit(params: {
 	request: { accountId: string; accessToken: string; organizationId: string | undefined };
 	belowPercent: number;
 	label: string;
+	/**
+	 * Cross-process dedupe hook: invoked after a credit is selected and before
+	 * it is consumed. Returning `false` means another process already claimed a
+	 * spend for this depleted window, so this process spends nothing.
+	 */
+	claimWindow?: () => Promise<boolean>;
 }): Promise<boolean> {
-	const { usage, request, belowPercent, label } = params;
+	const { usage, request, belowPercent, label, claimWindow } = params;
 	const applicableNow = usage.resetCredits?.applicableNow;
 	if (typeof applicableNow !== "number" || applicableNow <= 0) return false;
 	const weeklyLeft = getWeeklyLeftPercent(usage);
@@ -358,6 +385,11 @@ export async function autoRedeemResetCredit(params: {
 		if (selection.type !== "selected") return false;
 		const { credit } = selection;
 		if (autoRedeemAttemptedCreditIds.has(credit.id)) return false;
+		// The in-process Set above only covers this monitor: a second host
+		// holding the same low-quota reading would list its own credits and
+		// spend a different one. The caller's claim serializes that across
+		// processes before the irreversible POST.
+		if (claimWindow && !(await claimWindow())) return false;
 		autoRedeemAttemptedCreditIds.add(credit.id);
 		const result = await consumeCodexResetCredit({
 			...request,

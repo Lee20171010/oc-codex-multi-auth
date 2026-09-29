@@ -155,6 +155,14 @@ export interface AccountMetadataV3 {
    * Never set alongside a live stamp — stamp writers delete it.
    */
   quotaExhaustedClearedAt?: number;
+  /**
+   * The weekly-window reset boundary an `autoRedeemResets` spend was already
+   * claimed for, recorded inside the storage transaction so two processes
+   * monitoring the same account cannot each spend a credit on one depleted
+   * window. Keyed on the window boundary, not the credit: a new weekly window
+   * resets it, a failed or completed spend inside the same window does not.
+   */
+  autoRedeemWeeklyResetAt?: number;
 	cooldownReason?: CooldownReason;
 }
 

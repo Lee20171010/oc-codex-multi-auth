@@ -97,6 +97,7 @@ const IGNORED_ACCOUNT_FIELDS: ReadonlySet<string> = new Set([
   "quotaExhaustedUntil",
   "quotaExhaustedStampAt",
   "quotaExhaustedClearedAt",
+  "autoRedeemWeeklyResetAt",
 ]);
 
 export function isCredentialSnapshotFileName(name: string): boolean {

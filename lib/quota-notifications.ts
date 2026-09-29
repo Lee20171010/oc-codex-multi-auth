@@ -18,13 +18,14 @@ import {
 	getUsageQuotaExhaustedResetAtMs,
 	hasUsageWindow,
 	parseCodexUsagePayload,
+	persistAutoRedeemWeeklyClaim,
 	persistUsageQuotaExhaustion,
 	persistUsageQuotaRecovery,
 	isUsageQuotaRecovered,
 	resolveCodexUsageAccountId,
 	type CodexUsageSummary,
 } from "./codex-usage.js";
-import { autoRedeemResetCredit } from "./codex-reset.js";
+import { autoRedeemResetCredit, getWeeklyRedeemClaimKey } from "./codex-reset.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
 import {
 	isDesktopNotificationSupported,
@@ -522,7 +523,13 @@ export function createQuotaMonitor(overrides: Partial<MonitorDependencies> = {})
 			// than adding a request-path preflight. A failed or rate-limited usage
 			// request simply retries on the next interval, so it cannot turn usage
 			// endpoint throttling into a routing block.
-			keepPolling = config.autoProtectCredits !== false || notificationsEnabled;
+			// `autoRedeemResets` is an unattended feature too: with it on and
+			// credit protection and notifications off, stopping the poll here
+			// would strand the opt-in — nothing would ever read usage again.
+			keepPolling =
+				config.autoProtectCredits !== false ||
+				config.autoRedeemResets === true ||
+				notificationsEnabled;
 			// Both switches govern the UNATTENDED poll. A forced check is an
 			// on-demand request from a caller that is blocked on the answer, so
 			// honouring them here would let `runNow()` return without asking
@@ -603,9 +610,28 @@ async function fetchUsageForAccount(
 				request: usageRequest,
 				belowPercent: autoRedeemBelowPercent,
 				label: `account …${accountId.slice(-6)}`,
+				// One spend per depleted weekly window across every monitor watching
+				// this account file — the stamp rides the same cross-process lock as
+				// the quota-exhaustion fields.
+				claimWindow: () =>
+					persistAutoRedeemWeeklyClaim(account, getWeeklyRedeemClaimKey(usage)),
 			}))
 		) {
-			usage = await readUsage();
+			// The credit already cleared both windows server-side, so lift any
+			// stored exhaustion stamp before the re-read: if that fetch fails,
+			// the stale spent snapshot would otherwise fall into the exhaustion
+			// branch below and re-stamp the very block the credit removed.
+			try {
+				if (await persistUsageQuotaRecovery(account)) onCredentialsPersisted();
+			} catch {
+				logWarn("Failed to persist recovered usage quota after reset redemption");
+			}
+			try {
+				usage = await readUsage();
+			} catch (error) {
+				logWarn(`Usage re-read after reset redemption failed: ${(error as Error).message}`);
+				return null;
+			}
 		}
 		const quotaExhaustedResetAtMs = getUsageQuotaExhaustedResetAtMs([
 			usage.primary,
