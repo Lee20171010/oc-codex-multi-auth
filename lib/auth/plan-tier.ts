@@ -20,7 +20,14 @@ import { JWT_CLAIM_PATH } from "../constants.js";
 const PLAN_TYPE_LABELS: ReadonlyMap<string, string> = new Map([
 	["free", "Free"],
 	["plus", "Plus"],
-	["pro", "Pro"],
+	// Upstream Codex (openai/codex #47971, merged 2026-09-25) relabels the Pro
+	// ladder as "Pro" (`prolite`), "Pro (More)" (`pro`) and "Pro (Max)"
+	// (`promax`, ~$500/mo). `promax` already appears in model-catalog plan
+	// lists (e.g. gpt-6.1-sol's `available_in_plans`), so tokens will start
+	// carrying it.
+	["prolite", "Pro"],
+	["pro", "Pro (More)"],
+	["promax", "Pro (Max)"],
 	["team", "Business"],
 	["business", "Business"],
 	["self_serve_business_prolite", "Business Premium"],

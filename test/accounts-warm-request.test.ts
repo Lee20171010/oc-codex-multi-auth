@@ -117,6 +117,7 @@ describe("warm fallback chain invariants (#210)", () => {
 		expect(reachable).toEqual([
 			"gpt-6-luna",
 			"gpt-5.6-luna",
+			"gpt-6.1-sol",
 			"gpt-6-sol",
 			"gpt-5.6-sol",
 			"gpt-5.6-terra",
@@ -245,9 +246,9 @@ describe("warmAccountWindow (#182)", () => {
 		const fetchImpl = vi.fn(async () => unsupported());
 
 		await expect(warmAccountWindow({ ...PARAMS, fetchImpl })).rejects.toThrow(
-			/tried gpt-6-luna, gpt-5\.6-luna, gpt-6-sol, gpt-5\.6-sol, gpt-5\.6-terra, gpt-5\.5/,
+			/tried gpt-6-luna, gpt-5\.6-luna, gpt-6\.1-sol, gpt-6-sol, gpt-5\.6-sol, gpt-5\.6-terra, gpt-5\.5/,
 		);
-		expect(fetchImpl).toHaveBeenCalledTimes(6);
+		expect(fetchImpl).toHaveBeenCalledTimes(7);
 	});
 
 	it("does not retry a 400 that is not an entitlement error, and surfaces its detail", async () => {

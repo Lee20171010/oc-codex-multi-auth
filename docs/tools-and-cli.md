@@ -167,9 +167,9 @@ A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the 
 | --- | --- |
 | (default) / `--plugin-only` | Register plugin/TUI entries without changing `provider.openai` |
 | `--v2` | Register for OpenCode V2 (`plugins` entry only; plugin-only, includes automatic quota UI) |
-| `--modern` | Compact modern catalog: 10 base OAuth models + variant presets |
-| `--full` | Compact bases plus 53 explicit selector entries |
-| `--legacy` | Explicit-only catalog: 53 preset model entries |
+| `--modern` | Compact modern catalog: 11 base OAuth models + variant presets |
+| `--full` | Compact bases plus 59 explicit selector entries |
+| `--legacy` | Explicit-only catalog: 59 preset model entries |
 | `--dry-run` | Show changed paths without values or writes |
 | `--no-cache-clear` | Skip clearing the OpenCode plugin cache |
 | `--version` | Print the installed package version |

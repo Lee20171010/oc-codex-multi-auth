@@ -42,6 +42,25 @@ export const GPT_6_SOL_MODEL_ID = "gpt-6-sol" as const;
 export const GPT_6_LUNA_MODEL_ID = "gpt-6-luna" as const;
 
 /**
+ * GPT-6.1 Sol, "the latest workhorse model for coding and everyday work",
+ * added to the Codex model catalog on 2026-09-29 (openai/codex b1e72963,
+ * PR #49318) as the new default catalog model — priority 1, ahead of Astra.
+ * The same day the openai-python (#3986, v3.21.0) and openai-node (#2836)
+ * SDKs added `gpt-6.1-sol` to their ChatModel enums for Chat Completions
+ * and Responses.
+ *
+ * Its catalog entry is `use_responses_lite: true`,
+ * `tool_mode: "code_mode_only"`, `multi_agent_version: "v2"`, and it lists
+ * every plan Astra does including the new `promax` tier. It is the only
+ * shipping 6.1: GPT-6.1 Astra was cancelled on 2026-09-28 and never got a
+ * model id. `minimal_client_version` is 0.153.0 and no released tag carries
+ * the entry yet (rust-v0.159.0 predates the commit; it lands with the next
+ * release), so catalog-sourced instructions fall back to the prompt file
+ * until then.
+ */
+export const GPT_61_SOL_MODEL_ID = "gpt-6.1-sol" as const;
+
+/**
  * Daybreak cyber tiers, verified in the Codex model catalog
  * (openai/codex `codex-rs/models-manager/models.json`, rust-v0.153.0+):
  * `gpt-daybreak-blue-latest` (`model_specialty: cyber`, defensive) and
@@ -171,6 +190,18 @@ export const MODEL_MAP: Record<string, string> = {
 		GPT_6_ASTRA_MODEL_ID,
 		LOW_TO_ULTRA_EFFORT_SUFFIXES,
 	),
+
+	// ============================================================================
+	// GPT-6.1 Sol (added to the Codex catalog 2026-09-29 as the default model)
+	//
+	// `visibility: "list"` and listed for every plan, so it is safe as a
+	// fallback target the moment an account's catalog refreshes. Efforts per
+	// the catalog: low..ultra, the same split as gpt-6-sol. Neither `none` nor
+	// `minimal` is accepted.
+	// ============================================================================
+	...expandEffortAliases(GPT_61_SOL_MODEL_ID, LOW_TO_ULTRA_EFFORT_SUFFIXES),
+	// Bare `gpt-6.1` mirrors `gpt-5.6` -> Sol: Sol is the only shipping 6.1.
+	"gpt-6.1": GPT_61_SOL_MODEL_ID,
 
 	// ============================================================================
 	// Cyber tiers (Daybreak-gated)

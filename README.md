@@ -17,7 +17,7 @@ Using the official Codex CLI rather than OpenCode? The sibling project [`codex-m
 
 - **Account pool** — OAuth login for multiple ChatGPT accounts, stored locally under `~/.opencode`, with per-project pools under `projects/<project-key>/` on by default.
 - **Rotation** — health-scored hybrid selection picks the best enabled account per request, with cooldowns, automatic token refresh, and failover on rate limits.
-- **Model catalog** — 10 base models covering 53 variants: GPT-6 Astra/Sol/Luna, the GPT-5.6 tiers, GPT-5.5, and more, routed through the stateless Codex contract (`store: false` + `reasoning.encrypted_content`).
+- **Model catalog** — 11 base models covering 59 variants: GPT-6.1 Sol, GPT-6 Astra/Sol/Luna, the GPT-5.6 tiers, GPT-5.5, and more, routed through the stateless Codex contract (`store: false` + `reasoning.encrypted_content`).
 - **Quota in the prompt** — the TUI prompt line shows remaining quota for the serving account, the whole pool, or banked reset credits, with rotating screens.
 - **`codex-*` tools** — 24 in-session tools for switching, labeling, tagging, limits, diagnostics, and repair.
 - **Standalone CLI** — the same package runs `status`, `list`, `limits`, `doctor`, and friends directly — no agent, no token cost.
@@ -40,9 +40,9 @@ With no flag, the installer only registers the plugin: it adds the plugin entry 
 | Flag | Effect |
 | --- | --- |
 | (none) / `--plugin-only` | Register the plugin entries only |
-| `--modern` | Also install the compact catalog: 10 base models with 53 variants |
-| `--full` | Also install the compact bases plus 53 explicit selector IDs (`openai/gpt-5.5-medium`) |
-| `--legacy` | Install the explicit-only catalog (53 entries) for older OpenCode |
+| `--modern` | Also install the compact catalog: 11 base models with 59 variants |
+| `--full` | Also install the compact bases plus 59 explicit selector IDs (`openai/gpt-5.5-medium`) |
+| `--legacy` | Install the explicit-only catalog (59 entries) for older OpenCode |
 | `--v2` | Register for OpenCode V2 instead (plugin only; see below) |
 | `--dry-run` | Show what would change without writing |
 | `--no-cache-clear` | Skip clearing the OpenCode plugin cache |
@@ -124,10 +124,11 @@ Each request picks the healthiest enabled account (`rotationStrategy`, default `
 
 ## Models
 
-`--modern` and `--full` install **10 base models** covering **53 variants** (selectable via `--variant`); `--legacy` installs the 53 as explicit IDs.
+`--modern` and `--full` install **11 base models** covering **59 variants** (selectable via `--variant`); `--legacy` installs the 59 as explicit IDs.
 
 | Base | Notes |
 | --- | --- |
+| `gpt-6.1-sol` | newest workhorse; Codex's default model since 2026-09-29 |
 | `gpt-6-astra` | frontier; rolled out 2026-09-03 |
 | `gpt-6-sol` | workhorse coding model |
 | `gpt-6-luna` | fast, affordable |

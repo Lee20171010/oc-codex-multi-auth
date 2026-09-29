@@ -30,6 +30,7 @@ import {
 	GPT_6_ASTRA_MODEL_ID,
 	GPT_6_LUNA_MODEL_ID,
 	GPT_6_SOL_MODEL_ID,
+	GPT_61_SOL_MODEL_ID,
 } from "./helpers/model-map.js";
 import { stripEffortSuffix } from "./helpers/effort-suffix.js";
 import {
@@ -118,7 +119,7 @@ const NORMALIZED_UNSUPPORTED_MODEL_PATTERN =
 export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> = {
 	// The general rows follow one order, most capable first:
 	//
-	//   gpt-6-astra > gpt-6-sol > gpt-5.6-sol > gpt-5.6-terra
+	//   gpt-6-astra > gpt-6.1-sol > gpt-6-sol > gpt-5.6-sol > gpt-5.6-terra
 	//     > gpt-5.5 > gpt-6-luna > gpt-5.6-luna
 	//
 	// and each row is that order's tail after its own model. The resolver walks
@@ -143,6 +144,18 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	// onto a general model would answer a security-research prompt with a model
 	// that was never asked for. They fail loudly instead.
 	[GPT_6_ASTRA_MODEL_ID]: [
+		GPT_61_SOL_MODEL_ID,
+		GPT_6_SOL_MODEL_ID,
+		GPT_56_SOL_MODEL_ID,
+		GPT_56_TERRA_MODEL_ID,
+		GPT_55_MODEL_ID,
+		GPT_6_LUNA_MODEL_ID,
+		GPT_56_LUNA_MODEL_ID,
+	],
+	// GPT-6.1 Sol sits directly under Astra: OpenAI markets it as "near-Astra
+	// performance", and it became the default catalog model on 2026-09-29
+	// (openai/codex b1e72963). Its row is the general order's tail after it.
+	[GPT_61_SOL_MODEL_ID]: [
 		GPT_6_SOL_MODEL_ID,
 		GPT_56_SOL_MODEL_ID,
 		GPT_56_TERRA_MODEL_ID,
@@ -165,9 +178,12 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	],
 	[GPT_56_TERRA_MODEL_ID]: [GPT_55_MODEL_ID, GPT_6_LUNA_MODEL_ID, GPT_56_LUNA_MODEL_ID],
 	// The catalog names `gpt-6-sol` as gpt-5.5's `upgrade`, so its row leads
-	// with it rather than being a plain suffix.
+	// with it rather than being a plain suffix. `gpt-6.1-sol` follows as the
+	// remaining live general above 5.5 in the order, keeping the invariant
+	// that every entry point reaches every live general model.
 	[GPT_55_MODEL_ID]: [
 		GPT_6_SOL_MODEL_ID,
+		GPT_61_SOL_MODEL_ID,
 		GPT_56_SOL_MODEL_ID,
 		GPT_56_TERRA_MODEL_ID,
 		GPT_6_LUNA_MODEL_ID,
@@ -176,10 +192,11 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	// The two Luna tiers end the order, so both rows go up after trying each
 	// other: a walk hops between them, and whichever row it is on then has to
 	// list the rest, or the walk dead-ends. gpt-5.6-luna leads with gpt-6-luna,
-	// its catalog `upgrade`. The warm ping starts at gpt-6-luna and reaches 6
+	// its catalog `upgrade`. The warm ping starts at gpt-6-luna and reaches 7
 	// models, exactly WARM_ATTEMPT_HARD_CEILING (lib/accounts/warm-request.ts).
 	[GPT_6_LUNA_MODEL_ID]: [
 		GPT_56_LUNA_MODEL_ID,
+		GPT_61_SOL_MODEL_ID,
 		GPT_6_SOL_MODEL_ID,
 		GPT_56_SOL_MODEL_ID,
 		GPT_56_TERRA_MODEL_ID,
@@ -187,6 +204,7 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	],
 	[GPT_56_LUNA_MODEL_ID]: [
 		GPT_6_LUNA_MODEL_ID,
+		GPT_61_SOL_MODEL_ID,
 		GPT_6_SOL_MODEL_ID,
 		GPT_56_SOL_MODEL_ID,
 		GPT_56_TERRA_MODEL_ID,
@@ -245,6 +263,7 @@ const DEFAULT_AUTO_FALLBACK_ENTRY_OPT_OUT_ENV: Record<string, string> = {
 	[GPT_6_ASTRA_MODEL_ID]: "CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK",
 	[GPT_6_SOL_MODEL_ID]: "CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK",
 	[GPT_6_LUNA_MODEL_ID]: "CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK",
+	[GPT_61_SOL_MODEL_ID]: "CODEX_AUTH_DISABLE_GPT6_AUTO_FALLBACK",
 };
 
 /**

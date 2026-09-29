@@ -125,7 +125,7 @@ describe("codex-list plan tier", () => {
 			"free",
 		]);
 		expect(parsed.accounts.map((account) => account.plan)).toEqual([
-			"Pro",
+			"Pro (More)",
 			"Business",
 			"Business Premium",
 			"Free",
