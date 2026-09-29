@@ -86,7 +86,8 @@ Run `codex-doctor fix=true` inside OpenCode, or
 The supported name is `oc-codex-multi-auth`. Older `oc-chatgpt-multi-auth`
 entries are migration-only: the installer rewrites stale plugin entries, and
 storage migrations still read old files. Replace remaining config references
-with `oc-codex-multi-auth`.
+with `oc-codex-multi-auth`. The full rename and storage-migration story is in
+[upgrade.md](upgrade.md).
 
 ## Where is the full command list?
 
@@ -94,8 +95,31 @@ with `oc-codex-multi-auth`.
 standalone commands (`doctor`, `status`, `list`, `limits`, `dashboard`,
 `health`, `diag`, `warm`).
 
+## How does the vocabulary map to `codex-multi-auth`?
+
+The sibling project [codex-multi-auth](https://github.com/ndycode/codex-multi-auth)
+manages accounts for the official Codex CLI rather than OpenCode. Where the
+same idea has a different name there:
+
+| Here | codex-multi-auth |
+| --- | --- |
+| `codex-warm` / `warm` — open every enabled account's usage window | `check --prime`, `account auto-prime` — start windows on unused subscriptions |
+| Banked reset credits (`codex-reset`) | Earned reset credits (`resets`) |
+| Flagged (quarantined) account | Flagged (sidelined) account |
+| Usage window / quota window | Quota window |
+| `codex-diag` — redacted diagnostic snapshot | `debug bundle` |
+| `codex-health` / `health` — local health summary | `check` — live health probe |
+
 ## How do I uninstall or disable it?
 
 There is no `uninstall` command — remove the plugin entries from
 `opencode.json`/`tui.json` by hand and delete state under `~/.opencode` if you
 want it gone. Step-by-step: [Uninstall / disable](getting-started.md#uninstall--disable).
+
+## Related
+
+- [index.md](index.md)
+- [getting-started.md](getting-started.md)
+- [tools-and-cli.md](tools-and-cli.md)
+- [troubleshooting.md](troubleshooting.md)
+- [upgrade.md](upgrade.md)

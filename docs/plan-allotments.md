@@ -44,3 +44,9 @@ Explicit-match notes:
 - **`codex-limits` / `limits` CLI**: `Plan: Pro (20x)` per account, closing with `Pool: 93% used of 81x across 11 accounts` — the `81x` is the summed weight.
 
 Both read the same module, so the two figures cannot drift apart.
+
+## Related
+
+- [tools-and-cli.md](tools-and-cli.md)
+- [configuration.md](configuration.md)
+- [faq.md](faq.md)

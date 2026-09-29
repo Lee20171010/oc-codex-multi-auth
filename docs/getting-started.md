@@ -106,9 +106,10 @@ multi-turn continuity. GPT-6 and GPT-5.6 models additionally use the
 responses-lite request shape. The shipped templates in
 [config/](../config/opencode-modern.json) already encode all of this.
 
-## Next
+## Related
 
-- [Tools and CLI](tools-and-cli.md) — the 24 `codex-*` tools and standalone commands
-- [Configuration](configuration.md) — plugin config keys and env overrides
-- [Troubleshooting](troubleshooting.md) — when something breaks
-- [FAQ](faq.md) — short answers
+- [tools-and-cli.md](tools-and-cli.md) — the 24 `codex-*` tools and standalone commands
+- [configuration.md](configuration.md) — plugin config keys and env overrides
+- [upgrade.md](upgrade.md) — package renames and storage migration
+- [troubleshooting.md](troubleshooting.md) — when something breaks
+- [faq.md](faq.md) — short answers

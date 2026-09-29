@@ -10,6 +10,7 @@ One-page index of every doc in this repository. `dist/` is build output, never a
 | `CHANGELOG.md` | Release history |
 | `CONTRIBUTING.md` | Contribution workflow |
 | `SECURITY.md` | Security reporting policy |
+| `CODE_OF_CONDUCT.md` | Conduct expectations and reporting |
 | `AGENTS.md` | Agent-facing project knowledge base |
 
 ## docs/ — Site + Guides
@@ -17,11 +18,13 @@ One-page index of every doc in this repository. `dist/` is build output, never a
 ```text
 docs/
 ├── _config.yml               # docs site config
-├── index.md                  # docs landing page
+├── index.md                  # product overview (what it does at runtime)
 ├── README.md                 # docs portal navigation
 ├── DOCUMENTATION.md          # this file
+├── STYLE_GUIDE.md            # docs voice, naming, and formatting rules
 ├── architecture.md           # public architecture overview
 ├── getting-started.md        # install + auth + first run
+├── upgrade.md                # version upgrades + retired-name migration
 ├── tools-and-cli.md          # 24 codex-* tools + standalone CLI
 ├── configuration.md          # config reference
 ├── plan-allotments.md        # ChatGPT plan -> allotment multiplier map

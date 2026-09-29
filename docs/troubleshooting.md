@@ -215,4 +215,9 @@ redacted snapshot for exactly this.
 
 ---
 
-Next: [Configuration](configuration.md) | [FAQ](faq.md) | [Docs home](index.md)
+## Related
+
+- [configuration.md](configuration.md)
+- [faq.md](faq.md)
+- [upgrade.md](upgrade.md)
+- [index.md](index.md)

@@ -9,8 +9,19 @@
 
 - [ ] `npm run lint`
 - [ ] `npm run build`
+- [ ] `npm run typecheck`
 - [ ] `npm test`
+- [ ] `npm test -- test/doc-parity.test.ts`
 - [ ] Not applicable
+
+## Docs and Governance Checklist
+
+- [ ] README updated (if user-visible behavior changed)
+- [ ] `docs/getting-started.md` updated (if onboarding flow changed)
+- [ ] `docs/tools-and-cli.md` updated (if the `codex-*` tool or CLI surface changed)
+- [ ] `docs/configuration.md` / `docs/development/CONFIG_FIELDS.md` updated (if config keys or env vars changed)
+- [ ] `docs/upgrade.md` updated (if migration or rename behavior changed)
+- [ ] `SECURITY.md` and `CONTRIBUTING.md` reviewed for alignment
 
 ## Compliance Confirmation
 

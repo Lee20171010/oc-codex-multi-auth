@@ -14,7 +14,7 @@ How `oc-codex-multi-auth` handles local data, upstream requests, and debugging a
 All traffic is HTTPS, direct from your machine — there is no maintainer proxy.
 
 | Endpoint | Used for | Credentials? |
-|----------|----------|--------------|
+| --- | --- | --- |
 | `https://auth.openai.com/oauth/authorize` | Browser OAuth (PKCE) — opened in your browser | — |
 | `https://auth.openai.com/oauth/token` | Code exchange + token refresh (`lib/auth/auth.ts`) | OAuth code / refresh token |
 | `https://auth.openai.com/api/accounts/deviceauth/usercode` | Device-code login: request a user code | OAuth `client_id` (public) |
@@ -63,7 +63,7 @@ Everything below lives on your machine. Mode bits (`0o600`/`0o700`) are applied
 **on POSIX only**; on Windows the files inherit the user profile's ACLs instead.
 
 | Item | Path | Mode (POSIX) |
-|------|------|------|
+| --- | --- | --- |
 | Global account pool | `~/.opencode/oc-codex-multi-auth-accounts.json` | file `0o600`, dir `0o700` |
 | Per-project pool (default on) | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` | `0o600` / `0o700` |
 | Flagged (quarantined) accounts | `oc-codex-multi-auth-flagged-accounts.json` beside the active accounts file | `0o600` / `0o700` |
@@ -117,3 +117,9 @@ Also remove keychain entries if you used `CODEX_KEYCHAIN=1` (`codex-keychain rol
 - Not affiliated with OpenAI; upstream data handling is governed by [OpenAI's policies](https://openai.com/policies/privacy-policy/).
 - Source is public: [github.com/ndycode/oc-codex-multi-auth](https://github.com/ndycode/oc-codex-multi-auth).
 - Security reports: [SECURITY.md](../SECURITY.md). Questions: [GitHub Issues](https://github.com/ndycode/oc-codex-multi-auth/issues).
+
+## Related
+
+- [configuration.md](configuration.md)
+- [troubleshooting.md](troubleshooting.md)
+- [upgrade.md](upgrade.md)

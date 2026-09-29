@@ -11,7 +11,7 @@ Tools run inside OpenCode (agent/tool surface). The standalone bin is an install
 Registered from per-file factories under `lib/tools/` via `createToolRegistry` in `lib/tools/index.ts`. Account numbers you **pass in** (`index`, `account`, `accounts[]`) are **1-based**; `switch`, `label`, `tag`, `note`, and `remove` open an interactive picker when `index` is omitted and the terminal supports menus. Numbers a command **prints back** differ by surface: `Account N` labels, picker entries, and tool `format="json"` `index`/`activeIndex` fields are all 1-based (tool JSON also carries the storage position separately as `zeroBasedIndex`), while the standalone CLI's `[N]` labels and `--json` `index` fields are the account's raw **0-based** storage position (see [Account numbering](#account-numbering)).
 
 | Tool | Purpose |
-|------|---------|
+| --- | --- |
 | `codex-setup` | Beginner checklist for first-run readiness; optional menu-driven wizard |
 | `codex-help` | Beginner command guide with quickstart and troubleshooting topics |
 | `codex-next` | The single most recommended next action for beginners |
@@ -42,7 +42,7 @@ Registered from per-file factories under `lib/tools/` via `createToolRegistry` i
 `format` is a real enum — only `text` (default) and `json` validate (`lib/tools/args.ts`, `TOOL_OUTPUT_FORMAT_VALUES`). `includeSensitive` opts raw labels/emails/account IDs into JSON output; `codex-pool` exposes stable account IDs instead. Mutation safeguards vary by operation: `codex-import` applies changes unless `dryRun: true`, and `codex-pool` remove/clear take effect immediately — read the per-tool args before automating against a live pool.
 
 | Tool | Args |
-|------|------|
+| --- | --- |
 | `codex-setup` | `wizard?` (bool) |
 | `codex-help` | `topic?` (`setup`, `switch`, `pools`, `health`, `backup`, `dashboard`) |
 | `codex-next` | `format?` |
@@ -111,7 +111,7 @@ Two conventions coexist, and they are different on purpose:
 Bin: `oc-codex-multi-auth` (or `npx -y oc-codex-multi-auth@latest …`).
 
 | Command | Role |
-|---------|------|
+| --- | --- |
 | `install` (default) | Register OpenCode + TUI plugin entries; optionally a model catalog |
 | `update` | Refresh the managed package cache; never touches config |
 | `doctor` | Local account/config diagnostics |
@@ -147,7 +147,7 @@ A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the 
 ### Standalone options
 
 | Flag | Applies to | Effect |
-|------|-----------|--------|
+| --- | --- | --- |
 | `--json` | `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm` | Machine-readable JSON output (**not** `install`/`update` — they reject it as an unknown option) |
 | `--include-sensitive` | account listing output | Raw identity fields instead of masked |
 | `--tag <tag>` / `--tag=<tag>` | account listing (incl. `limits`) | Filter accounts by tag |
@@ -164,7 +164,7 @@ A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the 
 ### Installer flags (`install`, default command)
 
 | Flag | Effect |
-|------|--------|
+| --- | --- |
 | (default) / `--plugin-only` | Register plugin/TUI entries without changing `provider.openai` |
 | `--v2` | Register for OpenCode V2 (`plugins` entry only; plugin-only, includes automatic quota UI) |
 | `--modern` | Compact modern catalog: 10 base OAuth models + variant presets |
@@ -215,4 +215,9 @@ A successful warm clears only unchanged cooldown state, the responding model's o
 - **Stateless Codex contract**: `store: false` + `reasoning.encrypted_content` on every request.
 - **Responses-lite models** (GPT-5.6, GPT-6, Daybreak): client identity defaults to `opencode`; other models use `codex_cli_rs`.
 
-See also: [architecture.md](architecture.md) · [getting-started.md](getting-started.md) · [configuration.md](configuration.md) · [faq.md](faq.md)
+## Related
+
+- [architecture.md](architecture.md)
+- [getting-started.md](getting-started.md)
+- [configuration.md](configuration.md)
+- [faq.md](faq.md)

@@ -7,7 +7,7 @@ these for you, you only copy by hand for a manual/debug setup.
 ## The files
 
 | File | Installer equivalent | Contents |
-|------|----------------------|----------|
+| --- | --- | --- |
 | [`minimal-opencode.json`](./minimal-opencode.json) | `npx -y oc-codex-multi-auth@latest` (plugin-only) | debug skeleton: registers the plugin and pins `model`, no model catalog — OpenCode supplies whatever models it knows |
 | [`opencode-modern.json`](./opencode-modern.json) | `--modern` | compact catalog: 10 base model families with 53 variants via OpenCode's `--variant` picker (OpenCode v1.0.210+) |
 | [`opencode-legacy.json`](./opencode-legacy.json) | `--legacy` | the same presets as 53 explicit selector entries (`gpt-5.5-medium`, …) for OpenCode v1.0.209 and below |

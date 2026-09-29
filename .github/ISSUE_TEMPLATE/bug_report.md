@@ -1,40 +1,52 @@
 ---
 name: Bug Report
-about: Report a bug or issue with the plugin
+about: Report a reproducible bug in oc-codex-multi-auth
 title: '[BUG] '
 labels: bug
 assignees: ''
 ---
 
-**Bug Description**
-A clear and concise description of the bug.
+## Summary
 
-**Steps to Reproduce**
+Describe the bug in one paragraph.
+
+## Reproduction
+
 1.
 2.
 3.
 
-**Expected Behavior**
-What should happen.
+## Expected Behavior
 
-**Actual Behavior**
-What actually happens.
+Describe the expected result.
 
-**Environment**
-- opencode version:
-- Plugin version:
-- Operating System:
-- Node.js version:
+## Actual Behavior
 
-**Logs**
-If applicable, attach logs from `~/.opencode/logs/codex-plugin/` (enable with `ENABLE_PLUGIN_REQUEST_LOGGING=1`)
+Describe the observed result.
 
-**Compliance Checklist**
-Please confirm:
-- [ ] I'm using this plugin for personal development only
-- [ ] I have an active ChatGPT Plus/Pro subscription
-- [ ] This issue is not related to attempting commercial use or TOS violations
-- [ ] I've reviewed the FAQ and Troubleshooting sections
+## Environment
 
-**Additional Context**
-Add any other relevant information.
+- `opencode --version`:
+- `oc-codex-multi-auth --version`:
+- OS:
+- Node.js:
+
+## Diagnostic Outputs
+
+Include relevant outputs from:
+
+- `oc-codex-multi-auth doctor` (or `doctor --deep` / `diag`)
+- `oc-codex-multi-auth status`
+- `oc-codex-multi-auth limits`
+
+## Logs (Optional)
+
+If needed, include sanitized logs from `~/.opencode/logs/codex-plugin/`.
+Only enable logging temporarily: `ENABLE_PLUGIN_REQUEST_LOGGING=1`.
+
+## Compliance Confirmation
+
+- [ ] I am using this plugin for personal development only, with an active ChatGPT Plus/Pro subscription.
+- [ ] This report does not request policy bypasses or commercial-use workarounds.
+- [ ] I reviewed the FAQ and Troubleshooting docs.
+- [ ] I removed any secrets/tokens from this report.

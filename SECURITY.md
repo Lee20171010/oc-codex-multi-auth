@@ -29,7 +29,7 @@ We aim to respond within 48 hours. Fixes land before public disclosure; reporter
 Two backends are supported. JSON is the default; the OS keychain is opt-in.
 
 | Backend | Enabled by | Where tokens live | Threat model |
-|---------|-----------|-------------------|--------------|
+| --- | --- | --- | --- |
 | JSON (default) | always | `~/.opencode/projects/<project-key>/oc-codex-multi-auth-accounts.json` (per-project pools on by default) or `~/.opencode/oc-codex-multi-auth-accounts.json`; files `0o600`, dirs `0o700` on POSIX (Windows uses the profile's ACLs instead). `.opencode/` is added to `.gitignore` when a pool lands inside a git repo. | Plaintext on disk — protect the home directory like `~/.ssh`. |
 | OS keychain (opt-in) | `CODEX_KEYCHAIN=1` | macOS Keychain / Windows Credential Manager / Linux libsecret; service `oc-codex-multi-auth`, account `accounts:<project-key>` (or `accounts:global`) | Ciphertext managed by the OS; only as strong as the login session's keychain unlock. |
 
@@ -50,7 +50,7 @@ Two backends are supported. JSON is the default; the OS keychain is opt-in.
 Runtime `dependencies` in `package.json`, the full set:
 
 | Dependency | Role |
-|------------|------|
+| --- | --- |
 | `@ai-sdk/openai` | AI-SDK client the OpenCode V2 adapter builds around the shared fetch |
 | `@opencode-ai/plugin` | OpenCode V1 plugin interface |
 | `@opencode/plugin` | OpenCode V2 plugin interface |

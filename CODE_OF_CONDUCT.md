@@ -22,10 +22,10 @@ Examples of unacceptable behavior:
 
 This code of conduct applies to issues, pull requests, discussions around the repository, and other project spaces where contributors represent the project.
 
-## Reporting
-
-For conduct concerns, contact the maintainer through GitHub or the security contact path in [SECURITY.md](SECURITY.md) when privacy is important.
-
 ## Enforcement
 
 Project maintainers may remove, edit, or reject contributions and interactions that do not align with this code of conduct.
+
+## Reporting
+
+For conduct concerns, contact the maintainer through GitHub or the security contact path in [SECURITY.md](SECURITY.md) when privacy is important.

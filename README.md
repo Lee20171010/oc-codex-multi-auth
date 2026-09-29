@@ -189,10 +189,12 @@ Most issues resolve by signing in again or running `codex-doctor fix=true` insid
 
 | Doc | What it covers |
 | --- | --- |
+| [docs/index.md](docs/index.md) | Product overview — what it does at runtime and who needs it |
 | [docs/README.md](docs/README.md) | Documentation portal and page inventory |
 | [docs/getting-started.md](docs/getting-started.md) | Install, login methods, first prompt, uninstall |
 | [docs/tools-and-cli.md](docs/tools-and-cli.md) | Full tool/CLI argument reference |
 | [docs/configuration.md](docs/configuration.md) | Every config key and env var |
+| [docs/upgrade.md](docs/upgrade.md) | Upgrades, package renames, storage migration |
 | [docs/architecture.md](docs/architecture.md) | How the pieces fit |
 | [docs/troubleshooting.md](docs/troubleshooting.md) / [docs/faq.md](docs/faq.md) | Recovery playbooks and common questions |
 | [docs/privacy.md](docs/privacy.md) | What is stored and where |

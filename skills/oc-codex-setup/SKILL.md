@@ -20,7 +20,7 @@ The default install registers the OpenCode plugin and the TUI quota-status plugi
 ## Config modes (choose at most one)
 
 | Flag | When to use |
-|------|-------------|
+| --- | --- |
 | _(none)_ / `--plugin-only` | User already manages `provider.openai` (default) |
 | `--modern` | Compact catalog: 10 base OAuth model families + variant presets |
 | `--full` | Compact bases plus 53 explicit selector IDs (e.g. `openai/gpt-5.5-medium`, `openai/gpt-6-astra-high`) |
@@ -68,7 +68,7 @@ oc-codex-multi-auth doctor --fix       # verified refresh + stale-marker cleanup
 All live in `~/.opencode/openai-codex-auth-config.json`; every boolean env override is truthy for `"1"` only.
 
 | Knob | Default | Purpose |
-|------|---------|---------|
+| --- | --- | --- |
 | `perProjectAccounts` | `true` | Per-project pools under `~/.opencode/projects/<key>/` |
 | `rotationStrategy` | `hybrid` | `sticky` / `round-robin` alternatives |
 | `maskEmail` | `false` | Render emails as `us***@example.com` |

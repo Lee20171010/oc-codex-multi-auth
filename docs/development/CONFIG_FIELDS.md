@@ -16,7 +16,7 @@ Source of truth:
 ## Config surfaces
 
 | Surface | Location | Fields |
-|---------|----------|--------|
+| --- | --- | --- |
 | OpenCode provider/plugin config | `~/.config/opencode/opencode.json` (or `<project>/.opencode.json`, merged) | `plugin`, `model`, `provider.openai.options`, `provider.openai.models`, `variables` |
 | Plugin runtime config | `~/.opencode/openai-codex-auth-config.json` | the runtime table below |
 | Environment | process env | overrides for most runtime fields, plus a few env-only knobs |
@@ -31,7 +31,7 @@ These are interpreted by OpenCode (and consumed by the plugin via
 `provider.openai`), not by the plugin schema.
 
 | Field | Type | Default | Meaning |
-|-------|------|---------|---------|
+| --- | --- | --- | --- |
 | `plugin` | string[] | `[]` | `"oc-codex-multi-auth"` registers the OAuth provider and hooks |
 | `model` | string | host-chosen | default model id, e.g. `openai/gpt-6-sol`; installer writes it only when the templates define matching entries (`--full`/`--modern`/`--legacy`) |
 | `provider.openai.options.reasoningEffort` | `none` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh` \| `max` \| `ultra` | `medium` | default reasoning depth; see the effort table in [configuration.md](../configuration.md#reasoning-effort) |
@@ -56,7 +56,7 @@ logged warning) and keeps the rest of the file.
 ### Request transform & session
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `requestTransformMode` | `CODEX_AUTH_REQUEST_TRANSFORM_MODE` | `native` \| `legacy` | `native` | — | `native` normalizes model names, injects model instructions, and upserts `## Backend Model Identity`; `legacy` does the full Codex CLI-compatible rewrite |
 | `codexMode` | `CODEX_MODE` | boolean | `true` | — | bridge-prompt behavior; only applies when `requestTransformMode` is `legacy` |
 | `fastSession` | `CODEX_AUTH_FAST_SESSION` | boolean | `false` | — | low-latency mode; wire effect is inside the `legacy` transform only |
@@ -68,7 +68,7 @@ logged warning) and keeps the rest of the file.
 ### Account selection & storage
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `rotationStrategy` | `CODEX_AUTH_ROTATION_STRATEGY` | `hybrid` \| `sticky` \| `round-robin` | `hybrid` | — | account selection policy; see configuration.md |
 | `modelAccountPools` | (file only) | record: model → account-id array | `{}` | keys/values non-empty strings | pin an effective model to stable account/workspace identities; keys normalize case-insensitively after model normalization |
 | `modelAccountPoolModes` | (file only) | record: model → `preferred` \| `strict` | `{}` (all `preferred`) | — | `preferred` falls back to the general pool when the mapping has no selectable account; `strict` never leaves its list (`strict_pool_unavailable`) |
@@ -82,7 +82,7 @@ logged warning) and keeps the rest of the file.
 ### Retries, waits & timeouts
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `retryProfile` | `CODEX_AUTH_RETRY_PROFILE` | `conservative` \| `balanced` \| `aggressive` | `balanced` | — | per-class retry budgets (`lib/request/retry-budget.ts`) |
 | `retryBudgetOverrides` | (file only) | object | `{}` | each class int ≥0 | per-class override: `authRefresh`, `network`, `server`, `rateLimitShort`, `rateLimitGlobal`, `emptyResponse` |
 | `retryAllAccountsRateLimited` | `CODEX_AUTH_RETRY_ALL_RATE_LIMITED` | boolean | `true` | — | wait and retry when every account is rate-limited |
@@ -98,7 +98,7 @@ logged warning) and keeps the rest of the file.
 ### Recovery & unsupported models
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `sessionRecovery` | `CODEX_AUTH_SESSION_RECOVERY` | boolean | `true` | — | classify recoverable API errors and show recovery toasts |
 | `autoResume` | `CODEX_AUTH_AUTO_RESUME` | boolean | `true` | — | auto-resume the session after thinking-block recovery |
 | `unsupportedCodexPolicy` | `CODEX_AUTH_UNSUPPORTED_MODEL_POLICY` | `strict` \| `fallback` | `strict` | — | `strict` returns entitlement errors; `fallback` retries down the fallback chain |
@@ -113,7 +113,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 ### TUI, quota display & notifications
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `codexTuiV2` | `CODEX_TUI_V2` | boolean | `true` | — | codex-style terminal UI; `false` keeps legacy output |
 | `codexTuiColorProfile` | `CODEX_TUI_COLOR_PROFILE` | `truecolor` \| `ansi256` \| `ansi16` | `truecolor` | — | terminal color profile |
 | `codexTuiGlyphMode` | `CODEX_TUI_GLYPHS` | `ascii` \| `unicode` \| `auto` | `ascii` | — | glyph set |
@@ -130,7 +130,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 ### `quotaStatus` object (all keys file-only)
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `mode` | (file only) | `active` \| `overview` \| `resets` or array | `active` | unknown names dropped | screens to show; a list rotates every `rotateMs` |
 | `rotateMs` | (file only) | number (ms) | `5000` | 1000–86400000 | per-screen dwell |
 | `layout` | (file only) | `accounts` \| `aggregate` \| `count` \| `total` | `accounts` | — | segment layout |
@@ -149,7 +149,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 ### `quotaNotifications` object
 
 | field | env | type | default | bounds | meaning |
-|-------|-----|------|---------|--------|---------|
+| --- | --- | --- | --- | --- | --- |
 | `enabled` | `CODEX_AUTH_QUOTA_NOTIFICATIONS` | boolean | `false` | macOS only (`osascript`) | aggregate 5-hour and weekly pool quota alerts |
 | `autoProtectCredits` | `CODEX_AUTH_AUTO_PROTECT_CREDITS` | boolean | `true` | — | poll usage each `intervalMs` and exclude fully spent subscription quotas from rotation |
 | `intervalMs` | `CODEX_AUTH_QUOTA_NOTIFICATIONS_INTERVAL_MS` | number (ms) | `1800000` | 30000–86400000 | quota poll interval |
@@ -163,7 +163,7 @@ Same `"1"`-only truthy rule unless noted. Grouped for reference; see
 for the user-facing table.
 
 | variable | meaning |
-|----------|---------|
+| --- | --- |
 | `CODEX_AUTH_ACCOUNT_ID` | pin requests to one workspace/account id (trimmed, ≤256 chars; longer/blank values are ignored) |
 | `OPENAI_BASE_URL` + `CODEX_AUTH_ALLOW_OPENAI_BASE_URL=1` | OpenAI-compatible gateway; absolute URL, no credentials/query/fragment, `https` unless literal loopback IP |
 | `CODEX_AUTH_CLIENT_IDENTITY` | `codex` \| `opencode` \| `host` (alias of `opencode`); default per model (`opencode` for responses-lite ids, `codex` otherwise) |
