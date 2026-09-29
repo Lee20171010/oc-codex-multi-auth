@@ -128,7 +128,7 @@ Each request picks the healthiest enabled account (`rotationStrategy`, default `
 
 | Base | Notes |
 | --- | --- |
-| `gpt-6.1-sol` | newest workhorse; Codex's default model since 2026-09-29 |
+| `gpt-6.1-sol` | newest workhorse; the OpenAI Codex catalog's default since 2026-09-29 |
 | `gpt-6-astra` | frontier; rolled out 2026-09-03 |
 | `gpt-6-sol` | workhorse coding model |
 | `gpt-6-luna` | fast, affordable |

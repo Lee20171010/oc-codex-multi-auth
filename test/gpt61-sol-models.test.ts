@@ -8,6 +8,7 @@ import {
 import { normalizeModel, getReasoningConfig } from "../lib/request/request-transformer.js";
 import {
 	DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN,
+	pickFallbackChainTarget,
 	resolveUnsupportedCodexFallbackModel,
 } from "../lib/request/fetch-helpers.js";
 import { usesResponsesLite } from "../lib/request/helpers/responses-lite.js";
@@ -134,6 +135,19 @@ describe("GPT-6.1 Sol Model Support", () => {
 				).toContain(SOL61);
 			}
 			expect(targets.length).toBeGreaterThan(0);
+		});
+
+		// A custom chain keyed `gpt-6.1` must land on the same node the request
+		// path normalized to (`gpt-6.1-sol`), or the user's row is silently
+		// dropped and the default row picks the target instead.
+		it("reads a custom chain keyed by the bare gpt-6.1 alias", () => {
+			expect(
+				pickFallbackChainTarget({
+					currentModel: SOL61,
+					attemptedModels: [SOL61],
+					customChain: { "gpt-6.1": ["gpt-5.6-terra"] },
+				}),
+			).toBe("gpt-5.6-terra");
 		});
 
 		it("auto-falls-back without the global policy, and honors the GPT-6 opt-out", () => {
