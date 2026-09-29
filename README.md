@@ -5,7 +5,7 @@
 [![CI](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/npm/l/oc-codex-multi-auth.svg)](LICENSE)
 
-![Codex OAuth Banner](assets/readme-hero.svg)
+<img width="1227" height="702" alt="oc-codex-multi-auth OpenAI accounts picker in OpenCode — add accounts, check quotas, and per-account health" src="https://github.com/user-attachments/assets/b796eb2f-282e-468a-ba6a-acadf09d731b" />
 
 `oc-codex-multi-auth` is an OpenCode plugin that runs Codex-style GPT models on your ChatGPT Plus/Pro subscription over OAuth. It keeps a named pool of ChatGPT accounts on your machine, rotates across them per request with health- and quota-aware selection, shows quota in the TUI prompt line, and ships a 24-tool `codex-*` command kit plus a standalone CLI. Account state stays local under `~/.opencode`.
 
@@ -69,10 +69,6 @@ oc-codex-multi-auth doctor
 # 4. Run a first prompt (catalog installs only)
 opencode run "Explain this repository" --model=openai/gpt-5.5 --variant=medium
 ```
-
-`opencode auth login` opens the account picker — add accounts, check quotas, and see each entry's health at a glance:
-
-<img width="1227" height="702" alt="oc-codex-multi-auth OpenAI accounts picker in OpenCode — add accounts, check quotas, and per-account health" src="https://github.com/user-attachments/assets/b796eb2f-282e-468a-ba6a-acadf09d731b" />
 
 Headless or remote shell? Four OAuth methods are available (browser, open URL manually, device code, manual URL paste) — see [Getting Started](docs/getting-started.md).
 
