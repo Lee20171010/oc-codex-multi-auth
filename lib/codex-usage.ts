@@ -811,7 +811,12 @@ export function summarizeCodexErrorMessage(text: string, maxChars = 200): string
 			summary = prefix ? `${prefix}: ${readable}` : readable;
 		}
 	}
-	const line = (summary ?? text).replace(/\s+/g, " ").trim();
+	// Decoding turns an escaped `\u001b` into a live ESC, so control characters
+	// are dropped before the line can reach a terminal.
+	const line = (summary ?? text)
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 	return line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line;
 }
 

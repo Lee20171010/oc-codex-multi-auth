@@ -42,6 +42,12 @@ describe("summarizeCodexErrorMessage", () => {
 		);
 	});
 
+	it("drops control characters an escaped message decodes into", () => {
+		const body = JSON.stringify({ error: { message: "token \u001b[31mreused\u001b[0m\u0007 now" } });
+		expect(body).toContain("\\u001b");
+		expect(summarizeCodexErrorMessage(body)).toBe("token [31mreused [0m now");
+	});
+
 	it("collapses text with no message onto one line", () => {
 		expect(summarizeCodexErrorMessage("HTTP 500:\n  upstream\tboom")).toBe("HTTP 500: upstream boom");
 	});
