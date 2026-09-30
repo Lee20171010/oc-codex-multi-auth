@@ -20,6 +20,7 @@ import {
 	ensureCodexUsageAccessToken,
 	fetchCodexUsage,
 	getUsageLeftPercent,
+	isCodexCredentialFailure,
 	hasUsageWindow,
 	parseCodexUsagePayload,
 	resolveCodexUsageAccountId,
@@ -101,7 +102,7 @@ export function toOverviewAccount(params: {
 
 type OverviewFetchResult =
 	| { reading: TuiQuotaOverviewAccount }
-	| { error: string };
+	| { error: string; credential: boolean };
 
 async function fetchOverviewAccount(
 	storage: AccountStorageV3,
@@ -115,7 +116,9 @@ async function fetchOverviewAccount(
 			account,
 			accessToken: credentials.accessToken,
 		});
-		if (!accountId) return { error: "could not resolve account id (re-login may be required)" };
+		if (!accountId) {
+			return { error: "could not resolve account id (re-login may be required)", credential: true };
+		}
 		const usage = parseCodexUsagePayload(
 			await fetchCodexUsage({
 				accountId,
@@ -140,7 +143,7 @@ async function fetchOverviewAccount(
 			summarizeCodexErrorMessage(error instanceof Error ? error.message : String(error)),
 		);
 		logDebug(`Failed to fetch pool quota for one account: ${message}`);
-		return { error: message };
+		return { error: message, credential: isCodexCredentialFailure(error) };
 	}
 }
 
@@ -192,11 +195,19 @@ export async function fetchTuiQuotaOverview(params: {
 									createUsageAccountFingerprint(account),
 						);
 			if (previous) {
+				// Only dead credentials mark the reading as describing an account
+				// that cannot serve requests. A transient failure keeps whatever
+				// an earlier poll concluded; the older `fetchedAt` already dates it.
 				accounts.push({
 					...previous,
 					fetchedAt: previous.fetchedAt ?? cached?.fetchedAt,
-					readFailedAt: previous.readFailedAt ?? now,
-					readError: result?.error ?? previous.readError,
+					...(result && "credential" in result && result.credential
+						? {
+							readFailedAt: now,
+							readFailedSince: previous.readFailedSince ?? previous.readFailedAt ?? now,
+							readError: result.error,
+						}
+						: {}),
 				});
 				carriedOver = true;
 			}
@@ -256,16 +267,19 @@ export function mergeOverviewWithLatestAccount(
 			return account;
 		}
 		merged = true;
-		// A response just came back on this account, so a failed poll of it
-		// no longer describes it.
+		// A response that came back after the latest failed poll proves the
+		// account works again. One from before it proves nothing about it.
+		const recovered =
+			account.readFailedAt === undefined || latest.fetchedAt > account.readFailedAt;
 		return {
 			...account,
 			planType: latest.planType ?? account.planType,
 			email: account.email ?? (latest.accountEmail?.trim() || undefined),
 			limits: latest.limits,
 			fetchedAt: latest.fetchedAt,
-			readFailedAt: undefined,
-			readError: undefined,
+			...(recovered
+				? { readFailedAt: undefined, readFailedSince: undefined, readError: undefined }
+				: {}),
 		};
 	});
 	return merged ? { ...snapshot, accounts } : snapshot;

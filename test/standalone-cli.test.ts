@@ -1420,20 +1420,37 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		expect(printed).not.toMatch(/- \[0\][^\n]*\n(?:  [^\n]*\n)*  Read:/);
 	});
 
+	const refusedLine = /Error:\s+the plugin's last request with it was refused \(auth failure\); last known figures below/;
+
 	it.each([
 		[
 			"the plugin's last poll of it failed",
-			{},
-			{ readFailedAt: Date.now() - 86_400_000, readError: "Your refresh token has already been used" },
+			() => ({}),
+			(now: number) => ({
+				readFailedAt: now - 3_600_000,
+				readFailedSince: now - 86_400_000,
+				readError: "Your refresh token has already been used",
+			}),
 			/Error:\s+Your refresh token has already been used \(failing since \d{4}-[^)]*\(1d ago\)\); last known figures below/,
 		],
 		[
 			"the request path last had it refused",
-			{ cooldownReason: "auth-failure", coolingDownUntil: Date.now() + 60_000 },
-			{},
-			/Error:\s+the plugin's last request with it was refused \(auth failure\); last known figures below/,
+			(now: number) => ({ cooldownReason: "auth-failure", coolingDownUntil: now + 60_000 }),
+			() => ({}),
+			refusedLine,
 		],
-	])("limits: reports a cached account the plugin can no longer read once %s, without asking upstream", async (_case, accountOver, entryOver, line) => {
+		[
+			"its refusal's cooldown ran out and no refresh has succeeded since",
+			(now: number) => ({ cooldownReason: "auth-failure", coolingDownUntil: now - 60_000, expiresAt: now - 120_000 }),
+			() => ({}),
+			refusedLine,
+		],
+	])("limits: reports a cached account the plugin can no longer read once %s, without asking upstream", async (_case, accountOverAt, entryOverAt, line) => {
+		// Every relative time is taken here, not when the table was built, so a
+		// slow run cannot turn `1d ago` into `1d 3m ago`.
+		const now = Date.now();
+		const accountOver = accountOverAt(now);
+		const entryOver = entryOverAt(now);
 		vi.resetModules();
 		tempHome = await createTempHome();
 		vi.stubEnv("HOME", tempHome);
@@ -1465,6 +1482,32 @@ describe("standalone oc-codex-multi-auth CLI commands", () => {
 		// Its last known 100% headroom is not capacity the pool can spend.
 		expect(output.pool).toMatchObject({ leftPercent: 50, countedAccounts: 1 });
 		expect(printed).toMatch(line);
+	});
+
+	it("limits: counts an account again once its refusal's cooldown ran out and its token is valid", async () => {
+		vi.resetModules();
+		tempHome = await createTempHome();
+		vi.stubEnv("HOME", tempHome);
+		vi.stubEnv("USERPROFILE", tempHome);
+		const pool = [
+			freshAccount({ refreshToken: "rt-a", accountId: "acct_a", cooldownReason: "auth-failure", coolingDownUntil: Date.now() - 60_000 }),
+		];
+		await writeAccounts(tempHome, pool);
+		await writePluginSnapshot(tempHome, Date.now() - 60_000, [
+			{ account: pool[0], planType: "plus", limits: [cachedWeekly(40, Date.now() + 86_400_000)] },
+		]);
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ accounts: [] })));
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+
+		const result = await runInstaller(["limits", "--json"], {
+			env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+		});
+
+		const output = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]));
+		expect(result.exitCode).toBe(0);
+		expect(output.accounts[0].readFailure).toBeUndefined();
+		expect(output.pool).toMatchObject({ countedAccounts: 1 });
 	});
 
 	it("limits: never refreshes an expired token when the plugin holds a reading", async () => {

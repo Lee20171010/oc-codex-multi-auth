@@ -2009,7 +2009,7 @@ async function runLimitsCommandInner(parsed, options = {}) {
 			const reading = cachedAccount
 				? toCachedLimitsReading(cachedAccount, usageMod, quotaDisplay)
 				: await readLive(account, index, entry);
-			const failure = cachedAccount && readPluginQuotaFailure(cachedAccount.account, account);
+			const failure = cachedAccount && readPluginQuotaFailure(cachedAccount.account, account, now);
 			if (failure) {
 				// Its figures are last known, not capacity it can spend now.
 				entry.readFailure = failure;
@@ -2184,18 +2184,23 @@ function findPluginQuotaReading(readings, account, usageMod) {
 /**
  * What the plugin last knew had gone wrong with an account, from state it
  * already holds - nothing here asks upstream. The poller keeps a failing
- * account's last good reading and records why the reads fail; the request
- * path marks an account whose credentials were refused. Either way the cached
- * figures describe the account as it was, and it cannot serve requests now.
+ * account's last good reading and records when dead credentials made the reads
+ * fail; the request path marks an account whose credentials were refused. That
+ * mark counts while its cooldown runs, and after it only if the stored access
+ * token has also expired - no refresh has succeeded since, or it would have
+ * moved `expiresAt`. Either way the cached figures describe the account as it
+ * was, and it cannot serve requests now.
  */
-function readPluginQuotaFailure(entry, account) {
+function readPluginQuotaFailure(entry, account, now) {
 	if (Number.isFinite(entry.readFailedAt)) {
 		return {
-			since: entry.readFailedAt,
+			since: Number.isFinite(entry.readFailedSince) ? entry.readFailedSince : entry.readFailedAt,
 			message: typeof entry.readError === "string" && entry.readError ? entry.readError : "the plugin could not read it",
 		};
 	}
-	if (account.cooldownReason === "auth-failure") {
+	const coolingDown = Number.isFinite(account.coolingDownUntil) && account.coolingDownUntil > now;
+	const tokenExpired = Number.isFinite(account.expiresAt) && account.expiresAt <= now;
+	if (account.cooldownReason === "auth-failure" && (coolingDown || tokenExpired)) {
 		return { since: undefined, message: "the plugin's last request with it was refused (auth failure)" };
 	}
 	return undefined;
