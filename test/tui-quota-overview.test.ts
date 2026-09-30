@@ -262,6 +262,9 @@ describe("overview cache round trip", () => {
 		expect(result && isFreshTuiQuotaSnapshot(result, later)).toBe(false);
 		// Each account keeps its own time, so the fresh one is not aged with it.
 		expect(result?.accounts.map((account) => account.fetchedAt)).toEqual([later, NOW]);
+		// The kept reading says the poll failed, so no reader passes it off as current.
+		expect(result?.accounts.map((account) => account.readFailedAt)).toEqual([undefined, later]);
+		expect(result?.accounts[1]?.readError).toBe("transient");
 	});
 });
 
@@ -360,6 +363,20 @@ describe("mergeOverviewWithLatestAccount", () => {
 		const merged = mergeOverviewWithLatestAccount(snapshot(), latest);
 		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
 		expect(merged.accounts[1]!.fetchedAt).toBe(NOW + 60_000);
+	});
+
+	it("clears a failed poll once a response comes back on the account", () => {
+		const base = snapshot();
+		const failed = {
+			...base,
+			accounts: base.accounts.map((account, position) =>
+				position === 1 ? { ...account, readFailedAt: NOW, readError: "boom" } : account,
+			),
+		};
+		const merged = mergeOverviewWithLatestAccount(failed, latest);
+		expect(merged.accounts[1]!.readFailedAt).toBeUndefined();
+		expect(merged.accounts[1]!.readError).toBeUndefined();
+		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
 		expect(merged.accounts[0]!.limits[0]!.leftPercent).toBe(0);
 	});
 

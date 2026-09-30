@@ -755,6 +755,34 @@ export function parseCodexUsagePayload(
 }
 
 /**
+ * One readable line out of a failed request's error text. The OAuth refresh
+ * failure carries the endpoint's JSON body - pretty-printed, and cut to a
+ * bounded length before it reaches here, so often not parseable - which renders
+ * as a lone `{` on a report line. The human message inside it is what says
+ * what happened, so it is read out of the body, whole or truncated. Text that
+ * holds no such message is only collapsed onto one line.
+ */
+export function summarizeCodexErrorMessage(text: string, maxChars = 200): string {
+	const start = text.indexOf("{");
+	let summary: string | undefined;
+	if (start !== -1) {
+		const body = text.slice(start);
+		const match =
+			/"(?:message|error_description)"\s*:\s*"((?:[^"\\]|\\.)*)("?)/.exec(body) ??
+			/"error"\s*:\s*"((?:[^"\\]|\\.)*)("?)/.exec(body);
+		const message = match?.[1]?.replace(/\\(.)/g, "$1").trim();
+		if (message) {
+			const complete = match?.[2] === '"';
+			const prefix = text.slice(0, start).trim().replace(/:$/, "");
+			const readable = complete ? message : `${message.replace(/\.*$/, "")}…`;
+			summary = prefix ? `${prefix}: ${readable}` : readable;
+		}
+	}
+	const line = (summary ?? text).replace(/\s+/g, " ").trim();
+	return line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line;
+}
+
+/**
  * Build a safe error message from a failed Codex backend response.
  *
  * Shared with the reset-credit client in `lib/codex-reset.ts`: both talk to

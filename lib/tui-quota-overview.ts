@@ -23,10 +23,11 @@ import {
 	hasUsageWindow,
 	parseCodexUsagePayload,
 	resolveCodexUsageAccountId,
+	summarizeCodexErrorMessage,
 	type CodexUsageSummary,
 	type LimitWindow,
 } from "./codex-usage.js";
-import { logDebug } from "./logger.js";
+import { logDebug, maskString } from "./logger.js";
 import type { QuotaOverviewAccount } from "./quota-overview.js";
 import { loadAccounts, type AccountStorageV3 } from "./storage.js";
 import {
@@ -98,10 +99,14 @@ export function toOverviewAccount(params: {
 	};
 }
 
+type OverviewFetchResult =
+	| { reading: TuiQuotaOverviewAccount }
+	| { error: string };
+
 async function fetchOverviewAccount(
 	storage: AccountStorageV3,
 	index: number,
-): Promise<TuiQuotaOverviewAccount | undefined> {
+): Promise<OverviewFetchResult | undefined> {
 	const account = storage.accounts[index];
 	if (!account) return undefined;
 	try {
@@ -110,7 +115,7 @@ async function fetchOverviewAccount(
 			account,
 			accessToken: credentials.accessToken,
 		});
-		if (!accountId) return undefined;
+		if (!accountId) return { error: "could not resolve account id (re-login may be required)" };
 		const usage = parseCodexUsagePayload(
 			await fetchCodexUsage({
 				accountId,
@@ -119,18 +124,23 @@ async function fetchOverviewAccount(
 				normalizeAccountErrors: true,
 			}),
 		);
-		return toOverviewAccount({
-			fingerprint: createUsageAccountFingerprint(account),
-			index: index + 1,
-			usage,
-			email: account.email,
-			label: account.accountLabel,
-		});
+		return {
+			reading: toOverviewAccount({
+				fingerprint: createUsageAccountFingerprint(account),
+				index: index + 1,
+				usage,
+				email: account.email,
+				label: account.accountLabel,
+			}),
+		};
 	} catch (error) {
-		logDebug(
-			`Failed to fetch pool quota for one account: ${(error as Error).message}`,
+		// The refresh endpoint's error body can echo token material, so the
+		// reason is masked before it is written to a shared cache file.
+		const message = maskString(
+			summarizeCodexErrorMessage(error instanceof Error ? error.message : String(error)),
 		);
-		return undefined;
+		logDebug(`Failed to fetch pool quota for one account: ${message}`);
+		return { error: message };
 	}
 }
 
@@ -157,8 +167,8 @@ export async function fetchTuiQuotaOverview(params: {
 			chunk.map((index) => fetchOverviewAccount(storage, index)),
 		);
 		for (const [position, result] of results.entries()) {
-			if (result) {
-				accounts.push({ ...result, fetchedAt: now });
+			if (result && "reading" in result) {
+				accounts.push({ ...result.reading, fetchedAt: now });
 				continue;
 			}
 			// A failed fetch must not drop the account out of the snapshot: the
@@ -185,6 +195,8 @@ export async function fetchTuiQuotaOverview(params: {
 				accounts.push({
 					...previous,
 					fetchedAt: previous.fetchedAt ?? cached?.fetchedAt,
+					readFailedAt: previous.readFailedAt ?? now,
+					readError: result?.error ?? previous.readError,
 				});
 				carriedOver = true;
 			}
@@ -244,12 +256,16 @@ export function mergeOverviewWithLatestAccount(
 			return account;
 		}
 		merged = true;
+		// A response just came back on this account, so a failed poll of it
+		// no longer describes it.
 		return {
 			...account,
 			planType: latest.planType ?? account.planType,
 			email: account.email ?? (latest.accountEmail?.trim() || undefined),
 			limits: latest.limits,
 			fetchedAt: latest.fetchedAt,
+			readFailedAt: undefined,
+			readError: undefined,
 		};
 	});
 	return merged ? { ...snapshot, accounts } : snapshot;
