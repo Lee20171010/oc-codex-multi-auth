@@ -29,6 +29,13 @@
  */
 
 import { maskEmailForDisplay } from "./account-display.js";
+import {
+	creditsSortValue,
+	formatCreditsBalance,
+	formatCreditsBalanceCompact,
+	hasSpendableCredits,
+	type CreditsBalance,
+} from "./codex-credits.js";
 import { sanitizeDisplayText } from "./ui/display-text.js";
 import { computeWeightedLeftPercent, resolveGoverningWindow } from "./quota-capacity.js";
 import { resolveNextQuotaRecovery, resolveQuotaRecoveryEvents } from "./quota-recovery.js";
@@ -85,6 +92,8 @@ export type QuotaOverviewAccount = {
 	resetCredits?: number;
 	/** Explicit applicability; null is unknown, absence identifies a legacy cache. */
 	resetCreditsApplicable?: number | null;
+	/** Codex credit balance, listed by the `credits` screen. */
+	credits?: CreditsBalance;
 };
 
 /** How the accounts are arranged on the line. */
@@ -734,15 +743,7 @@ export function formatQuotaResetsCandidates(
 		minUsedPercent?: number;
 	},
 ): string[] {
-	const minUsedPercent = options.minUsedPercent ?? 100;
-	if (minUsedPercent >= 100) {
-		// The default keeps the old rule on the DISPLAYED headroom: an account
-		// at 99.6% used reads `0%` left and counts as spent.
-		if (!isPoolFullySpent(accounts)) return [];
-	} else {
-		const total = computeWeightedLeftPercent(accounts, "exact");
-		if (total === undefined || 100 - total < minUsedPercent) return [];
-	}
+	if (!isPoolSpentEnough(accounts, options.minUsedPercent)) return [];
 	const now = options.now ?? Date.now();
 	const maskEmail = options.maskEmail ?? false;
 	const redeemable = orderOverviewAccounts(accounts, "renewing-latest").filter(
@@ -825,6 +826,84 @@ export function formatQuotaResetsCandidates(
 		push("Resets:", identity, false, false);
 	}
 	add(`Resets: ${redeemable.length}`);
+	return candidates;
+}
+
+/**
+ * Whether the pool is used up far enough for the resets and credits screens
+ * to have something to say. The default keeps the rule on the DISPLAYED
+ * headroom: an account at 99.6% used reads `0%` left and counts as spent.
+ */
+function isPoolSpentEnough(
+	accounts: readonly QuotaOverviewAccount[],
+	minUsedPercent = 100,
+): boolean {
+	if (minUsedPercent >= 100) return isPoolFullySpent(accounts);
+	const total = computeWeightedLeftPercent(accounts, "exact");
+	return total !== undefined && 100 - total >= minUsedPercent;
+}
+
+/**
+ * Every rendering of the accounts that still hold Codex credits, longest
+ * first - the counterpart of {@link formatQuotaResetsCandidates} for the
+ * other way out of a spent pool.
+ *
+ * ```text
+ * Codex credits: 62,500 damian@nowaker.net, 1,200 work@example.com
+ * ```
+ *
+ * Largest balance first, which is the order `spendCredits` draws on them.
+ * Shown under the same threshold as the resets screen, and only for accounts
+ * with a balance to spend.
+ */
+export function formatQuotaCreditsCandidates(
+	accounts: readonly QuotaOverviewAccount[],
+	options: Pick<QuotaOverviewOptions, "maskEmail"> & {
+		names?: QuotaOverviewNames;
+		minUsedPercent?: number;
+	},
+): string[] {
+	if (!isPoolSpentEnough(accounts, options.minUsedPercent)) return [];
+	const holders = accounts
+		.filter((account): account is QuotaOverviewAccount & { credits: CreditsBalance } =>
+			hasSpendableCredits(account.credits))
+		.sort((left, right) =>
+			creditsSortValue(right.credits) - creditsSortValue(left.credits) || left.index - right.index);
+	if (holders.length === 0) return [];
+
+	const maskEmail = options.maskEmail ?? false;
+	const names = options.names ?? "label";
+	const identities: Array<Array<string | undefined>> =
+		names === "none"
+			? []
+			: names === "number"
+				? [holders.map((account) => resolveAccountName(account, "number", maskEmail))]
+				: [
+						holders.map((account) => resolveAccountEmail(account, maskEmail)),
+						holders.map((account) => resolveAccountName(account, "label", maskEmail)),
+						holders.map((account) => resolveAccountName(account, "number", maskEmail)),
+					];
+
+	const candidates: string[] = [];
+	const push = (
+		prefix: string,
+		identity: Array<string | undefined> | undefined,
+		amount: ((balance: CreditsBalance) => string) | undefined,
+	): void => {
+		const segments = holders.map((account, position) =>
+			[amount?.(account.credits), identity?.[position]].filter(Boolean).join(" "));
+		if (segments.some((segment) => segment.length === 0)) return;
+		const text = `${prefix} ${segments.join(", ")}`;
+		if (!candidates.includes(text)) candidates.push(text);
+	};
+
+	for (const identity of identities) push("Codex credits:", identity, formatCreditsBalance);
+	if (identities.length === 0) push("Codex credits:", undefined, formatCreditsBalance);
+	for (const identity of identities) push("Credits:", identity, formatCreditsBalanceCompact);
+	if (identities.length === 0) push("Credits:", undefined, formatCreditsBalanceCompact);
+	for (const identity of identities) push("Credits:", identity, undefined);
+	const count = `Credits: ${holders.length} account${holders.length === 1 ? "" : "s"}`;
+	if (!candidates.includes(count)) candidates.push(count);
 	return candidates;
 }
 

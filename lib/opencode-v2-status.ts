@@ -1,7 +1,7 @@
 import { getCodexTuiGlyphMode, getCodexTuiMaskEmail, getCodexTuiMaskEmailInQuotaDetails, getQuotaDisplay, getQuotaStatus, loadPluginConfig } from "./config.js";
 import { fetchTuiQuotaOverview, toQuotaOverviewAccounts } from "./tui-quota-overview.js";
 import { readTuiQuotaSnapshot, readTuiQuotaOverviewSnapshot, isFreshTuiQuotaSnapshot, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "./tui-quota-cache.js";
-import { formatPromptStatusText, formatQuotaDetailsText, formatQuotaOverviewStatusLines, formatQuotaResetsStatusLines, type CompactQuotaStatus } from "./tui-status.js";
+import { formatPromptStatusText, formatQuotaDetailsText, formatQuotaCreditsStatusLines, formatQuotaOverviewStatusLines, formatQuotaResetsStatusLines, type CompactQuotaStatus } from "./tui-status.js";
 import { dirname, join } from "node:path";
 import { getStoragePath, loadAccounts } from "./storage.js";
 import { getCurrentProjectRoot } from "./storage/state.js";
@@ -78,7 +78,9 @@ export async function readV2Status({ width }: { width: number }) {
 	const activeText = formatPromptStatusText({ quota, width, quotaDisplay, maskEmail, glyphMode });
 	const renderScreen = (screen: (typeof status.screens)[number]): string => {
 		if (screen === "active" || !overview) return activeText;
-		const format = screen === "resets" ? formatQuotaResetsStatusLines : formatQuotaOverviewStatusLines;
+		const format = screen === "resets"
+			? formatQuotaResetsStatusLines
+			: screen === "credits" ? formatQuotaCreditsStatusLines : formatQuotaOverviewStatusLines;
 		return format({
 			accounts: toQuotaOverviewAccounts(overview), width, maxRows: status.rows,
 			resetsMinUsedPercent: status.resetsMinUsedPercent,

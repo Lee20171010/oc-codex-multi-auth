@@ -26,6 +26,7 @@ import {
 	type CodexUsageSummary,
 } from "./codex-usage.js";
 import { autoRedeemResetCredit } from "./codex-reset.js";
+import { creditsLedger, getCreditsAccountKey } from "./codex-credits.js";
 import { logDebug, logInfo, logWarn } from "./logger.js";
 import {
 	isDesktopNotificationSupported,
@@ -632,6 +633,7 @@ async function fetchUsageForAccount(
 				return null;
 			}
 		}
+		creditsLedger.record(getCreditsAccountKey(account), usage.creditsBalance);
 		const quotaExhaustedResetAtMs = getUsageQuotaExhaustedResetAtMs([
 			usage.primary,
 			usage.secondary,

@@ -10,6 +10,7 @@ import {
 	getCodexTuiMaskEmailInQuotaDetails,
 	getBeginnerSafeMode,
 	getFastSession,
+	getSpendCredits,
 	getFastSessionStrategy,
 	getFastSessionMaxInputItems,
 	getRetryProfile,
@@ -562,6 +563,29 @@ describe('Plugin Configuration', () => {
 			expect(getFastSession({ fastSession: true })).toBe(false);
 			process.env.CODEX_AUTH_FAST_SESSION = '1';
 			expect(getFastSession({ fastSession: false })).toBe(true);
+		});
+	});
+
+	describe('getSpendCredits', () => {
+		afterEach(() => {
+			delete process.env.CODEX_AUTH_SPEND_CREDITS;
+		});
+
+		it('should default to false, so credits are never spent unasked', () => {
+			delete process.env.CODEX_AUTH_SPEND_CREDITS;
+			expect(getSpendCredits({})).toBe(false);
+		});
+
+		it('should use config value when env var not set', () => {
+			delete process.env.CODEX_AUTH_SPEND_CREDITS;
+			expect(getSpendCredits({ spendCredits: true })).toBe(true);
+		});
+
+		it('should prioritize env var over config', () => {
+			process.env.CODEX_AUTH_SPEND_CREDITS = '0';
+			expect(getSpendCredits({ spendCredits: true })).toBe(false);
+			process.env.CODEX_AUTH_SPEND_CREDITS = '1';
+			expect(getSpendCredits({ spendCredits: false })).toBe(true);
 		});
 	});
 

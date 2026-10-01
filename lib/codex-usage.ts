@@ -4,6 +4,12 @@ import { extractAccountId } from "./accounts.js";
 import { extractAccountUserId } from "./auth/token-utils.js";
 import { getFetchTimeoutMs, loadPluginConfig } from "./config.js";
 import { normalizeResetCreditCount } from "./codex-reset.js";
+import {
+	formatCreditsBalance,
+	hasSpendableCredits,
+	parseUsageCreditsBalance,
+	type CreditsBalance,
+} from "./codex-credits.js";
 import { CODEX_BASE_URL, PLUGIN_NAME } from "./constants.js";
 import {
 	createDeactivatedWorkspaceError,
@@ -113,6 +119,8 @@ export type ResetCreditCounts = {
 export type CodexUsageSummary = {
 	planType: string | null;
 	credits: string | null;
+	/** The same balance as {@link credits}, structured for decisions. */
+	creditsBalance: CreditsBalance | null;
 	resetCredits: ResetCreditCounts | null;
 	primary: LimitWindow;
 	secondary: LimitWindow;
@@ -340,6 +348,17 @@ export function formatUsageCredits(
 	}
 	if (credits.has_credits) return "available";
 	return undefined;
+}
+
+/**
+ * The `Credits` line for an account: its balance, or null when it has none to
+ * spend. Like the `Resets` line it is left out rather than printed as zero, so
+ * the accounts that can still pay for a turn stand out.
+ */
+export function formatSpendableUsageCredits(
+	balance: CreditsBalance | null | undefined,
+): string | null {
+	return balance && hasSpendableCredits(balance) ? formatCreditsBalance(balance) : null;
 }
 
 /**
@@ -745,6 +764,7 @@ export function parseCodexUsagePayload(
 	return {
 		planType: source.plan_type ?? null,
 		credits: credits ?? null,
+		creditsBalance: parseUsageCreditsBalance(source.credits ?? null),
 		resetCredits: parseUsageResetCredits(source.rate_limit_reset_credits),
 		primary,
 		secondary,

@@ -70,6 +70,7 @@ logged warning) and keeps the rest of the file.
 | field | env | type | default | bounds | meaning |
 | --- | --- | --- | --- | --- | --- |
 | `rotationStrategy` | `CODEX_AUTH_ROTATION_STRATEGY` | `hybrid` \| `sticky` \| `round-robin` | `hybrid` | — | account selection policy; see configuration.md |
+| `spendCredits` | `CODEX_AUTH_SPEND_CREDITS` | boolean | `false` | — | once no entitled account has plan quota, serve from an account with a Codex credit balance; see configuration.md |
 | `modelAccountPools` | (file only) | record: model → account-id array | `{}` | keys/values non-empty strings | pin an effective model to stable account/workspace identities; keys normalize case-insensitively after model normalization |
 | `modelAccountPoolModes` | (file only) | record: model → `preferred` \| `strict` | `{}` (all `preferred`) | — | `preferred` falls back to the general pool when the mapping has no selectable account; `strict` never leaves its list (`strict_pool_unavailable`) |
 | `perProjectAccounts` | `CODEX_AUTH_PER_PROJECT_ACCOUNTS` | boolean | `true` | — | `true`: per-project pools under `~/.opencode/projects/<project-key>/`; `false`: the global pool. Toggling switches scope live but never migrates or prunes the other scope's files |
@@ -131,7 +132,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 
 | field | env | type | default | bounds | meaning |
 | --- | --- | --- | --- | --- | --- |
-| `mode` | (file only) | `active` \| `overview` \| `resets` or array | `active` | unknown names dropped | screens to show; a list rotates every `rotateMs` |
+| `mode` | (file only) | `active` \| `overview` \| `resets` \| `credits` or array | `active` | unknown names dropped | screens to show; a list rotates every `rotateMs` |
 | `rotateMs` | (file only) | number (ms) | `5000` | 1000–86400000 | per-screen dwell |
 | `layout` | (file only) | `accounts` \| `aggregate` \| `count` \| `total` | `accounts` | — | segment layout |
 | `accountNames` | (file only) | `number` \| `label` \| `none` | `number` | — | `#1`, the `codex-label`/email local part, or nothing |
@@ -141,7 +142,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 | `resetTimes` | (file only) | `never` \| `low` \| `always` (`true`→`low`, `false`→`never`) | `low` | — | `3d` countdowns |
 | `resetCredits` | (file only) | boolean | `false` | — | `1r` banked-reset credit badges |
 | `recovery` | (file only) | boolean or `"all"` | `false` | — | next capacity gain (`true`) or all gains (`"all"`) |
-| `resetsMinUsedPercent` | (file only) | number | `100` | 0–100 | minimum pool weighted usage before the `resets` screen shows |
+| `resetsMinUsedPercent` | (file only) | number | `100` | 0–100 | minimum pool weighted usage before the `resets` and `credits` screens show |
 | `accounts` | (file only) | boolean | — | — | legacy spelling; `false` = `layout: "count"` |
 | `rows` | (file only) | integer | `1` | 1–4 | row ceiling, not a height |
 | `showFor` | (file only) | `always` \| `codex-models` | `always` | — | `codex-models` hides the line unless the session runs a routed model |

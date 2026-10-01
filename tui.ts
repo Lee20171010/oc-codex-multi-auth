@@ -38,6 +38,7 @@ import {
 import {
 	formatPromptStatusText,
 	formatQuotaDetailsText,
+	formatQuotaCreditsStatusLines,
 	formatQuotaOverviewStatusLines,
 	formatQuotaResetsStatusLines,
 	resolveQuotaOverviewTone,
@@ -640,7 +641,7 @@ function createOverviewQuotaController(
 		}),
 	];
 	return {
-		screens: ["overview", "resets"],
+		screens: ["overview", "resets", "credits"],
 		lines(screen, options, layout) {
 			const current = state();
 			if (current.type !== "ready") {
@@ -648,13 +649,15 @@ function createOverviewQuotaController(
 				// moment later is exactly the flicker this mode removes. The
 				// reset screen stays blank either way - it has nothing to add
 				// to a pool nobody has read yet.
-				if (screen === "resets") return [];
+				if (screen === "resets" || screen === "credits") return [];
 				return current.type === "loading" ? [] : ["limits ?"];
 			}
 			const render =
 				screen === "resets"
 					? formatQuotaResetsStatusLines
-					: formatQuotaOverviewStatusLines;
+					: screen === "credits"
+						? formatQuotaCreditsStatusLines
+						: formatQuotaOverviewStatusLines;
 			return render({
 				accounts: current.accounts,
 				options: toQuotaOverviewOptions(options, Date.now()),
@@ -671,7 +674,7 @@ function createOverviewQuotaController(
 				// so the pool tone it would otherwise carry is always danger and
 				// says nothing. Warning is the honest colour for "here is the
 				// thing you can still do about it".
-				if (screen === "resets") {
+				if (screen === "resets" || screen === "credits") {
 					return current.stale ? "stale" : "warning";
 				}
 				return resolveQuotaOverviewTone(current.accounts, current.stale);
@@ -819,10 +822,11 @@ function createActiveQuotaController(
 /**
  * The pipelines a set of screens needs, and which screen each one answers.
  *
- * `resets` is served by the pool pipeline rather than one of its own: it needs
- * every account's windows and banked credits, which is exactly what that
- * pipeline already gathers, and a second poller reading the same endpoint for
- * the same numbers would double the request cost to say the same thing.
+ * `resets` and `credits` are served by the pool pipeline rather than one of
+ * their own: they need every account's windows, banked resets and credit
+ * balance, which is exactly what that pipeline already gathers, and a second
+ * poller reading the same endpoint for the same numbers would double the
+ * request cost to say the same thing.
  */
 function createQuotaControllers(
 	api: TuiPluginApi,
@@ -833,7 +837,7 @@ function createQuotaControllers(
 	if (screens.includes("active")) {
 		controllers.push(createActiveQuotaController(api, solid));
 	}
-	if (screens.includes("overview") || screens.includes("resets")) {
+	if (screens.includes("overview") || screens.includes("resets") || screens.includes("credits")) {
 		controllers.push(createOverviewQuotaController(api, solid));
 	}
 	return controllers;

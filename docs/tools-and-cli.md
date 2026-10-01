@@ -189,6 +189,7 @@ Readings: the plugin's last readings, taken 2026-09-27 13:17:22 (14m ago); --ref
   Weekly limit:     100% used
   Renews:           2026-09-30 15:14:08 (in 3d 22h)
   Plan:             Pro (20x)
+  Credits:          62,500
   Resets:           1 applicable now
 
 Pool:     93% used of 81x across 11 accounts
@@ -196,6 +197,7 @@ Pool:     93% used of 81x across 11 accounts
 
 - **Snapshot-backed, not live.** The plugin polls `/wham/usage` for the pool status line and keeps the last readings in `oc-codex-multi-auth-tui-quota-overview.json` under the OpenCode state dir (`$OPENCODE_STATE_DIR`, else `$XDG_STATE_HOME/opencode` or `~/.local/state/opencode`). `limits` reports those readings; accounts with no snapshot entry (or a rotated token fingerprint) are read live. `--refresh` reads the whole pool live, and a full live read becomes the plugin's new snapshot. Nothing is written for `--tag` subsets, `--config-path` stores, or when the snapshot no longer describes the pool.
 - **Workspace names.** Business seats show their ChatGPT workspace name (owner-titled) via one `/wham/accounts/check` per login, cached in `oc-codex-multi-auth-workspace-names.json` beside the quota snapshot; lookup gives up after ~5s and a failure only drops the line.
+- **Credits.** An account that holds a Codex credit balance gets a `Credits` line, the same way banked resets get `Resets`; an account with none gets no line. `spendCredits` decides whether those credits are spent once plan quota is gone (see [configuration](configuration.md#spending-codex-credits)).
 - **Sorting.** `--sort usage|reset` judges each account by its governing window — the one with least headroom, and on ties the later reset. Accounts with no readable value sort last. Persist a default via `"limitsSort": { "by": "reset", "direction": "asc" }` in `~/.opencode/openai-codex-auth-config.json`.
 - **Pool total.** `81x` is the sum of per-plan seat weights (see [plan allotments](plan-allotments.md)); the percentage is the weighted mean over exactly that sum, not a plain average. Plans with no published ratio weigh one baseline seat and print no `Nx` badge. Accounts with unreadable usage are excluded from both figures; `pool` is `null` in `--json` when nothing was readable. Both `used` and `left` percentages are emitted so `quotaDisplay` wording never changes the data.
 - **Terminal color.** Green <60% used, yellow ≥60%, orange ≥80%, red ≥99%; `NO_COLOR` disables, `FORCE_COLOR` enables without a TTY.

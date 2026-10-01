@@ -56,7 +56,8 @@ They are headroom left, matching how Codex reports quota — `5h 88%` means 88%
 of the 5-hour window remains. Set `quotaDisplay: "used"` in
 `~/.opencode/openai-codex-auth-config.json` to show consumption instead. The
 prompt line can describe the whole pool (`quotaStatus.mode: "overview"`) or
-banked reset credits (`"resets"`); see
+banked reset credits (`"resets"`), or the Codex credits left once plan quota
+is gone (`"credits"`); see
 [Configuration](configuration.md).
 
 ## Is there an API-key login?

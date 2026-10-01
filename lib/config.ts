@@ -913,6 +913,20 @@ export function getFastSession(pluginConfig: PluginConfig): boolean {
 	);
 }
 
+/**
+ * Spend Codex credits once no account entitled to the model has plan quota
+ * left. Off by default: an account at 100% of its plan window keeps serving
+ * on its credit balance by itself, so without this the plugin keeps such
+ * accounts out of rotation rather than spend money nobody asked it to.
+ */
+export function getSpendCredits(pluginConfig: PluginConfig): boolean {
+	return resolveBooleanSetting(
+		"CODEX_AUTH_SPEND_CREDITS",
+		pluginConfig.spendCredits,
+		false,
+	);
+}
+
 export function getBeginnerSafeMode(pluginConfig: PluginConfig): boolean {
 	return resolveBooleanSetting(
 		"CODEX_AUTH_BEGINNER_SAFE_MODE",
@@ -1422,7 +1436,7 @@ export function getQuotaNotifications(
 }
 
 /** One thing the prompt status line can be showing at a given moment. */
-export type QuotaStatusScreen = "active" | "overview" | "resets";
+export type QuotaStatusScreen = "active" | "overview" | "resets" | "credits";
 
 /** Whether the line appears for every model or only for the ones it describes. */
 export type QuotaStatusAudience = "always" | "codex-models";
@@ -1431,6 +1445,7 @@ const QUOTA_STATUS_SCREENS: readonly QuotaStatusScreen[] = [
 	"active",
 	"overview",
 	"resets",
+	"credits",
 ];
 const QUOTA_STATUS_AUDIENCES: readonly QuotaStatusAudience[] = [
 	"always",
@@ -1468,7 +1483,8 @@ export interface QuotaStatusConfig {
 	 * The screens to show, in the order they take turns. `active` names the
 	 * account serving requests, which is how the status line has always
 	 * worked; `overview` describes the whole pool; `resets` lists the banked
-	 * reset credits worth redeeming once nothing has headroom left. More than
+	 * reset credits worth redeeming once nothing has headroom left; `credits`
+	 * lists the accounts holding a Codex credit balance at that point. More than
 	 * one screen alternates every {@link rotateMs}.
 	 */
 	screens: QuotaStatusScreen[];
