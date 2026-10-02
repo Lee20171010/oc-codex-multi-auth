@@ -7,6 +7,16 @@ The current stable release line is `6.x`. This file is the complete release hist
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.27.0] - 2026-10-02
+
+### Added
+- `spendCredits` (or `CODEX_AUTH_SPEND_CREDITS=1`, default off) opts the rotation in to spending Codex credit balances once every account entitled to the model is out of plan quota. Credit candidates respect `modelAccountPools` strict/preferred pools and are ordered by largest balance; balances come from `/wham/usage` and are refreshed by `x-codex-credits-*` response headers. A refused credits turn is parked until the quota reset (default 10 minutes), a toast announces when a request is running on paid credits, and the TUI status rotation gains a `credits` screen listing funded accounts. ([#286](https://github.com/ndycode/oc-codex-multi-auth/pull/286), thanks @Nowaker)
+
+### Fixed
+- `limits` — CLI, `codex-limits`, and the TUI quota view — now names the cached accounts it can no longer read: a dead refresh token or an auth-failure cooldown keeps the last known figures under a clear error line, drops the account out of pool totals, and exits nonzero, while timeouts, 429s, and 5xx responses no longer mark credentials dead and a stale reading can't erase a newer failure. ([#285](https://github.com/ndycode/oc-codex-multi-auth/pull/285), thanks @Nowaker)
+- A credits refusal is remembered only on an authoritative usage-limit signal — a transient 429, overload, or concurrency throttle no longer parks a funded account, and a refused turn can no longer be billed a second time by the same request's short retry. `limits --json` keeps `credits` in the raw `codex-limits` form (`"62500"`, `unlimited`, `available`) instead of the grouped display string. ([#286](https://github.com/ndycode/oc-codex-multi-auth/pull/286))
+- Decoded usage-error messages drop terminal control characters, so a hostile or corrupted error body can no longer inject escape sequences into `limits` output. ([#285](https://github.com/ndycode/oc-codex-multi-auth/pull/285))
+
 ## [6.26.0] - 2026-09-30
 
 ### Added
