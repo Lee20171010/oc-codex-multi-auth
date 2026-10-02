@@ -14,7 +14,11 @@ import {
 	planCreditsFallback,
 	type CreditsBalance,
 } from "../lib/codex-credits.js";
-import { formatSpendableUsageCredits, parseCodexUsagePayload } from "../lib/codex-usage.js";
+import {
+	formatSpendableUsageCredits,
+	parseCodexUsagePayload,
+	spendableUsageCreditsValue,
+} from "../lib/codex-usage.js";
 import { formatQuotaCreditsCandidates, type QuotaOverviewAccount } from "../lib/quota-overview.js";
 
 const balance = (amount: number | null, extra: Partial<CreditsBalance> = {}): CreditsBalance => ({
@@ -83,6 +87,15 @@ describe("whether a balance can pay for a turn", () => {
 		expect(formatSpendableUsageCredits(balance(62_500))).toBe("62,500");
 		expect(formatSpendableUsageCredits({ hasCredits: false, unlimited: false, balance: 0 })).toBeNull();
 		expect(formatSpendableUsageCredits(null)).toBeNull();
+	});
+
+	it("keeps display grouping out of the JSON credits field", () => {
+		expect(spendableUsageCreditsValue(balance(62_500))).toBe("62500");
+		expect(spendableUsageCreditsValue(balance(1_234.5))).toBe("1234.5");
+		expect(spendableUsageCreditsValue(balance(0, { unlimited: true }))).toBe("unlimited");
+		expect(spendableUsageCreditsValue(balance(null))).toBe("available");
+		expect(spendableUsageCreditsValue({ hasCredits: false, unlimited: false, balance: 0 })).toBeNull();
+		expect(spendableUsageCreditsValue(null)).toBeNull();
 	});
 
 	it("formats balances for messages and for the one-line screen", () => {

@@ -3823,9 +3823,18 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					});
 					const quotaExhausted =
 						quotaHeadersAuthoritative === true && recordQuotaHeaders();
-					// The backend spends credits by itself, so a refused credits turn
-					// means it has none to spend right now, whatever the balance says.
-					if (servingOnCredits && response.status === 429) {
+					// The backend spends credits by itself, so a usage-limit refusal of
+					// a credits turn means it has none to spend right now, whatever the
+					// balance says. Only an authoritative usage-limit 429 counts as a
+					// refusal: a transient throttle (tokens/concurrency) or an overload
+					// dressed up as a 429 would otherwise hold a funded account out of
+					// credits until a reset it never earned.
+					const creditsTurnRefused =
+						servingOnCredits &&
+						quotaHeadersAuthoritative === true &&
+						(parseRateLimitReason(rateLimit?.code) === "quota" ||
+							(responseCredits !== null && !hasSpendableCredits(responseCredits)));
+					if (creditsTurnRefused) {
 						creditsLedger.markRefused(
 							getCreditsAccountKey(account),
 							getQuotaExhaustedResetAtMs(response.headers) ?? Date.now() + CREDITS_REFUSAL_DEFAULT_MS,
@@ -4072,7 +4081,11 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 																														// just written for it is monotonic — a short retry that happened
 																														// to succeed could not walk it back, so the account would serve
 																														// traffic while rotation still considers it blocked. Rotate.
+																														// A refused credits turn is the same: the refusal is the
+																														// backend's answer to billing credits, so an immediate retry
+																														// only buys a second paid refusal.
 																														if (
+																															!creditsTurnRefused &&
 																															!quotaExhausted &&
 																															delayMs <= RATE_LIMIT_SHORT_RETRY_THRESHOLD_MS &&
 																															consumeRetryBudget(

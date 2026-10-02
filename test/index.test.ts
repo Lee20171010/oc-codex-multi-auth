@@ -5097,6 +5097,45 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			expect(second.status).not.toBe(200);
 			expect(fetchRoute.responseCalls()).toBe(1);
 		});
+
+		it("does not treat a transient throttle on a credits turn as a credits refusal", async () => {
+			routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), { status: 429 }),
+			);
+			const { sdk, manager } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			const { creditsLedger, getCreditsAccountKey } = await import("../lib/codex-credits.js");
+			expect(creditsLedger.isRefused(getCreditsAccountKey(manager.accounts[0]!))).toBe(false);
+		});
+
+		it("does not treat an upstream overload on a credits turn as a credits refusal", async () => {
+			routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "server_is_overloaded" } }), { status: 429 }),
+			);
+			const { sdk, manager } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			const { creditsLedger, getCreditsAccountKey } = await import("../lib/codex-credits.js");
+			expect(creditsLedger.isRefused(getCreditsAccountKey(manager.accounts[0]!))).toBe(false);
+		});
+
+		it("marks a credits turn refused when the reply itself reports no spendable credits", async () => {
+			const fetchRoute = routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+					status: 429,
+					headers: {
+						"x-codex-credits-has-credits": "false",
+						"x-codex-credits-unlimited": "false",
+						"x-codex-credits-balance": "0",
+					},
+				}),
+			);
+			const { sdk } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			expect(fetchRoute.responseCalls()).toBe(1);
+			const second = await prompt(sdk);
+			expect(second.status).not.toBe(200);
+			expect(fetchRoute.responseCalls()).toBe(1);
+		});
 	});
 
 	it.each([

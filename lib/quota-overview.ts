@@ -844,9 +844,9 @@ function isPoolSpentEnough(
 }
 
 /**
- * Every rendering of the accounts that still hold Codex credits, longest
- * first - the counterpart of {@link formatQuotaResetsCandidates} for the
- * other way out of a spent pool.
+ * Every rendering of the accounts that still hold Codex credits, largest
+ * balance first - the counterpart of {@link formatQuotaResetsCandidates} for
+ * the other way out of a spent pool.
  *
  * ```text
  * Codex credits: 62,500 damian@nowaker.net, 1,200 work@example.com

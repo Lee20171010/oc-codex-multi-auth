@@ -362,6 +362,21 @@ export function formatSpendableUsageCredits(
 }
 
 /**
+ * The `credits` field of `limits --json`: the balance in the raw form the
+ * endpoint stated and `codex-limits` already emits (`"62500"`, `unlimited`,
+ * `available`), or null when the account has none to spend. Display grouping
+ * stays out of it - callers parse the field as a number.
+ */
+export function spendableUsageCreditsValue(
+	balance: CreditsBalance | null | undefined,
+): string | null {
+	if (!balance || !hasSpendableCredits(balance)) return null;
+	if (balance.unlimited) return "unlimited";
+	if (balance.balance !== null) return String(balance.balance);
+	return "available";
+}
+
+/**
  * Read the redeemable rate-limit resets the usage response already carries.
  *
  * These are a different currency from `credits`, and an account routinely
