@@ -28,6 +28,7 @@ import {
 	type CodexUsageSummary,
 	type LimitWindow,
 } from "./codex-usage.js";
+import { creditsLedger, getCreditsAccountKey, hasSpendableCredits } from "./codex-credits.js";
 import { logDebug, maskString } from "./logger.js";
 import type { QuotaOverviewAccount } from "./quota-overview.js";
 import { loadAccounts, type AccountStorageV3 } from "./storage.js";
@@ -96,6 +97,11 @@ export function toOverviewAccount(params: {
 		resetCredits:
 			resetCredits?.applicableNow ?? resetCredits?.available ?? undefined,
 		resetCreditsApplicable: resetCredits?.applicableNow ?? null,
+		// Kept only when there is something to spend, so a snapshot of
+		// subscription accounts does not carry a zero balance per account.
+		...(hasSpendableCredits(params.usage.creditsBalance)
+			? { credits: params.usage.creditsBalance ?? undefined }
+			: {}),
 		limits,
 	};
 }
@@ -127,6 +133,7 @@ async function fetchOverviewAccount(
 				normalizeAccountErrors: true,
 			}),
 		);
+		creditsLedger.record(getCreditsAccountKey(account), usage.creditsBalance);
 		return {
 			reading: toOverviewAccount({
 				fingerprint: createUsageAccountFingerprint(account),
@@ -295,6 +302,7 @@ export function toQuotaOverviewAccounts(
 		planType: account.planType,
 		resetCredits: account.resetCredits,
 		resetCreditsApplicable: account.resetCreditsApplicable,
+		credits: account.credits,
 		windows: account.limits.map((limit) => ({
 			leftPercent: limit.leftPercent ?? undefined,
 			exactLeftPercent: typeof limit.usedPercent === "number" && Number.isFinite(limit.usedPercent)

@@ -4,6 +4,7 @@ import { getEffortSuffix } from "./request/helpers/effort-suffix.js";
 import { formatPlanType } from "./auth/plan-tier.js";
 import {
 	formatQuotaOverviewCandidates,
+	formatQuotaCreditsCandidates,
 	formatQuotaResetsCandidates,
 	resolveQuotaOverviewTonePercent,
 	type QuotaOverviewAccount,
@@ -663,6 +664,28 @@ export function formatQuotaResetsStatusLines(params: {
 		maskEmail: params.options.maskEmail,
 		names: params.options.names,
 		now: params.options.now,
+	});
+	if (candidates.length === 0) return [];
+	return fitStatusLines(
+		candidates,
+		resolveOverviewChars(params.width, params.availableChars),
+		params.maxRows ?? 1,
+	);
+}
+
+/** The Codex-credits line, laid out the same way as the resets line. */
+export function formatQuotaCreditsStatusLines(params: {
+	accounts: readonly QuotaOverviewAccount[];
+	options: QuotaOverviewOptions;
+	resetsMinUsedPercent?: number;
+	width?: number;
+	availableChars?: number;
+	maxRows?: number;
+}): string[] {
+	const candidates = formatQuotaCreditsCandidates(params.accounts, {
+		minUsedPercent: params.resetsMinUsedPercent,
+		maskEmail: params.options.maskEmail,
+		names: params.options.names,
 	});
 	if (candidates.length === 0) return [];
 	return fitStatusLines(

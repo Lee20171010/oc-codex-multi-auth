@@ -10,6 +10,7 @@ import {
 	ensureCodexUsageAccessToken,
 	fetchCodexUsage,
 	formatResetCredits,
+	formatSpendableUsageCredits,
 	formatUsageLimitSummary,
 	formatUsageLimitTitle,
 	formatUsagePoolSummary,
@@ -25,6 +26,7 @@ import {
 	type UsagePoolMember,
 } from "../codex-usage.js";
 import { formatPlanMultiplier } from "../plan-allotment.js";
+import { creditsLedger, getCreditsAccountKey } from "../codex-credits.js";
 import { getQuotaDisplay, loadPluginConfig } from "../config.js";
 import { PLUGIN_NAME } from "../constants.js";
 import { logWarn } from "../logger.js";
@@ -244,6 +246,8 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 						organizationId: effectiveAccount.organizationId,
 					});
 					const usage = parseCodexUsagePayload(payload, quotaDisplay);
+					creditsLedger.record(getCreditsAccountKey(effectiveAccount), usage.creditsBalance);
+					const creditsLine = formatSpendableUsageCredits(usage.creditsBalance);
 					const quotaExhaustedResetAtMs = getUsageQuotaExhaustedResetAtMs(
 						[usage.primary, usage.secondary],
 					);
@@ -326,9 +330,9 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 								`  ${formatUiKeyValue(ui, "Plan", planLabel, "muted")}`,
 							);
 						}
-						if (usage.credits) {
+						if (creditsLine) {
 							lines.push(
-								`  ${formatUiKeyValue(ui, "Credits", usage.credits, "muted")}`,
+								`  ${formatUiKeyValue(ui, "Credits", creditsLine, "muted")}`,
 							);
 						}
 						if (usage.resetCredits && usage.resetCredits.available > 0) {
@@ -358,8 +362,8 @@ export function createCodexLimitsTool(ctx: ToolContext): ToolDefinition {
 						if (planLabel) {
 							lines.push(`  Plan: ${planLabel}`);
 						}
-						if (usage.credits) {
-							lines.push(`  Credits: ${usage.credits}`);
+						if (creditsLine) {
+							lines.push(`  Credits: ${creditsLine}`);
 						}
 						if (usage.resetCredits && usage.resetCredits.available > 0) {
 							lines.push(

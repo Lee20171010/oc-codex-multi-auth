@@ -93,6 +93,7 @@ import {
 	getEmptyResponseRetryDelayMs,
 	getPidOffsetEnabled,
 	getRotationStrategy,
+	getSpendCredits,
 	getModelAccountPool,
 	getModelAccountPoolMode,
 	getFetchTimeoutMs,
@@ -271,6 +272,20 @@ import {
 } from "./lib/codex-usage.js";
 import { getQuotaExhaustedResetAtMs } from "./lib/quota-windows.js";
 import {
+	CREDITS_DISPLAY_MAX_AGE_MS,
+	CREDITS_REFUSAL_DEFAULT_MS,
+	ModelEntitlements,
+	creditsLedger,
+	formatCreditsOutOfQuotaHint,
+	formatServingOnCreditsToast,
+	getCreditsAccountKey,
+	hasSpendableCredits,
+	parseCreditsHeaders,
+	planCreditsFallback,
+	type CreditsAccountSummary,
+	type CreditsBalance,
+} from "./lib/codex-credits.js";
+import {
 	clearTuiQuotaSnapshot,
 	parseTuiQuotaSnapshotFromHeaders,
 	writeTuiQuotaSnapshot,
@@ -315,6 +330,9 @@ function isLoopbackGatewayHost(hostname: string): boolean {
 	}
 	return LOOPBACK_GATEWAY_HOSTS.has(hostname);
 }
+
+/** How often the "spending Codex credits" toast repeats while one account keeps serving on credits. */
+const CREDITS_TOAST_INTERVAL_MS = 10 * 60_000;
 
 /** Stable per-seat identity used only for in-memory traversal diagnostics. */
 function getAccountDiagnosticsKey(account: ManagedAccount): string {
@@ -532,6 +550,11 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 	// CODEX_RETRY_ALL_UNBOUNDED=1.
 	const INTERACTIVE_ALL_LIMITED_CEILING_MS = 10 * 60_000;
 
+	// Which accounts the backend said cannot serve a model, kept across
+	// requests so the credits fallback does not wait on a seat that will never
+	// serve the model; and which account the last "spending credits" toast named.
+	const modelEntitlements = new ModelEntitlements();
+	let lastCreditsToast: { key: string; at: number } | undefined;
 	const runtimeMetrics: RuntimeMetrics = {
 		startedAt: Date.now(),
 		totalRequests: 0,
@@ -2680,6 +2703,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							const emptyResponseRetryDelayMs = getEmptyResponseRetryDelayMs(pluginConfig);
 							const pidOffsetEnabled = getPidOffsetEnabled(pluginConfig);
 							const rotationStrategy = getRotationStrategy(pluginConfig);
+							const spendCreditsEnabled = getSpendCredits(pluginConfig);
 							const effectiveUserConfig = fastSessionEnabled ? applyFastSessionDefaults(userConfig) : userConfig;
 							let accountManager = cachedAccountManager;
 
@@ -3120,6 +3144,130 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 						const accountPoolMode = getModelAccountPoolMode(pluginConfig, model);
 						const strictAccountPool =
 							preferredAccountIds.length > 0 && accountPoolMode === "strict";
+						const isPoolMember = (index: number): boolean => {
+							const candidate = accountManager.getAccountAt(index);
+							return candidate !== null &&
+								preferredAccountIds.some((key) => matchesModelPoolAccountKey(candidate, key));
+						};
+						const isKnownUnsupported = (candidate: ManagedAccount): boolean =>
+							unsupportedAccountKeys.has(getAccountDiagnosticsKey(candidate)) ||
+							modelEntitlements.isUnsupported(getCreditsAccountKey(candidate), model);
+						// One `/wham/usage` read for an account whose balance this
+						// process has not seen recently. Free, and the only way to know
+						// a balance before a turn is billed to it.
+						const readAccountCredits = async (
+							candidate: ManagedAccount,
+						): Promise<CreditsBalance | undefined> => {
+							const key = getCreditsAccountKey(candidate);
+							const known = creditsLedger.get(key);
+							if (known) return known;
+							try {
+								let auth = accountManager.toAuthDetails(candidate) as OAuthAuthDetails;
+								if (shouldRefreshToken(auth, tokenRefreshSkewMs)) {
+									auth = (await refreshAndUpdateToken(auth, client, {
+										organizationId: candidate.organizationId,
+										accountId: candidate.accountId,
+										accountUserId: candidate.accountUserId,
+									})) as OAuthAuthDetails;
+									accountManager.updateFromAuth(candidate, auth);
+									accountManager.clearAuthFailures(candidate);
+									accountManager.saveToDiskDebounced();
+								}
+								const usageAccountId = resolveRequestAccountId(
+									candidate.accountId,
+									candidate.accountIdSource,
+									extractAccountId(auth.access),
+								);
+								if (!usageAccountId) return undefined;
+								const usage = parseCodexUsagePayload(
+									await fetchCodexUsage({
+										accountId: usageAccountId,
+										accessToken: auth.access,
+										organizationId: candidate.organizationId,
+										normalizeAccountErrors: true,
+									}),
+								);
+								creditsLedger.record(key, usage.creditsBalance);
+								return creditsLedger.get(key);
+							} catch (error) {
+								logDebug(
+									`[${PLUGIN_NAME}] Could not read the Codex credit balance of account ${candidate.index + 1}: ${(error as Error)?.message ?? String(error)}`,
+								);
+								return undefined;
+							}
+						};
+						// With `spendCredits` on: the account to serve this request on
+						// credits, once no entitled account has plan quota left.
+						const pickCreditsAccount = async (
+							explainability: ReturnType<AccountManager["getSelectionExplainability"]>,
+						): Promise<{ account: ManagedAccount; balance: CreditsBalance } | null> => {
+							const keyAt = (index: number): string | undefined => {
+								const candidate = accountManager.getAccountAt(index);
+								return candidate ? getCreditsAccountKey(candidate) : undefined;
+							};
+							const plan = planCreditsFallback(explainability, {
+								attempted,
+								inPool: (index) => !strictAccountPool || isPoolMember(index),
+								preferred: preferredAccountIds.length > 0 ? isPoolMember : undefined,
+								unsupported: (index) => {
+									const candidate = accountManager.getAccountAt(index);
+									return candidate === null || isKnownUnsupported(candidate);
+								},
+								refused: (index) => {
+									const key = keyAt(index);
+									return key === undefined || creditsLedger.isRefused(key);
+								},
+								balance: (index) => {
+									const key = keyAt(index);
+									return key === undefined ? undefined : creditsLedger.get(key);
+								},
+							});
+							if (plan.kind !== "credits") return null;
+							for (const index of plan.indices) {
+								const candidate = accountManager.getAccountAt(index);
+								if (!candidate) continue;
+								const balance = await readAccountCredits(candidate);
+								if (
+									balance &&
+									hasSpendableCredits(balance) &&
+									!creditsLedger.isRefused(getCreditsAccountKey(candidate))
+								) {
+									return { account: candidate, balance };
+								}
+							}
+							return null;
+						};
+						// The sentence an out-of-quota error ends with: which accounts
+						// still hold credits, and how to use them when the setting is off.
+						// Built from balances already read (response headers, the quota
+						// poll, `codex-limits`), never by reading them here: a message must
+						// not cost a request or rotate a refresh token.
+						const describeCreditsWhenOutOfQuota = (): string => {
+							const explainability = accountManager.getSelectionExplainability(modelFamily, model);
+							const accounts: CreditsAccountSummary[] = [];
+							let exhausted = 0;
+							for (const entry of explainability) {
+								if (!entry.enabled || !entry.reasons.includes("quota-exhausted")) continue;
+								if (strictAccountPool && !isPoolMember(entry.index)) continue;
+								const candidate = accountManager.getAccountAt(entry.index);
+								if (!candidate || isKnownUnsupported(candidate)) continue;
+								exhausted++;
+								const creditsKey = getCreditsAccountKey(candidate);
+								if (creditsLedger.isRefused(creditsKey)) continue;
+								const balance = creditsLedger.get(creditsKey, CREDITS_DISPLAY_MAX_AGE_MS);
+								if (!balance || !hasSpendableCredits(balance)) continue;
+								accounts.push({
+									label: formatAccountLabel(candidate, candidate.index, {
+										maskEmail: maskEmailEnabled,
+										peerAccounts: accountManager.getAccountsSnapshot(),
+									}),
+									balance,
+								});
+							}
+							return exhausted === 0
+								? ""
+								: formatCreditsOutOfQuotaHint({ spendCredits: spendCreditsEnabled, accounts });
+						};
 
 			while (attempted.size < Math.max(1, accountCount)) {
 				const selectionExplainability = accountManager.getSelectionExplainability(
@@ -3143,7 +3291,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					configuredAccountPoolSize: preferredAccountIds.length,
 					accountPoolMode: strictAccountPool ? "strict" : undefined,
 				};
-				const account = accountManager.getAccountForStrategy(
+				const selected = accountManager.getAccountForStrategy(
 					rotationStrategy,
 					modelFamily,
 					model,
@@ -3152,14 +3300,44 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					accountPoolMode,
 					attempted,
 				);
+				const selectedIneligible = selected !== null &&
+					selectionExplainability.some((entry) => entry.index === selected.index && !entry.eligible);
+				// `spendCredits`: once no entitled account has plan quota left, an
+				// account held back only by its spent window serves on its credits.
+				const creditsChoice =
+					spendCreditsEnabled && (!selected || attempted.has(selected.index) || selectedIneligible)
+						? await pickCreditsAccount(selectionExplainability)
+						: null;
+				const servingOnCredits = creditsChoice !== null;
+				const account = creditsChoice?.account ?? selected;
 				if (!account || attempted.has(account.index)) {
 					break;
 				}
 							attempted.add(account.index);
 							// Hybrid's last-resort result is not necessarily eligible. Requests
 							// must honor active blocks rather than sending it upstream anyway.
-							if (selectionExplainability.some((entry) => entry.index === account.index && !entry.eligible)) {
+							if (!servingOnCredits && selectedIneligible) {
 								continue;
+							}
+							if (creditsChoice) {
+								const creditsMessage = formatServingOnCreditsToast({
+									label: formatAccountLabel(account, account.index, {
+										maskEmail: maskEmailEnabled,
+										peerAccounts: accountManager.getAccountsSnapshot(),
+									}),
+									balance: creditsChoice.balance,
+								});
+								logInfo(creditsMessage);
+								const creditsKey = getCreditsAccountKey(account);
+								const toastNow = Date.now();
+								if (
+									!lastCreditsToast ||
+									lastCreditsToast.key !== creditsKey ||
+									toastNow - lastCreditsToast.at >= CREDITS_TOAST_INTERVAL_MS
+								) {
+									lastCreditsToast = { key: creditsKey, at: toastNow };
+									await showToast(creditsMessage, "warning", { duration: toastDurationMs });
+								}
 							}
 							runtimeMetrics.lastSelectedAccountIndex = account.index;
 							runtimeMetrics.lastQuotaKey = quotaKey;
@@ -3369,6 +3547,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 											accountManager.saveToDiskDebounced();
 
 											if (
+												!servingOnCredits &&
 												accountToastsEnabled &&
 												accountCount > 1 &&
 												accountManager.shouldShowAccountToast(
@@ -3600,6 +3779,10 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								latencyMs: fetchLatencyMs,
 								headers: Object.fromEntries(response.headers.entries()),
 							});
+							const responseCredits = parseCreditsHeaders(response.headers);
+							if (responseCredits) {
+								creditsLedger.record(getCreditsAccountKey(account), responseCredits);
+							}
 							// The TUI snapshot and the durable rotation block read the same
 							// `x-codex-*` headers, so they share one authority decision — gating
 							// only the block would leave the status line reporting "0% left" for
@@ -3640,6 +3823,23 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 					});
 					const quotaExhausted =
 						quotaHeadersAuthoritative === true && recordQuotaHeaders();
+					// The backend spends credits by itself, so a usage-limit refusal of
+					// a credits turn means it has none to spend right now, whatever the
+					// balance says. Only an authoritative usage-limit 429 counts as a
+					// refusal: a transient throttle (tokens/concurrency) or an overload
+					// dressed up as a 429 would otherwise hold a funded account out of
+					// credits until a reset it never earned.
+					const creditsTurnRefused =
+						servingOnCredits &&
+						quotaHeadersAuthoritative === true &&
+						(parseRateLimitReason(rateLimit?.code) === "quota" ||
+							(responseCredits !== null && !hasSpendableCredits(responseCredits)));
+					if (creditsTurnRefused) {
+						creditsLedger.markRefused(
+							getCreditsAccountKey(account),
+							getQuotaExhaustedResetAtMs(response.headers) ?? Date.now() + CREDITS_REFUSAL_DEFAULT_MS,
+						);
+					}
 
 			const workspaceDeactivated = isDeactivatedWorkspaceError(errorBody, response.status);
 				if (workspaceDeactivated) {
@@ -3709,6 +3909,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			const unsupportedModelInfo = getUnsupportedCodexModelInfo(errorBody);
 			if (unsupportedModelInfo.isUnsupported) {
 				unsupportedAccountKeys.add(getAccountDiagnosticsKey(account));
+				if (model) modelEntitlements.markUnsupported(getCreditsAccountKey(account), model);
 			}
 			const hasRemainingAccounts = attempted.size < Math.max(1, accountCount);
 
@@ -3880,7 +4081,11 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 																														// just written for it is monotonic — a short retry that happened
 																														// to succeed could not walk it back, so the account would serve
 																														// traffic while rotation still considers it blocked. Rotate.
+																														// A refused credits turn is the same: the refusal is the
+																														// backend's answer to billing credits, so an immediate retry
+																														// only buys a second paid refusal.
 																														if (
+																															!creditsTurnRefused &&
 																															!quotaExhausted &&
 																															delayMs <= RATE_LIMIT_SHORT_RETRY_THRESHOLD_MS &&
 																															consumeRetryBudget(
@@ -4174,6 +4379,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								unavailableCount > 0
 									? ` ${unavailableCount} pooled account(s) were never attempted (rate-limited, cooling down, or disabled).`
 									: "";
+							const creditsDetail = describeCreditsWhenOutOfQuota();
 							const message =
 								`Strict account pool unavailable for ${effectiveModel}. ` +
 								`${preferredAccountIds.length} configured pool key(s) resolved to ${poolAccountCount} account(s).` +
@@ -4181,6 +4387,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								unresolvedDetail +
 								unavailableDetail +
 								waitDetail +
+								creditsDetail +
 								` ${REQUEST_LOG_HINT}`;
 							if (runtimeMetrics.lastSelectionSnapshot) {
 								runtimeMetrics.lastSelectionSnapshot = {
@@ -4318,7 +4525,8 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 										waitMs,
 									)
 								) {
-									const countdownMessage = `All ${count} account(s) rate-limited. Waiting`;
+									const countdownCredits = upstreamBlocked ? describeCreditsWhenOutOfQuota() : "";
+									const countdownMessage = `All ${count} account(s) rate-limited.${countdownCredits} Waiting`;
 									await sleepWithCountdown(
 										addJitter(waitMs, 0.2),
 										countdownMessage,
@@ -4330,6 +4538,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 								}
 
 								const waitLabel = waitMs > 0 ? formatWaitTime(waitMs) : "a bit";
+								const outOfQuotaCredits = waitMs > 0 && count > 0 ? describeCreditsWhenOutOfQuota() : "";
 								// `runtimeMetrics` is plugin-scoped, so `lastErrorCategory` alone
 								// can still hold "unsupported-model" from an *earlier* request.
 								// Require an unsupported response from this traversal as well, or
@@ -4352,7 +4561,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 									count === 0
 										? "No Codex accounts configured. Run `opencode auth login`."
 										: waitMs > 0
-											? `All ${count} account(s) are rate-limited. Try again in ${waitLabel} or add another account with \`opencode auth login\`.`
+											? `All ${count} account(s) are rate-limited. Try again in ${waitLabel} or add another account with \`opencode auth login\`.${outOfQuotaCredits}`
 											: wasEntitlementExhaustion
 												? `No selectable account succeeded for the requested model across ${count} configured account(s).${entitlementDetail} Codex model access is account/workspace gated; default gpt-5.6-sol/terra/luna selectors auto-fallback down the 5.6 tiers to gpt-5.5, and gpt-5.5/gpt-5-codex through the GPT-5.4 family when possible. Set \`unsupportedCodexPolicy: "fallback"\` for the full manual fallback chain, or see \`codex-health\` for per-account details.`
 												: `All ${count} account(s) failed (server errors or auth issues). Check account health with \`codex-health\`.`;

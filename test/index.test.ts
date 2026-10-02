@@ -183,6 +183,7 @@ vi.mock("../lib/config.js", () => ({
 	getEmptyResponseRetryDelayMs: () => 1000,
 	getPidOffsetEnabled: () => false,
 	getRotationStrategy: () => "hybrid",
+	getSpendCredits: vi.fn(() => false),
 	getModelAccountPool: vi.fn(() => []),
 	getModelAccountPoolMode: vi.fn(() => "preferred"),
 	getFetchTimeoutMs: () => 60000,
@@ -4894,6 +4895,246 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			// The info toast is skipped, so its debounce marker is never consumed —
 			// which keeps warning toasts fully eligible rather than suppressing them.
 			expect(manager.markToastShown).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("spendCredits: serving on Codex credits once no entitled account has plan quota", () => {
+		type Seat = { email: string; accountId: string; eligible: boolean; reasons: string[] };
+		const exhausted = (email: string, accountId: string): Seat =>
+			({ email, accountId, eligible: false, reasons: ["quota-exhausted"] });
+		const buildManager = (seats: Seat[]) => {
+			const until = Date.now() + 3 * 86_400_000;
+			const accounts = seats.map((seat, index) => ({
+				index,
+				accountId: seat.accountId,
+				email: seat.email,
+				refreshToken: `refresh-${index}`,
+				addedAt: index + 1,
+				quotaExhaustedUntil: seat.eligible ? undefined : until,
+			}));
+			return {
+				accounts,
+				getAccountCount: () => accounts.length,
+				getCurrentOrNextForFamilyHybrid: () => accounts[0],
+				// Hybrid's last resort hands back a blocked account when nothing is eligible.
+				getAccountForStrategy: (
+					_strategy: unknown, _family: unknown, _model: unknown, _options: unknown,
+					_pool: unknown, _mode: unknown, attempted: Set<number>,
+				) =>
+					accounts.find((account) => seats[account.index]?.eligible && !attempted.has(account.index)) ??
+					accounts.find((account) => !attempted.has(account.index)) ??
+					null,
+				getAccountAt: (index: number) => accounts[index] ?? null,
+				getSelectionExplainability: () =>
+					seats.map((seat, index) => ({
+						index,
+						enabled: true,
+						isCurrentForFamily: index === 0,
+						eligible: seat.eligible,
+						reasons: seat.reasons,
+						healthScore: 100,
+						tokensAvailable: 50,
+						quotaExhaustedUntil: seat.eligible ? undefined : until,
+						lastUsed: 1,
+					})),
+				toAuthDetails: (account: { refreshToken: string }) => ({
+					type: "oauth" as const,
+					access: "access-1",
+					refresh: account.refreshToken,
+					expires: Date.now() + 3_600_000,
+				}),
+				hasRefreshToken: () => true,
+				saveToDiskDebounced: vi.fn(),
+				updateFromAuth: vi.fn(),
+				clearAuthFailures: vi.fn(),
+				incrementAuthFailures: vi.fn(() => 1),
+				markAccountCoolingDown: vi.fn(),
+				markRateLimitedWithReason: vi.fn(),
+				markQuotaExhausted: vi.fn(() => false),
+				recordRateLimit: vi.fn(),
+				consumeToken: vi.fn(() => true),
+				refundToken: vi.fn(),
+				markSwitched: vi.fn(),
+				removeAccount: vi.fn(() => false),
+				removeAccountsWithSameRefreshToken: vi.fn(() => 0),
+				recordFailure: vi.fn(),
+				recordSuccess: vi.fn(),
+				getMinWaitTimeForFamily: vi.fn(() => 3 * 86_400_000),
+				shouldShowAccountToast: vi.fn(() => false),
+				markToastShown: vi.fn(),
+				setActiveIndex: vi.fn(() => accounts[0]),
+				getAccountsSnapshot: vi.fn(() => accounts),
+				disposeShutdownHandler: vi.fn(),
+			};
+		};
+
+		// `/wham/usage` answers with each account's balance; `codex/responses`
+		// with whatever the test hands `respond`.
+		const routeFetch = (
+			balances: string[],
+			respond: () => Response = () => new Response(JSON.stringify({ content: "ok" }), { status: 200 }),
+		) => {
+			let usageReads = 0;
+			const responses: number[] = [];
+			globalThis.fetch = vi.fn(async (input: unknown) => {
+				if (String(input).includes("/wham/usage")) {
+					const balance = balances[usageReads++] ?? "0";
+					return new Response(JSON.stringify({
+						credits: { has_credits: balance !== "0", unlimited: false, balance },
+					}), { status: 200 });
+				}
+				responses.push(responses.length);
+				return respond();
+			}) as typeof fetch;
+			return { usageReads: () => usageReads, responseCalls: () => responses.length };
+		};
+
+		const withSpendCredits = async (enabled: boolean, seats: Seat[]) => {
+			const configModule = await import("../lib/config.js");
+			vi.mocked(configModule.getSpendCredits).mockReturnValue(enabled);
+			const { AccountManager } = await import("../lib/accounts.js");
+			const manager = buildManager(seats);
+			vi.spyOn(AccountManager, "loadFromDisk").mockResolvedValue(manager as never);
+			return { ...(await setupPlugin()), manager };
+		};
+		const prompt = (sdk: Awaited<ReturnType<typeof setupPlugin>>["sdk"]) =>
+			sdk.fetch!("https://api.openai.com/v1/chat", {
+				method: "POST",
+				body: JSON.stringify({ model: "gpt-5.1" }),
+			});
+		const toastMessages = (client: ReturnType<typeof createMockClient>) =>
+			client.tui.showToast.mock.calls.map(
+				(call) => (call[0] as { body?: { message?: string } })?.body?.message ?? "",
+			);
+
+		afterEach(async () => {
+			const { creditsLedger } = await import("../lib/codex-credits.js");
+			creditsLedger.clear();
+		});
+
+		it("keeps credits unspent by default, and says where they are and how to use them", async () => {
+			const { getCreditsAccountKey, creditsLedger } = await import("../lib/codex-credits.js");
+			const seats = [exhausted("a@example.com", "acc-a"), exhausted("b@example.com", "acc-b")];
+			const fetchRoute = routeFetch([]);
+			const { sdk, manager } = await withSpendCredits(false, seats);
+			creditsLedger.record(getCreditsAccountKey(manager.accounts[1]!), {
+				hasCredits: true, unlimited: false, balance: 62_500,
+			});
+			const response = await prompt(sdk);
+			expect(response.status).toBe(429);
+			expect(fetchRoute.responseCalls()).toBe(0);
+			expect(fetchRoute.usageReads()).toBe(0);
+			const body = (await response.json()) as { error: { message: string } };
+			expect(body.error.message).toContain("Codex credits are still available on Account 2 (62,500 credits)");
+			expect(body.error.message).toContain('"spendCredits": true');
+		});
+
+		it("serves on the account with a credit balance and says so in a toast", async () => {
+			const seats = [exhausted("a@example.com", "acc-a"), exhausted("b@example.com", "acc-b")];
+			const fetchRoute = routeFetch(["0", "62500"]);
+			const { sdk, mockClient } = await withSpendCredits(true, seats);
+			const response = await prompt(sdk);
+			expect(response.status).toBe(200);
+			expect(fetchRoute.usageReads()).toBe(2);
+			expect(fetchRoute.responseCalls()).toBe(1);
+			expect(toastMessages(mockClient)).toContain(
+				"Plan quota used up on every account. Spending Codex credits on Account 2 (62,500 left).",
+			);
+		});
+
+		it("spends nothing while an entitled account still has plan quota", async () => {
+			const seats = [
+				{ email: "a@example.com", accountId: "acc-a", eligible: true, reasons: ["eligible"] },
+				exhausted("b@example.com", "acc-b"),
+			];
+			const fetchRoute = routeFetch(["62500"]);
+			const { sdk, mockClient } = await withSpendCredits(true, seats);
+			const response = await prompt(sdk);
+			expect(response.status).toBe(200);
+			expect(fetchRoute.usageReads()).toBe(0);
+			expect(toastMessages(mockClient).some((message) => message.includes("Codex credits"))).toBe(false);
+		});
+
+		it("does not let a seat that cannot serve the model hold credits back", async () => {
+			const fetchHelpers = await import("../lib/request/fetch-helpers.js");
+			vi.mocked(fetchHelpers.getUnsupportedCodexModelInfo).mockReturnValueOnce({
+				isUnsupported: true,
+				unsupportedModel: "gpt-5.1",
+			} as never);
+			const seats = [
+				{ email: "a@example.com", accountId: "acc-a", eligible: true, reasons: ["eligible"] },
+				exhausted("b@example.com", "acc-b"),
+			];
+			let responsesSeen = 0;
+			const fetchRoute = routeFetch(["62500"], () =>
+				responsesSeen++ === 0
+					? new Response(JSON.stringify({ detail: "model not supported" }), { status: 400 })
+					: new Response(JSON.stringify({ content: "ok" }), { status: 200 }),
+			);
+			const { sdk } = await withSpendCredits(true, seats);
+			const response = await prompt(sdk);
+			expect(response.status).toBe(200);
+			expect(fetchRoute.responseCalls()).toBe(2);
+			expect(fetchRoute.usageReads()).toBe(1);
+		});
+
+		it("never sends a turn to an account whose balance is zero", async () => {
+			const fetchRoute = routeFetch(["0"]);
+			const { sdk } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			const response = await prompt(sdk);
+			expect(response.status).toBe(429);
+			expect(fetchRoute.responseCalls()).toBe(0);
+		});
+
+		it("stops offering an account whose credits turn was refused", async () => {
+			const fetchRoute = routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "usage_limit_reached" } }), { status: 429 }),
+			);
+			const { sdk } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			expect(fetchRoute.responseCalls()).toBe(1);
+			const second = await prompt(sdk);
+			expect(second.status).not.toBe(200);
+			expect(fetchRoute.responseCalls()).toBe(1);
+		});
+
+		it("does not treat a transient throttle on a credits turn as a credits refusal", async () => {
+			routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), { status: 429 }),
+			);
+			const { sdk, manager } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			const { creditsLedger, getCreditsAccountKey } = await import("../lib/codex-credits.js");
+			expect(creditsLedger.isRefused(getCreditsAccountKey(manager.accounts[0]!))).toBe(false);
+		});
+
+		it("does not treat an upstream overload on a credits turn as a credits refusal", async () => {
+			routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "server_is_overloaded" } }), { status: 429 }),
+			);
+			const { sdk, manager } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			const { creditsLedger, getCreditsAccountKey } = await import("../lib/codex-credits.js");
+			expect(creditsLedger.isRefused(getCreditsAccountKey(manager.accounts[0]!))).toBe(false);
+		});
+
+		it("marks a credits turn refused when the reply itself reports no spendable credits", async () => {
+			const fetchRoute = routeFetch(["62500"], () =>
+				new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+					status: 429,
+					headers: {
+						"x-codex-credits-has-credits": "false",
+						"x-codex-credits-unlimited": "false",
+						"x-codex-credits-balance": "0",
+					},
+				}),
+			);
+			const { sdk } = await withSpendCredits(true, [exhausted("a@example.com", "acc-a")]);
+			await prompt(sdk);
+			expect(fetchRoute.responseCalls()).toBe(1);
+			const second = await prompt(sdk);
+			expect(second.status).not.toBe(200);
+			expect(fetchRoute.responseCalls()).toBe(1);
 		});
 	});
 

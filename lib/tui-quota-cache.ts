@@ -10,6 +10,7 @@ import {
 	type CodexQuotaWindowKind,
 } from "./quota-windows.js";
 import { renameWithWindowsRetry } from "./storage/atomic-write.js";
+import type { CreditsBalance } from "./codex-credits.js";
 import type { CompactQuotaLimit } from "./tui-status.js";
 
 export const TUI_QUOTA_CACHE_VERSION = 1;
@@ -377,6 +378,8 @@ export type TuiQuotaOverviewAccount = {
 	/** Banked rate-limit resets redeemable now. */
 	resetCredits?: number;
 	resetCreditsApplicable?: number | null;
+	/** Codex credit balance, present only when the account has some to spend. */
+	credits?: CreditsBalance;
 	limits: TuiQuotaLimit[];
 	/**
 	 * When this account was read. The snapshot's own `fetchedAt` is its oldest
@@ -415,6 +418,16 @@ export type TuiQuotaOverviewSnapshot = {
 	accounts: TuiQuotaOverviewAccount[];
 };
 
+function isCreditsBalance(value: unknown): value is CreditsBalance {
+	return (
+		isRecord(value) &&
+		typeof value.hasCredits === "boolean" &&
+		typeof value.unlimited === "boolean" &&
+		(value.balance === null ||
+			(typeof value.balance === "number" && Number.isFinite(value.balance) && value.balance >= 0))
+	);
+}
+
 function isTuiQuotaOverviewAccount(
 	value: unknown,
 ): value is TuiQuotaOverviewAccount {
@@ -430,6 +443,7 @@ function isTuiQuotaOverviewAccount(
 		isOptionalFiniteNumber(value.resetCredits) &&
 		(value.resetCreditsApplicable === undefined || value.resetCreditsApplicable === null ||
 			(typeof value.resetCreditsApplicable === "number" && Number.isInteger(value.resetCreditsApplicable) && value.resetCreditsApplicable >= 0)) &&
+		(value.credits === undefined || isCreditsBalance(value.credits)) &&
 		Array.isArray(value.limits) &&
 		value.limits.every(isTuiQuotaLimit) &&
 		isOptionalFiniteNumber(value.fetchedAt) &&

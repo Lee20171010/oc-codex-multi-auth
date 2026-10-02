@@ -136,6 +136,11 @@ export class AccountManager {
 		return this.state.getAccountsSnapshot();
 	}
 
+	/** The live account at this index, for a caller that chose it from the selection explainability. */
+	getAccountAt(index: number): ManagedAccount | null {
+		return this.state.accounts[index] ?? null;
+	}
+
 	getSelectionExplainability(
 		family: ModelFamily,
 		model?: string | null,

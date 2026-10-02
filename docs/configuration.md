@@ -183,6 +183,7 @@ Format: `field | env override | type | default | bounds | meaning`.
 | field | env | type | default | bounds | meaning |
 | --- | --- | --- | --- | --- | --- |
 | `rotationStrategy` | `CODEX_AUTH_ROTATION_STRATEGY` | `hybrid` \| `sticky` \| `round-robin` | `hybrid` | — | `hybrid`: stay while healthy, else score-select (health + tokens + freshness); `sticky`: drain the current account first, then the lowest-indexed available — staggers weekly-quota cooldowns; `round-robin`: advance in order every selection |
+| `spendCredits` | `CODEX_AUTH_SPEND_CREDITS` | boolean | `false` | — | once no account entitled to the requested model has plan quota left, serve from an account that still holds Codex credits instead of waiting for a reset; see [Spending Codex credits](#spending-codex-credits) |
 | `modelAccountPools` | (file only) | object: model → account-id array | `{}` | keys/values non-empty strings | pin an effective model to stable account or Business-seat identities; matched case-insensitively after model normalization |
 | `modelAccountPoolModes` | (file only) | object: model → `preferred` \| `strict` | `{}` (all `preferred`) | — | `preferred` falls back to the general pool when the mapping has no selectable account; `strict` never leaves its list and fails with `strict_pool_unavailable` |
 | `perProjectAccounts` | `CODEX_AUTH_PER_PROJECT_ACCOUNTS` | boolean | `true` | — | `true`: each project gets its own pool under `~/.opencode/projects/<project-key>/`; `false`: the global `~/.opencode/` pool. Toggling switches scope live (in-flight requests drain first) but does **not** migrate or delete the other scope's accounts, flagged, or backup files — copy or remove them yourself |
@@ -252,7 +253,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 
 | field | env | type | default | bounds | meaning |
 | --- | --- | --- | --- | --- | --- |
-| `quotaStatus.mode` | (file only) | `active` \| `overview` \| `resets`, or array | `active` | unknown names dropped | which screens to show; a list alternates every `rotateMs` |
+| `quotaStatus.mode` | (file only) | `active` \| `overview` \| `resets` \| `credits`, or array | `active` | unknown names dropped | which screens to show; a list alternates every `rotateMs` |
 | `quotaStatus.rotateMs` | (file only) | number (ms) | `5000` | 1000–86400000 | per-screen dwell when `mode` is a list |
 | `quotaStatus.layout` | (file only) | `accounts` \| `aggregate` \| `count` \| `total` | `accounts` | — | per-account segments, grouped percentages, a count, or only the pool total |
 | `quotaStatus.accountNames` | (file only) | `number` \| `label` \| `none` | `number` | — | `#1`, the `codex-label`/email local part, or nothing |
@@ -262,7 +263,7 @@ config `fallbackOnUnsupportedCodexModel` > `strict`.
 | `quotaStatus.resetTimes` | (file only) | `never` \| `low` \| `always` (boolean accepted: `true`→`low`, `false`→`never`) | `low` | — | `3d` countdowns: none, only accounts at ≤25% headroom, or all |
 | `quotaStatus.resetCredits` | (file only) | boolean | `false` | — | `1r` for banked rate-limit resets redeemable now |
 | `quotaStatus.recovery` | (file only) | boolean or `"all"` | `false` | — | `true`: next capacity gain, signed to the display direction; `"all"`: every known incremental gain, always positive |
-| `quotaStatus.resetsMinUsedPercent` | (file only) | number | `100` | 0–100 | minimum pool weighted usage before the `resets` screen shows |
+| `quotaStatus.resetsMinUsedPercent` | (file only) | number | `100` | 0–100 | minimum pool weighted usage before the `resets` and `credits` screens show |
 | `quotaStatus.accounts` | (file only) | boolean | — | — | legacy spelling; `false` behaves as `layout: "count"` |
 | `quotaStatus.rows` | (file only) | integer | `1` | 1–4 | row ceiling for the line — a ceiling, not a height |
 | `quotaStatus.showFor` | (file only) | `always` \| `codex-models` | `always` | — | `codex-models` hides the line unless the session runs a model this plugin routes |
@@ -338,6 +339,53 @@ the TUI status line and quota details dialog, `codex-limits`, the standalone
 quota; `used` reports consumption (`5h limit: 12% used`). Presentation only:
 exhaustion, rotation blocks, notification thresholds, warning/danger colours,
 and the `usedPercent`/`leftPercent` JSON fields are unchanged.
+
+### Spending Codex credits
+
+A ChatGPT account can hold Codex credits besides its plan's 5-hour and weekly
+windows: bought, or granted by OpenAI. Once an account's plan window is used
+up, the Codex backend keeps serving it and bills the turn to that balance.
+By default the plugin never lets that happen: a spent account is taken out of
+rotation until its window resets, so a subscription never costs more than the
+subscription.
+
+`spendCredits: true` (env `CODEX_AUTH_SPEND_CREDITS=1`) uses those credits
+instead of waiting:
+
+- Plan quota always comes first. Credits are spent only once no account that
+  can serve the requested model has plan quota left. An account that is
+  merely throttled or cooling down is waited for, not paid around. A seat the
+  backend says cannot serve the model does not count, and neither does one
+  outside a `strict` `modelAccountPools` entry for that model.
+- Only an account whose balance is above zero is used, largest balance first
+  (members of the model's account pool before others). The balance is read
+  from `/wham/usage` before the first turn is billed to it, and kept current
+  from the `x-codex-credits-*` headers on every reply.
+- Each request decides again, so the first plan window that resets takes the
+  traffic back.
+- A credits turn the backend refuses keeps that account out until the reset
+  the refusal names.
+- A toast says which account is spending credits and how many are left:
+
+  ```text
+  Plan quota used up on every account. Spending Codex credits on account 3 (62,500 left).
+  ```
+
+When every account is out of plan quota, the error and the waiting countdown
+name the accounts that still hold credits, and with the setting off they say
+how to turn it on:
+
+```text
+All 3 account(s) are rate-limited. Try again in 2d 4h or add another account with `opencode auth login`. Codex credits are still available on account 3 (62,500 credits). Set `"spendCredits": true` in ~/.opencode/openai-codex-auth-config.json (or CODEX_AUTH_SPEND_CREDITS=1) to use them once plan quota runs out.
+```
+
+Those balances come from readings already taken (replies, the quota poll,
+`codex-limits`); building a message never sends a request. `codex-limits`,
+the standalone `limits` command and the `credits` prompt screen show every
+account that has a balance.
+
+An account set up for automatic credit top-up is charged real money for a
+credits turn. Leave the setting off if that is not what you want.
 
 ### Quota notifications
 
@@ -513,7 +561,7 @@ gains share a displayed countdown (`+7% in 5d, +24% in 5d, +2% in 5d` becomes
 `rotateMs` (default 5000, minimum 1000):
 
 ```json
-{ "quotaStatus": { "mode": ["overview", "resets"], "rotateMs": 5000 } }
+{ "quotaStatus": { "mode": ["overview", "resets", "credits"], "rotateMs": 5000 } }
 ```
 
 A screen with nothing to say is skipped rather than shown blank — which is
@@ -528,6 +576,17 @@ Free resets: 6d 1r damian@nowaker.net, 4d 2r work@example.com
 
 It honours `maskEmail`, shortens through a degradation ladder as space
 shrinks, and never redeems a credit itself.
+
+The `credits` page is the same idea for the other way out of a spent pool:
+under the same threshold, it lists the accounts that still hold Codex
+credits, largest balance first:
+
+```text
+Codex credits: 62,500 damian@nowaker.net, 1,200 work@example.com
+```
+
+It only shows what is there; `spendCredits` decides whether those credits are
+used.
 
 #### Rows and visibility
 

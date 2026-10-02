@@ -1968,7 +1968,11 @@ async function runLimitsCommandInner(parsed, options = {}) {
 			planType: usage.planType,
 			windows: [usage.primary, usage.secondary],
 			limits: usage.limits,
-			credits: usage.credits,
+			// Only a balance there is to spend, in the raw form `codex-limits`
+			// already emits - display grouping stays out of the JSON field.
+			credits: usageMod.spendableUsageCreditsValue
+				? usageMod.spendableUsageCreditsValue(usage.creditsBalance)
+				: usage.credits,
 			// Raw counts stay in `resetCredits` and the rendered line lives in
 			// its own field: embedding the English summary inside the counts
 			// object would make `--json` consumers parse presentation text to
@@ -2246,9 +2250,13 @@ function toCachedLimitsReading(reading, usageMod, quotaDisplay) {
 				quotaDisplay,
 			),
 		),
-		// The snapshot keeps neither the credit balance nor the banked total
-		// beside the redeemable count, so only what it does keep is reported.
-		credits: null,
+		// The snapshot keeps the credit balance only for an account that has
+		// one, and the redeemable reset count without the banked total, so
+		// only what it does keep is reported - in the same raw form the live
+		// read emits, since `--json` callers parse the field as a number.
+		credits: reading.account.credits && usageMod.spendableUsageCreditsValue
+			? usageMod.spendableUsageCreditsValue(reading.account.credits)
+			: null,
 		resetCredits: null,
 		resetCreditsSummary:
 			typeof count === "number" && count > 0
