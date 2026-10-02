@@ -20,14 +20,16 @@ import {
 	ensureCodexUsageAccessToken,
 	fetchCodexUsage,
 	getUsageLeftPercent,
+	isCodexCredentialFailure,
 	hasUsageWindow,
 	parseCodexUsagePayload,
 	resolveCodexUsageAccountId,
+	summarizeCodexErrorMessage,
 	type CodexUsageSummary,
 	type LimitWindow,
 } from "./codex-usage.js";
 import { creditsLedger, getCreditsAccountKey, hasSpendableCredits } from "./codex-credits.js";
-import { logDebug } from "./logger.js";
+import { logDebug, maskString } from "./logger.js";
 import type { QuotaOverviewAccount } from "./quota-overview.js";
 import { loadAccounts, type AccountStorageV3 } from "./storage.js";
 import {
@@ -104,10 +106,14 @@ export function toOverviewAccount(params: {
 	};
 }
 
+type OverviewFetchResult =
+	| { reading: TuiQuotaOverviewAccount }
+	| { error: string; credential: boolean };
+
 async function fetchOverviewAccount(
 	storage: AccountStorageV3,
 	index: number,
-): Promise<TuiQuotaOverviewAccount | undefined> {
+): Promise<OverviewFetchResult | undefined> {
 	const account = storage.accounts[index];
 	if (!account) return undefined;
 	try {
@@ -116,7 +122,9 @@ async function fetchOverviewAccount(
 			account,
 			accessToken: credentials.accessToken,
 		});
-		if (!accountId) return undefined;
+		if (!accountId) {
+			return { error: "could not resolve account id (re-login may be required)", credential: true };
+		}
 		const usage = parseCodexUsagePayload(
 			await fetchCodexUsage({
 				accountId,
@@ -126,18 +134,23 @@ async function fetchOverviewAccount(
 			}),
 		);
 		creditsLedger.record(getCreditsAccountKey(account), usage.creditsBalance);
-		return toOverviewAccount({
-			fingerprint: createUsageAccountFingerprint(account),
-			index: index + 1,
-			usage,
-			email: account.email,
-			label: account.accountLabel,
-		});
+		return {
+			reading: toOverviewAccount({
+				fingerprint: createUsageAccountFingerprint(account),
+				index: index + 1,
+				usage,
+				email: account.email,
+				label: account.accountLabel,
+			}),
+		};
 	} catch (error) {
-		logDebug(
-			`Failed to fetch pool quota for one account: ${(error as Error).message}`,
+		// The refresh endpoint's error body can echo token material, so the
+		// reason is masked before it is written to a shared cache file.
+		const message = maskString(
+			summarizeCodexErrorMessage(error instanceof Error ? error.message : String(error)),
 		);
-		return undefined;
+		logDebug(`Failed to fetch pool quota for one account: ${message}`);
+		return { error: message, credential: isCodexCredentialFailure(error) };
 	}
 }
 
@@ -164,8 +177,8 @@ export async function fetchTuiQuotaOverview(params: {
 			chunk.map((index) => fetchOverviewAccount(storage, index)),
 		);
 		for (const [position, result] of results.entries()) {
-			if (result) {
-				accounts.push({ ...result, fetchedAt: now });
+			if (result && "reading" in result) {
+				accounts.push({ ...result.reading, fetchedAt: now });
 				continue;
 			}
 			// A failed fetch must not drop the account out of the snapshot: the
@@ -189,9 +202,19 @@ export async function fetchTuiQuotaOverview(params: {
 									createUsageAccountFingerprint(account),
 						);
 			if (previous) {
+				// Only dead credentials mark the reading as describing an account
+				// that cannot serve requests. A transient failure keeps whatever
+				// an earlier poll concluded; the older `fetchedAt` already dates it.
 				accounts.push({
 					...previous,
 					fetchedAt: previous.fetchedAt ?? cached?.fetchedAt,
+					...(result && "credential" in result && result.credential
+						? {
+							readFailedAt: now,
+							readFailedSince: previous.readFailedSince ?? previous.readFailedAt ?? now,
+							readError: result.error,
+						}
+						: {}),
 				});
 				carriedOver = true;
 			}
@@ -251,12 +274,19 @@ export function mergeOverviewWithLatestAccount(
 			return account;
 		}
 		merged = true;
+		// A response that came back after the latest failed poll proves the
+		// account works again. One from before it proves nothing about it.
+		const recovered =
+			account.readFailedAt === undefined || latest.fetchedAt > account.readFailedAt;
 		return {
 			...account,
 			planType: latest.planType ?? account.planType,
 			email: account.email ?? (latest.accountEmail?.trim() || undefined),
 			limits: latest.limits,
 			fetchedAt: latest.fetchedAt,
+			...(recovered
+				? { readFailedAt: undefined, readFailedSince: undefined, readError: undefined }
+				: {}),
 		};
 	});
 	return merged ? { ...snapshot, accounts } : snapshot;

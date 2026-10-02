@@ -14,7 +14,10 @@ import { CODEX_BASE_URL, PLUGIN_NAME } from "./constants.js";
 import {
 	createDeactivatedWorkspaceError,
 	createUsageRequestTimeoutError,
+	isDeactivatedWorkspaceErrorMessage,
+	isInvalidatedAuthTokenMessage,
 } from "./error-sentinels.js";
+import { CodexAuthError } from "./errors.js";
 import { logWarn } from "./logger.js";
 import {
 	DEFAULT_QUOTA_DISPLAY_MODE,
@@ -790,6 +793,69 @@ export function parseCodexUsagePayload(
 }
 
 /**
+ * Whether a failed usage read says the account's credentials are dead, as
+ * opposed to a timeout, a network error, a rate limit or an upstream outage.
+ * Only the first means the account cannot serve requests until someone logs
+ * in again: a refresh the token endpoint refused, an access token the backend
+ * reports invalidated, or a deactivated workspace.
+ */
+export function isCodexCredentialFailure(error: unknown): boolean {
+	if (error instanceof CodexAuthError && error.refreshFailureReason !== undefined) {
+		return !error.retryable;
+	}
+	const message = error instanceof Error ? error.message : undefined;
+	return isInvalidatedAuthTokenMessage(message) || isDeactivatedWorkspaceErrorMessage(message);
+}
+
+/**
+ * Decode the inside of a JSON string literal that may have been cut off
+ * mid-escape, as a bounded error body is.
+ */
+function decodeJsonStringFragment(raw: string): string {
+	for (const candidate of [raw, raw.replace(/\\(?:u[0-9a-fA-F]{0,3})?$/, "")]) {
+		try {
+			return JSON.parse(`"${candidate}"`) as string;
+		} catch {
+			// Try the fragment with a dangling escape removed.
+		}
+	}
+	return raw;
+}
+
+/**
+ * One readable line out of a failed request's error text. The OAuth refresh
+ * failure carries the endpoint's JSON body - pretty-printed, and cut to a
+ * bounded length before it reaches here, so often not parseable - which renders
+ * as a lone `{` on a report line. The human message inside it is what says
+ * what happened, so it is read out of the body, whole or truncated. Text that
+ * holds no such message is only collapsed onto one line.
+ */
+export function summarizeCodexErrorMessage(text: string, maxChars = 200): string {
+	const start = text.indexOf("{");
+	let summary: string | undefined;
+	if (start !== -1) {
+		const body = text.slice(start);
+		const match =
+			/"(?:message|error_description)"\s*:\s*"((?:[^"\\]|\\.)*)("?)/.exec(body) ??
+			/"error"\s*:\s*"((?:[^"\\]|\\.)*)("?)/.exec(body);
+		const message = match?.[1] === undefined ? undefined : decodeJsonStringFragment(match[1]).trim();
+		if (message) {
+			const complete = match?.[2] === '"';
+			const prefix = text.slice(0, start).trim().replace(/:$/, "");
+			const readable = complete ? message : `${message.replace(/\.*$/, "")}…`;
+			summary = prefix ? `${prefix}: ${readable}` : readable;
+		}
+	}
+	// Decoding turns an escaped `\u001b` into a live ESC, so control characters
+	// are dropped before the line can reach a terminal.
+	const line = (summary ?? text)
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return line.length > maxChars ? `${line.slice(0, maxChars - 1)}…` : line;
+}
+
+/**
  * Build a safe error message from a failed Codex backend response.
  *
  * Shared with the reset-credit client in `lib/codex-reset.ts`: both talk to
@@ -1008,11 +1074,26 @@ export async function ensureCodexUsageAccessToken(params: {
 
 	const previousRefreshToken = params.account.refreshToken;
 	if (!previousRefreshToken) {
-		throw new Error("Cannot refresh: account has no refresh token");
+		throw new CodexAuthError("Cannot refresh: account has no refresh token", {
+			refreshFailureReason: "missing_refresh",
+		});
 	}
 	const refreshResult = await coordinatePersistedRefresh(params.account);
 	if (refreshResult.type !== "success") {
-		throw new Error(refreshResult.message ?? refreshResult.reason);
+		// Same transient rule as the request path's `refreshAndUpdateToken`,
+		// so a caller can tell a dead refresh token from a flaky network.
+		const statusCode =
+			typeof refreshResult.statusCode === "number" ? refreshResult.statusCode : undefined;
+		throw new CodexAuthError(refreshResult.message ?? refreshResult.reason ?? "token refresh failed", {
+			retryable:
+				refreshResult.reason === "network_error" ||
+				refreshResult.reason === "invalid_response" ||
+				(refreshResult.reason === "http_error" &&
+					statusCode !== undefined &&
+					(statusCode >= 500 || statusCode === 408 || statusCode === 429)),
+			refreshFailureReason: refreshResult.reason,
+			statusCode,
+		});
 	}
 	let refreshedCount = 0;
 	for (const storedAccount of params.storage.accounts) {
