@@ -1928,6 +1928,7 @@ async function runLimitsCommandInner(parsed, options = {}) {
 				accountId,
 				accessToken,
 				organizationId: account.organizationId,
+				normalizeAccountErrors: true,
 			}),
 			quotaDisplay,
 		);
@@ -2008,11 +2009,18 @@ async function runLimitsCommandInner(parsed, options = {}) {
 			const reading = cachedAccount
 				? toCachedLimitsReading(cachedAccount, usageMod, quotaDisplay)
 				: await readLive(account, index, entry);
-			poolMembers.push({
-				planType: reading.planType,
-				primary: reading.windows[0] ?? {},
-				secondary: reading.windows[1] ?? {},
-			});
+			const failure = cachedAccount && readPluginQuotaFailure(cachedAccount.account, account, now);
+			if (failure) {
+				// Its figures are last known, not capacity it can spend now.
+				entry.readFailure = failure;
+				failedCount += 1;
+			} else {
+				poolMembers.push({
+					planType: reading.planType,
+					primary: reading.windows[0] ?? {},
+					secondary: reading.windows[1] ?? {},
+				});
+			}
 			sortKeys.set(entry, readLimitsSortKeys(usageMod, reading.windows));
 			entry.source = reading.source;
 			entry.readAt = reading.readAt;
@@ -2028,7 +2036,9 @@ async function runLimitsCommandInner(parsed, options = {}) {
 			// response, so the message is redacted through the logger's token
 			// patterns before it reaches stdout, JSON output, or CI logs.
 			// Truncation alone does not protect bearer/JWT/refresh-token material.
-			entry.error = loggerMod.maskString(formatErrorForLog(error)).slice(0, 160);
+			entry.error = loggerMod.maskString(
+				usageMod.summarizeCodexErrorMessage?.(formatErrorForLog(error)) ?? formatErrorForLog(error).slice(0, 160),
+			);
 			failedCount += 1;
 		}
 		results.push(entry);
@@ -2169,6 +2179,31 @@ function findPluginQuotaReading(readings, account, usageMod) {
 	const found = findPluginQuotaEntry(readings.snapshot, account, usageMod);
 	if (!found) return undefined;
 	return { account: found, readAt: found.fetchedAt ?? readings.snapshot.fetchedAt };
+}
+
+/**
+ * What the plugin last knew had gone wrong with an account, from state it
+ * already holds - nothing here asks upstream. The poller keeps a failing
+ * account's last good reading and records when dead credentials made the reads
+ * fail; the request path marks an account whose credentials were refused. That
+ * mark counts while its cooldown runs, and after it only if the stored access
+ * token has also expired - no refresh has succeeded since, or it would have
+ * moved `expiresAt`. Either way the cached figures describe the account as it
+ * was, and it cannot serve requests now.
+ */
+function readPluginQuotaFailure(entry, account, now) {
+	if (Number.isFinite(entry.readFailedAt)) {
+		return {
+			since: Number.isFinite(entry.readFailedSince) ? entry.readFailedSince : entry.readFailedAt,
+			message: typeof entry.readError === "string" && entry.readError ? entry.readError : "the plugin could not read it",
+		};
+	}
+	const coolingDown = Number.isFinite(account.coolingDownUntil) && account.coolingDownUntil > now;
+	const tokenExpired = Number.isFinite(account.expiresAt) && account.expiresAt <= now;
+	if (account.cooldownReason === "auth-failure" && (coolingDown || tokenExpired)) {
+		return { since: undefined, message: "the plugin's last request with it was refused (auth failure)" };
+	}
+	return undefined;
 }
 
 /**
@@ -2325,7 +2360,7 @@ async function attachWorkspaceNames({ results, entryAccounts, entryWorkspaceIds,
 	let changed = false;
 	for (const entry of results) {
 		const workspaceId = entryWorkspaceIds.get(entry);
-		if (!workspaceId || known.has(workspaceId) || entry.error) continue;
+		if (!workspaceId || known.has(workspaceId) || entry.error || entry.readFailure) continue;
 		try {
 			const names = await lookup(entryAccounts.get(entry), entry.source === "live");
 			if (!names) continue;
@@ -2459,6 +2494,12 @@ function buildLimitsAccountRows(account, render, now, readings) {
 	if (account.error) {
 		rows.push(["Error", account.error]);
 		return rows;
+	}
+	if (account.readFailure) {
+		const since = Number.isFinite(account.readFailure.since)
+			? ` (failing since ${formatLimitsReadTime(account.readFailure.since, render, now)})`
+			: "";
+		rows.push(["Error", `${account.readFailure.message}${since}; last known figures below, left out of the pool total`]);
 	}
 	for (const limit of account.limits ?? []) {
 		rows.push([limit.name, formatLimitsPercent(limit, render)]);

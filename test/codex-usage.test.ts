@@ -21,6 +21,7 @@ import {
 	persistUsageQuotaRecovery,
 	isUsageQuotaRecovered,
 	resolveCodexUsageActiveAccount,
+	summarizeCodexErrorMessage,
 	summarizeUsagePool,
 	type UsagePayload,
 	type UsagePoolMember,
@@ -28,6 +29,29 @@ import {
 import { loadAccounts, saveAccounts, type AccountStorageV3 } from "../lib/storage.js";
 import { setStoragePathDirect } from "../lib/storage/state.js";
 import { formatQuotaDetailsText, type CompactQuotaStatus } from "../lib/tui-status.js";
+
+describe("summarizeCodexErrorMessage", () => {
+	it("decodes JSON escapes in the message it reads out of a body", () => {
+		const body = JSON.stringify({ error: { message: "Token \"x\" used\nagain \u00e9" } }, null, 2);
+		expect(summarizeCodexErrorMessage(body)).toBe('Token "x" used again é');
+	});
+
+	it("reads a message out of a body cut off mid-escape", () => {
+		expect(summarizeCodexErrorMessage('{\n  "error": {\n    "message": "Your refresh token has already been used \\u00')).toBe(
+			"Your refresh token has already been used…",
+		);
+	});
+
+	it("drops control characters an escaped message decodes into", () => {
+		const body = JSON.stringify({ error: { message: "token \u001b[31mreused\u001b[0m\u0007 now" } });
+		expect(body).toContain("\\u001b");
+		expect(summarizeCodexErrorMessage(body)).toBe("token [31mreused [0m now");
+	});
+
+	it("collapses text with no message onto one line", () => {
+		expect(summarizeCodexErrorMessage("HTTP 500:\n  upstream\tboom")).toBe("HTTP 500: upstream boom");
+	});
+});
 
 describe("usage renewal", () => {
 	it.each([

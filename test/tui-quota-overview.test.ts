@@ -17,6 +17,7 @@ import {
 	ensureCodexUsageAccessToken,
 	fetchCodexUsage,
 } from "../lib/codex-usage.js";
+import { CodexAuthError } from "../lib/errors.js";
 import { isPoolFullySpent } from "../lib/quota-overview.js";
 import {
 	getTuiQuotaOverviewCachePath,
@@ -262,6 +263,51 @@ describe("overview cache round trip", () => {
 		expect(result && isFreshTuiQuotaSnapshot(result, later)).toBe(false);
 		// Each account keeps its own time, so the fresh one is not aged with it.
 		expect(result?.accounts.map((account) => account.fetchedAt)).toEqual([later, NOW]);
+		// A transient failure says nothing about the credentials, so it marks nothing.
+		expect(result?.accounts[1]?.readFailedAt).toBeUndefined();
+		expect(result?.accounts[1]?.readError).toBeUndefined();
+	});
+
+	it("marks a kept reading when dead credentials failed the read, and keeps the mark through a transient one", async () => {
+		const path = join(dir, TUI_QUOTA_OVERVIEW_CACHE_FILE);
+		const account = { refreshToken: "refresh-dead", accountId: "account-dead", enabled: true };
+		const reading = {
+			fingerprint: createUsageAccountFingerprint(account as never),
+			index: 1,
+			planType: "plus",
+			limits: [{ label: "weekly", leftPercent: 100, usedPercent: 0, windowMinutes: 10080 }],
+		};
+		await writeTuiQuotaOverviewSnapshot(snapshot({ accounts: [reading] }), path);
+		const loadStorage = async () => ({ version: 3, accounts: [account], activeIndex: 0 }) as never;
+		const hour = 60 * 60 * 1000;
+
+		vi.mocked(ensureCodexUsageAccessToken).mockRejectedValueOnce(
+			new CodexAuthError("Your refresh token has already been used", {
+				refreshFailureReason: "http_error",
+				statusCode: 401,
+			}),
+		);
+		const first = await fetchTuiQuotaOverview({ cachePath: path, now: NOW + hour, loadStorage });
+		expect(first?.accounts[0]).toMatchObject({
+			readFailedAt: NOW + hour,
+			readFailedSince: NOW + hour,
+			readError: "Your refresh token has already been used",
+		});
+
+		vi.mocked(ensureCodexUsageAccessToken).mockRejectedValueOnce(
+			new CodexAuthError("Your refresh token has already been used", {
+				refreshFailureReason: "http_error",
+				statusCode: 401,
+			}),
+		);
+		const second = await fetchTuiQuotaOverview({ cachePath: path, now: NOW + 2 * hour, loadStorage });
+		expect(second?.accounts[0]).toMatchObject({ readFailedAt: NOW + 2 * hour, readFailedSince: NOW + hour });
+
+		vi.mocked(ensureCodexUsageAccessToken).mockRejectedValueOnce(
+			new CodexAuthError("network down", { retryable: true, refreshFailureReason: "network_error" }),
+		);
+		const third = await fetchTuiQuotaOverview({ cachePath: path, now: NOW + 3 * hour, loadStorage });
+		expect(third?.accounts[0]).toMatchObject({ readFailedAt: NOW + 2 * hour, readFailedSince: NOW + hour });
 	});
 });
 
@@ -360,7 +406,37 @@ describe("mergeOverviewWithLatestAccount", () => {
 		const merged = mergeOverviewWithLatestAccount(snapshot(), latest);
 		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
 		expect(merged.accounts[1]!.fetchedAt).toBe(NOW + 60_000);
+	});
+
+	it("clears a failed poll once a response comes back on the account", () => {
+		const base = snapshot();
+		const failed = {
+			...base,
+			accounts: base.accounts.map((account, position) =>
+				position === 1 ? { ...account, readFailedAt: NOW, readError: "boom" } : account,
+			),
+		};
+		const merged = mergeOverviewWithLatestAccount(failed, latest);
+		expect(merged.accounts[1]!.readFailedAt).toBeUndefined();
+		expect(merged.accounts[1]!.readError).toBeUndefined();
+		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
 		expect(merged.accounts[0]!.limits[0]!.leftPercent).toBe(0);
+	});
+
+	it("keeps a failed poll that came after the response", () => {
+		// T0 kept reading < T1 header reading < T2 failed poll.
+		const base = snapshot();
+		const failed = {
+			...base,
+			accounts: base.accounts.map((account, position) =>
+				position === 1
+					? { ...account, fetchedAt: NOW, readFailedAt: NOW + 120_000, readFailedSince: NOW + 120_000, readError: "boom" }
+					: account,
+			),
+		};
+		const merged = mergeOverviewWithLatestAccount(failed, latest);
+		expect(merged.accounts[1]!.limits[0]!.leftPercent).toBe(12);
+		expect(merged.accounts[1]).toMatchObject({ readFailedAt: NOW + 120_000, readError: "boom" });
 	});
 
 	it("ignores a reading older than that account's own reading", () => {

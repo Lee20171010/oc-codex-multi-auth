@@ -385,6 +385,18 @@ export type TuiQuotaOverviewAccount = {
 	 * build wrote, where the snapshot's time is all there is.
 	 */
 	fetchedAt?: number;
+	/**
+	 * Set while the poller cannot read this account because its credentials
+	 * are dead, and keeps its previous reading instead: when the latest such
+	 * read failed, when they started failing, and why. The reading then
+	 * describes the account as it was at `fetchedAt`, not as it is - a dead
+	 * refresh token keeps failing, and its last reading would otherwise pass
+	 * for a healthy, idle seat. A transient failure (timeout, network, 429,
+	 * 5xx) sets none of these.
+	 */
+	readFailedAt?: number;
+	readFailedSince?: number;
+	readError?: string;
 };
 
 /**
@@ -420,7 +432,10 @@ function isTuiQuotaOverviewAccount(
 			(typeof value.resetCreditsApplicable === "number" && Number.isInteger(value.resetCreditsApplicable) && value.resetCreditsApplicable >= 0)) &&
 		Array.isArray(value.limits) &&
 		value.limits.every(isTuiQuotaLimit) &&
-		isOptionalFiniteNumber(value.fetchedAt)
+		isOptionalFiniteNumber(value.fetchedAt) &&
+		isOptionalFiniteNumber(value.readFailedAt) &&
+		isOptionalFiniteNumber(value.readFailedSince) &&
+		(value.readError === undefined || typeof value.readError === "string")
 	);
 }
 
