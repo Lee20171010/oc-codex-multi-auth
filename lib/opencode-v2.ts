@@ -10,7 +10,14 @@
  */
 import { createOpenAI } from "@ai-sdk/openai";
 import { existsSync } from "node:fs";
-import { Integration, type Credential, type Model, type Plugin } from "@opencode/plugin";
+import { isDeepStrictEqual } from "node:util";
+import { Integration, Model, type Credential, type Plugin } from "@opencode/plugin";
+import { getSessionRecovery, getAutoResume, loadPluginConfig } from "./config.js";
+import { registerV2Recovery } from "./v2-recovery.js";
+import { discoverV2Models, resolveV2Credential } from "./v2-model-discovery.js";
+import { Effect } from "effect";
+import { withV2ModelRequest } from "./v2-request-scope.js";
+import { createV2NativeForms } from "./v2-native-form.js";
 import { z } from "zod";
 import type { Hooks } from "@opencode-ai/plugin";
 import { loadAccounts } from "./storage.js";
@@ -30,7 +37,10 @@ if (!existsSync(providerModule)) providerModule.pathname = providerModule.pathna
 const providerPackage = `aisdk:${providerModule.href}`;
 
 /** Set stateless options before the SDK lowers history into server-side references. */
-function createV2Language(model: ReturnType<ReturnType<typeof createOpenAI>["responses"]>) {
+function createV2Language(
+	model: ReturnType<ReturnType<typeof createOpenAI>["responses"]>,
+	request: Parameters<typeof withV2ModelRequest>[0],
+) {
 	type Options = Parameters<typeof model.doGenerate>[0];
 	const stateless = (options: Options): Options => {
 		const openai: NonNullable<Options["providerOptions"]>[string] = { ...options.providerOptions?.openai, store: false };
@@ -50,8 +60,8 @@ function createV2Language(model: ReturnType<ReturnType<typeof createOpenAI>["res
 	});
 	return new Proxy(model, {
 		get(target, property, receiver) {
-			if (property === "doGenerate") return (options: Options) => target.doGenerate(stateless(relaxTools(options)));
-			if (property === "doStream") return (options: Options) => target.doStream(stateless(relaxTools(options)));
+			if (property === "doGenerate") return (options: Options) => withV2ModelRequest(request, () => target.doGenerate(stateless(relaxTools(options))));
+			if (property === "doStream") return (options: Options) => withV2ModelRequest(request, () => target.doStream(stateless(relaxTools(options))));
 			return Reflect.get(target, property, receiver);
 		},
 	});
@@ -261,40 +271,62 @@ async function setupScopedV2(
 		const connection = await context.integration.connection.active("openai");
 		return connection ? (await context.integration.connection.resolve(connection))?.type === "oauth" : false;
 	};
+	const hostAuth = async (): Promise<Auth> => {
+		const connection = await context.integration.connection.active("openai");
+		const credential = connection ? await context.integration.connection.resolve(connection) : undefined;
+		if (credential?.type === "oauth") return credential;
+		throw new Error("Connect a Codex multi-account OAuth method with /connect first");
+	};
+	const resolveAuth = async (): Promise<Auth> => (await resolveV2Credential(hostAuth)).auth;
 	let enabled = false;
+	let subscriptionCatalog: Record<string, unknown>[] = [];
+	let catalogRevision = 0;
 	const controller = new AbortController();
-	// Aborting the subscription stops NEW credential events, but an event can
-	// already be inside `reload()` when cleanup runs — teardown must not let
-	// that handler finish a provider.reload() after disposal began. The guard
-	// below blocks the provider call once aborted, and `inFlightReload` lets
-	// cleanup await the handler it interrupted rather than racing it.
-	let inFlightReload: Promise<void> | undefined;
+	const inFlightReloads = new Set<Promise<void>>();
+	const publishCatalog = async (update: Promise<{ models: Record<string, unknown>[]; enabled: boolean }>) => {
+		const revision = ++catalogRevision;
+		const current = (async () => {
+			const discovered = await update;
+			if (controller.signal.aborted || revision !== catalogRevision) return;
+			// A catalog still being reloaded has not yet been accepted by the host.
+			if (inFlightReloads.size === 1 && enabled === discovered.enabled && isDeepStrictEqual(subscriptionCatalog, discovered.models)) return;
+			const previousEnabled = enabled;
+			const previousCatalog = subscriptionCatalog;
+			enabled = discovered.enabled;
+			subscriptionCatalog = discovered.models;
+			try { await context.provider.reload(); }
+			catch (error) {
+				if (revision === catalogRevision) { enabled = previousEnabled; subscriptionCatalog = previousCatalog; }
+				throw error;
+			}
+		})();
+		inFlightReloads.add(current);
+		try { await current; } finally { inFlightReloads.delete(current); }
+	};
 	const reload = async () => {
 		if (controller.signal.aborted) return;
-		const current = (async () => {
-			enabled = await hasOAuth();
-			if (!controller.signal.aborted) await context.provider.reload();
-		})();
-		inFlightReload = current;
-		try {
-			await current;
-		} finally {
-			if (inFlightReload === current) inFlightReload = undefined;
-		}
+		await publishCatalog((async () => {
+			const enabled = await hasOAuth();
+			return { enabled, models: enabled ? await discoverV2Models("openai", hostAuth) : [] };
+		})());
 	};
-	// Every SDK registration (transforms, hooks, the status RPC) is released on
-	// unload with the event subscription and the runtime teardown.
+	const forms = createV2NativeForms(undefined, undefined, undefined, context.event);
+	let disposeRecovery: (() => Promise<void>) | undefined;
 	const registrations: { dispose: () => Promise<void> }[] = [];
 	const track = (registration: { dispose: () => Promise<void> } | undefined): void => {
 		if (registration) registrations.push(registration);
 	};
 	const cleanup = () => run(async () => {
 		controller.abort();
-		await inFlightReload?.catch(() => {});
+		await forms.dispose();
+		await disposeRecovery?.();
+		await Promise.allSettled([...inFlightReloads]);
 		await Promise.all(registrations.map((registration) => registration.dispose().catch(() => {})));
 		await runtime.event?.({ event: { type: "server.instance.disposed", properties: { directory: context.location.directory } } });
 	});
 	try {
+		const config = loadPluginConfig();
+		if (getSessionRecovery(config)) disposeRecovery = await registerV2Recovery(context.session, getAutoResume(config));
 		enabled = await hasOAuth();
 		logInfo("V2 Codex adapter initialized", { enabled, directory: context.location.directory });
 		track(await context.rpc.register(CodexStatusRpc, { status: (input) => run(() => readV2Status(input)) }));
@@ -353,29 +385,7 @@ async function setupScopedV2(
 			}
 		}));
 
-		const resolveAuth = async (): Promise<Auth> => {
-			const pool = await loadAccounts();
-			const accounts = pool?.accounts ?? [];
-			// Disabled accounts never serve requests — prefer the active seat
-			// when enabled, else the first enabled account; the host's own
-			// `openai` connection is the documented outside-pool fallback.
-			const active = pool ? accounts[pool.activeIndex] : undefined;
-			const account =
-				active && active.enabled !== false
-					? active
-					: accounts.find((candidate) => candidate.enabled !== false);
-			if (account?.refreshToken) {
-				return { type: "oauth", access: account.accessToken ?? "", refresh: account.refreshToken, expires: account.expiresAt ?? 0 };
-			}
-			const connection = await context.integration.connection.active("openai");
-			const credential = connection ? await context.integration.connection.resolve(connection) : undefined;
-			if (credential?.type === "oauth") return credential;
-			if (accounts.length > 0 && accounts.every((entry) => entry.enabled === false)) {
-				throw new Error("All pooled Codex accounts are disabled — re-enable one with the codex-enable tool or connect a new login with /connect");
-			}
-			throw new Error("Connect a Codex multi-account OAuth method with /connect first");
-		};
-
+		subscriptionCatalog = enabled ? await discoverV2Models("openai", hostAuth) : [];
 		// The provider record's model inventory feeds the V1 loader's per-model
 		// config map; captured on each transform so the latest snapshot wins.
 		let providerModels: ReadonlyMap<string, Model.Info> | undefined;
@@ -384,6 +394,13 @@ async function setupScopedV2(
 			// way, so capture unconditionally and gate only the mutations.
 			providerModels = editor.get("openai")?.models;
 			if (!enabled) return;
+			// OAuth selectors and request validation share the account's catalog.
+			// Keep configured request settings while using subscription capabilities and limits.
+			editor.models.set("openai", subscriptionCatalog.map((model) => Model.Info.make({
+				...providerModels?.get(Model.ID.make(String(model.id))),
+				...model, package: providerPackage,
+			} as typeof Model.Info.Type)));
+			providerModels = editor.get("openai")?.models;
 			editor.update("openai", (provider) => {
 				provider.package = providerPackage;
 				provider.activation = "enabled";
@@ -448,7 +465,11 @@ async function setupScopedV2(
 		track(await context.aisdk.hook("language", (event) => {
 			if (!enabled) return;
 			const sdk = event.sdk as ReturnType<typeof createOpenAI>;
-			event.language = createV2Language(sdk.responses(event.model.modelID));
+			// The official host caches SDKs across model IDs; scope the language call, not the SDK.
+			event.language = createV2Language(sdk.responses(event.model.modelID), {
+				model: String(event.model.modelID), context: event.model.limit.context,
+				onAccountSelected: ({ models }) => publishCatalog(models.then((models) => ({ models, enabled: true }))),
+			});
 		}, { providerID: "openai" }));
 
 		track(await context.tool.transform((editor) => {
@@ -459,12 +480,30 @@ async function setupScopedV2(
 					description: definition.description,
 					input: z.toJSONSchema(schema),
 					execute: (input, call) => run(async () => {
-						const result = await definition.execute(schema.parse(input ?? {}), {
+						const args = schema.parse(input ?? {});
+						const ask = async (request: Parameters<Parameters<typeof definition.execute>[1]["ask"]>[0]) => {
+							if (!await forms.ask(request, call)) throw new Error("Native confirmation unavailable; operation denied");
+						};
+						const destructive = args.confirm === true && (
+							name === "codex-remove" ||
+							(name === "codex-reset" && String(args.action ?? "").trim().toLowerCase() === "consume" && args.dryRun !== true) ||
+							(name === "codex-keychain" && String(args.command ?? "").trim().toLowerCase() === "rollback")
+						);
+						if (destructive) await ask({
+							permission: name, always: [], metadata: {},
+							patterns: [
+								`Project: ${context.location.directory}`,
+								name === "codex-keychain" ? "Restore keychain-managed credentials to local account storage" :
+								`${name === "codex-remove" ? "Delete OAuth credentials" : "Redeem one reset credit"}: ${typeof args.index === "number" ? `Account #${args.index}` : typeof args.account === "number" ? `Account #${args.account}` : "Selected account"}`,
+							],
+						});
+						call.signal.throwIfAborted();
+						const result = await definition.execute(args, {
 							sessionID: call.sessionID, messageID: call.messageID, agent: call.agent,
 							directory: context.location.directory, worktree: context.location.project.directory,
 							abort: call.signal,
 					metadata: (update) => { void call.progress(update).catch(() => {}); },
-							ask: () => { throw new Error("Legacy tool permission requests are not supported by the V2 adapter"); },
+							ask: (request) => Effect.promise(() => ask(request)),
 						});
 						// V1 forwarded the legacy tool result verbatim; V2's Result
 						// splits content and metadata into separate fields.

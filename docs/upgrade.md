@@ -1,6 +1,6 @@
 # Upgrade Guide
 
-How to move an older install — including one still referencing a retired package name — to the canonical `oc-codex-multi-auth` plugin on the current `6.x` release line, and what changed along the way.
+Update the maintained `Lee20171010/oc-codex-multi-auth` checkout while preserving its account pools and OpenCode configuration.
 
 ---
 
@@ -8,7 +8,7 @@ How to move an older install — including one still referencing a retired packa
 
 | Item | Value |
 | --- | --- |
-| Package | `oc-codex-multi-auth` (npm) |
+| Package | `oc-codex-multi-auth`, installed by npm from the maintained source checkout |
 | Plugin entry | `plugin` list in `~/.config/opencode/opencode.json` for OpenCode 1.18.29+; `plugins` for OpenCode 2.0.16+ |
 | Standalone CLI | `oc-codex-multi-auth <command>` — `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm`, `update` |
 | Runtime state | `~/.opencode` — global pool `oc-codex-multi-auth-accounts.json`, per-project pools under `projects/<project-key>/` |
@@ -18,10 +18,15 @@ How to move an older install — including one still referencing a retired packa
 ## Upgrade
 
 ```bash
-npx -y oc-codex-multi-auth@latest
+git pull --ff-only origin main
+npm ci
+npm run build
+opencode service restart
 ```
 
-Re-running the installer is idempotent: it rewrites stale plugin entries that point at retired package names, clears both old and new package names from OpenCode's package cache, and leaves runtime state under `~/.opencode` untouched. `oc-codex-multi-auth update` refreshes the package cache without reading or writing config.
+Run these commands inside the standalone clone. Its `origin` points to the maintained fork; use `upstream` for reviewed merges from the author. npm's global link and OpenCode's built-directory file URL both follow this checkout. Run `npm install --global .` and `oc-codex-multi-auth install --v2` once during initial setup; see [Getting Started](getting-started.md).
+
+The legacy CLI `update` command clears package caches only; it does not update this source tree. Local-checkout builds skip upstream npm update checks.
 
 Then verify the install:
 
@@ -46,7 +51,7 @@ Also since 6.0.0, the account pool moved from `openai-codex-accounts.json` to `o
 
 ### OpenCode V1 to V2
 
-OpenCode 2.0.16+ loads the plugin through a V2 adapter (the `setup` hook) instead of the V1 `server` hook. `npx oc-codex-multi-auth --v2` writes a `plugins` entry only — no model catalog — and refuses to migrate an existing V1 `plugin` entry or an `opencode.jsonc` file (edit the JSONC `plugins` list by hand instead). The account pool, OAuth login, tools, and quota cache are shared between the two adapters; V1 remains supported for OpenCode 1.18.29+. In V2 the host normalizes tool names to `codex_list`, `codex_switch`, and so on.
+OpenCode 2.0.16+ loads the plugin through a V2 adapter (the `setup` hook) instead of the V1 `server` hook. Run `oc-codex-multi-auth install --v2` to register the maintained checkout's built-directory file URL in `plugins`, preserving other configuration. The command refuses an existing `opencode.jsonc` file or V1 registration; edit those configurations explicitly to migrate, using the checkout's absolute `dist` file URL in `plugins`. The account pool, OAuth login, tools, and quota cache are shared between the two adapters; V1 remains supported for OpenCode 1.18.29+. In V2 the host normalizes tool names to `codex_list`, `codex_switch`, and so on.
 
 ### Per-project pools
 

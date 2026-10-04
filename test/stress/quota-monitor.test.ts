@@ -1,9 +1,7 @@
 /**
  * Quota monitor under load (promoted stress harness).
  *
- *  A) N concurrent runNow() calls coalesce through the `running` flag: only
- *     ONE check actually fetches; the others return early WITHOUT awaiting it
- *     (callers see the pre-check state, not fresh — pinned behavior).
+ *  A) N overlapping runNow() calls perform one check, with fetch concurrency capped.
  *  B) fetchSummary concurrency is capped at MAX_CONCURRENCY=2.
  *  C) dispose() mid-check suppresses the stale check's deliveries.
  */
@@ -46,6 +44,8 @@ describe("A) concurrent runNow coalescing", () => {
 		let fetches = 0;
 		let inFlight = 0;
 		let maxInFlight = 0;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
 		const monitor = createQuotaMonitor({
 			loadConfig: () => ({
 				enabled: false,
@@ -67,7 +67,7 @@ describe("A) concurrent runNow coalescing", () => {
 				fetches++;
 				inFlight++;
 				maxInFlight = Math.max(maxInFlight, inFlight);
-				await sleep(15);
+				await gate;
 				inFlight--;
 				return { usage: { primary: null, secondary: null, codeReview: null, additionalLimits: [], limits: [], planType: null, credits: null, resetCredits: 0 } } as never;
 			},
@@ -76,30 +76,25 @@ describe("A) concurrent runNow coalescing", () => {
 			initialDelayMs: 999_999_999, // never poll on its own
 		});
 
-		const runTimes: number[] = [];
-		const t0 = Date.now();
-		await Promise.all(
-			Array.from({ length: 10 }, async () => {
-				const s = Date.now();
-				await monitor.runNow();
-				runTimes.push(Date.now() - s);
-			}),
-		);
-		const wallMs = Date.now() - t0;
-		// ONE check ran (fetchSummary called once per account = 20).
-		expect(fetches).toBe(ACCOUNTS);
-		// The coalesced runNow callers did NOT await the check — they returned
-		// early on the `running` flag. Measure: fastest runNow ~0ms vs check ~200ms.
-		runTimes.sort((a, b) => a - b);
-		console.log(
-			`[quota-monitor] 10x runNow over 20 accts: wall=${wallMs}ms fetches=${fetches} ` +
-			`maxFetchConcurrency=${maxInFlight} runNow times=${runTimes.join(",")}ms`,
-		);
-		expect(maxInFlight).toBeLessThanOrEqual(2); // MAX_CONCURRENCY cap
-		// At least some runNow calls returned much faster than the full check —
-		// proving they skipped rather than awaited (stale-read behavior).
-		expect(runTimes[0]).toBeLessThan(50);
-		monitor.dispose();
+		let completed = 0;
+		const callers = Array.from({ length: 10 }, async () => {
+			await monitor.runNow();
+			completed++;
+		});
+		try {
+			await Promise.all(callers.slice(1));
+			await vi.waitFor(() => expect(fetches).toBe(2));
+			expect(completed).toBe(9);
+			release();
+			await Promise.all(callers);
+			expect(completed).toBe(10);
+			expect(fetches).toBe(ACCOUNTS);
+			expect(maxInFlight).toBeLessThanOrEqual(2);
+		} finally {
+			release();
+			monitor.dispose();
+			await Promise.all(callers);
+		}
 	}, 30_000);
 });
 

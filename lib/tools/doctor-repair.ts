@@ -1,5 +1,7 @@
-import { withAccountStorageTransaction, type AccountMetadataV3 } from "../storage.js";
+import { getStoragePath, withAccountStorageTransaction, type AccountMetadataV3 } from "../storage.js";
+import { dirname, join } from "node:path";
 import { clearRefreshedAccountsStaleState } from "../accounts/stale-state.js";
+import { clearTuiQuotaSnapshots, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "../tui-quota-cache.js";
 import {
 	buildRefreshInputs,
 	findAccountIndexByIdentity,
@@ -10,7 +12,7 @@ import {
 export async function repairDoctorAccounts(accounts: AccountMetadataV3[]) {
 	const refreshedAccounts: {
 		readonly identity: RefreshAccountIdentity;
-		readonly staleState: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason" | "rateLimitResetTimes" | "quotaExhaustedUntil">;
+		readonly staleState: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason" | "rateLimitResetTimes" | "quotaExhaustedUntil" | "quotaExhaustedStampAt">;
 	}[] = [];
 	const verificationFailureIdentities: RefreshAccountIdentity[] = [];
 	const reloginNeeded: number[] = [];
@@ -25,6 +27,7 @@ export async function repairDoctorAccounts(accounts: AccountMetadataV3[]) {
 			cooldownReason: account.cooldownReason,
 			rateLimitResetTimes: { ...account.rateLimitResetTimes },
 			quotaExhaustedUntil: account.quotaExhaustedUntil,
+			quotaExhaustedStampAt: account.quotaExhaustedStampAt,
 		};
 		const outcome = await refreshAndPersistAccount(input);
 		switch (outcome.status) {
@@ -52,6 +55,12 @@ export async function repairDoctorAccounts(accounts: AccountMetadataV3[]) {
 	if (refreshedAccounts.length > 0) {
 		appliedFixes.push(`Refreshed and persisted ${refreshedAccounts.length} account token(s).`);
 		try {
+			await clearTuiQuotaSnapshots(join(dirname(getStoragePath()), TUI_QUOTA_OVERVIEW_CACHE_FILE));
+			appliedFixes.push("Cleared stale account and pool quota caches.");
+		} catch {
+			fixErrors.push("Failed to clear quota caches. Run limits --refresh to verify current usage.");
+		}
+		try {
 			const staleSummary = await withAccountStorageTransaction(async (current, persist) => {
 				if (!current) throw new Error("Account storage is unavailable");
 				const refreshedRecords: AccountMetadataV3[] = [];
@@ -63,6 +72,7 @@ export async function repairDoctorAccounts(accounts: AccountMetadataV3[]) {
 					const stateUnchanged = record.coolingDownUntil === staleState.coolingDownUntil &&
 						record.cooldownReason === staleState.cooldownReason &&
 						record.quotaExhaustedUntil === staleState.quotaExhaustedUntil &&
+						record.quotaExhaustedStampAt === staleState.quotaExhaustedStampAt &&
 						Object.keys({ ...record.rateLimitResetTimes, ...staleState.rateLimitResetTimes }).every(
 							(key) => record.rateLimitResetTimes?.[key] === staleState.rateLimitResetTimes?.[key],
 						);

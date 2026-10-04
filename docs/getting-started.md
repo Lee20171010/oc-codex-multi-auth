@@ -15,11 +15,26 @@ Codex/GPT-5/GPT-6 models through `oc-codex-multi-auth`.
 ## 1. Install
 
 ```bash
-npx -y oc-codex-multi-auth@latest --modern
+git clone https://github.com/Lee20171010/oc-codex-multi-auth.git
+cd oc-codex-multi-auth
+npm ci
+npm run build
+npm install --global .
+oc-codex-multi-auth install --v2
 ```
 
-`--modern` registers the plugin and writes the compact model catalog: 11 base
-model families with 59 variants selectable through `--variant`. Alternatives:
+`install --v2` automatically registers this CLI checkout's `dist` file URL
+in OpenCode's `plugins` array. It preserves other plugins, provider settings
+and any explicit local registration. Changed configuration is backed up first.
+If an `opencode.jsonc` file or V1 registration exists, the command refuses
+the change; migrate that configuration explicitly as described in
+[Upgrade Guide](upgrade.md).
+
+OpenCode 2.0.22 discovers both server and TUI through this entry. npm links
+the CLI to the same checkout. Restart the host and sign in below. Subscription
+models and Long selectors come from the account's discovered capabilities.
+
+The linked CLI retains optional catalog installer flags:
 
 | Flag | Use it when |
 | --- | --- |
@@ -33,8 +48,8 @@ Config files may be `opencode.json` or `opencode.jsonc` — comments and
 trailing commas are fine, and the installer merges into the `.jsonc` file when
 that is your effective config. It refuses to overwrite a config it cannot
 parse — a JSONC file with an unterminated block comment is refused rather
-than truncated. Rerun with `update` to refresh the cached package without
-touching config at all.
+than truncated. Update the maintained checkout through the source commands in
+[Upgrade Guide](upgrade.md); its file registration stays in place.
 
 ## 2. Sign in
 

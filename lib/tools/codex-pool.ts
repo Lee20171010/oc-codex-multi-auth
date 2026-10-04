@@ -27,6 +27,8 @@ import {
 import { redactHomePaths, withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
+export type PoolToolContext = Pick<ToolContext, "resolveMaskEmail" | "formatCommandAccountLabel" | "buildJsonAccountIdentity">;
+
 type CodexPoolAction = "status" | ModelAccountPoolMutation;
 
 type CodexPoolArgs = {
@@ -133,7 +135,7 @@ function buildPoolSnapshot(
 	model: string,
 	accountIds: readonly string[],
 	storage: AccountStorageV3 | null,
-	ctx: ToolContext,
+	ctx: PoolToolContext,
 	includeSensitive: boolean,
 	poolMode: ModelAccountPoolMode,
 ): {
@@ -192,7 +194,7 @@ function buildPoolSnapshot(
 
 function renderPoolStatusText(
 	pools: ReturnType<typeof buildPoolSnapshot>[],
-	ctx: ToolContext,
+	ctx: PoolToolContext,
 	storage: AccountStorageV3 | null,
 ): string {
 	if (pools.length === 0) return "No model account pools configured.";
@@ -221,7 +223,7 @@ function renderPoolStatusText(
 	return lines.join("\n");
 }
 
-export function createCodexPoolTool(ctx: ToolContext): ToolDefinition {
+export function createCodexPoolTool(ctx: PoolToolContext): ToolDefinition {
 	const definition = tool({
 		description:
 			"Inspect and manage model-specific account pools. Account numbers are 1-based inputs; stable account IDs are persisted.",

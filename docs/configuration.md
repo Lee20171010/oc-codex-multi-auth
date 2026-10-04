@@ -146,7 +146,9 @@ The plugin normalizes the selected id before the upstream call. Highlights:
   [auto-fallback](#unsupported-model-policy-and-fallback-chains).
 - Shipped context windows: `context=1050000`, `output=128000` for the GPT-6,
   GPT-5.6, and 5.5 families; `gpt-5.4-nano` 400000/128000; `gpt-5.1`
-  272000/128000.
+  272000/128000. OpenCode V2 OAuth uses the account's discovered subscription
+  windows for its model menu and request validation, including a separate Long
+  selector when the account reports a higher ceiling.
 
 ---
 

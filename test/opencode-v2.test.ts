@@ -25,7 +25,7 @@ vi.mock("../lib/logger.js", async (importOriginal) => ({
 import { createV2Fetch, missingV2SdkSurface, setupV2 } from "../lib/opencode-v2.js";
 import { createStorageScope, getStoragePath, setStoragePathDirect, subscribeToStoragePathChanges } from "../lib/storage/state.js";
 
-function host() {
+function host(directory = "/tmp/opencode/v2-test") {
 	const methods: IntegrationOAuthMethodRegistration[] = [];
 	const tools: ToolInfo[] = [];
 	const hooks = new Map<string, (event: AISDKHooks["sdk"] | AISDKHooks["language"]) => Promise<void>>();
@@ -41,11 +41,11 @@ function host() {
 	const editor = {
 		update: (_id: string, update: (value: typeof provider) => void) => update(provider),
 		get: () => ({ provider, models: new Map([[model.id, model]]) }),
-		models: { update: (_provider: string, _id: string, update: (value: typeof model) => void) => update(model) },
+		models: { set: vi.fn(), update: (_provider: string, _id: string, update: (value: typeof model) => void) => update(model) },
 	};
 	const context = {
 		app: { version: "2.0.16" },
-		location: { directory: "/tmp/opencode/v2-test", project: { directory: "/tmp/opencode/v2-test" } },
+		location: { directory, project: { directory } },
 		rpc: { register: vi.fn(async () => registered()) },
 		integration: {
 			connection: { active: vi.fn(), resolve: vi.fn() },
@@ -54,7 +54,7 @@ function host() {
 				return registered();
 			},
 		},
-		provider: { reload: vi.fn(), transform: async (callback: (input: unknown) => void) => { callback(editor); return registered(); } },
+		provider: { reload: vi.fn(), transform: vi.fn(async (callback: (input: unknown) => void) => { callback(editor); return registered(); }) },
 		model: { transform: async (callback: (input: unknown) => void) => {
 			callback({
 				list: () => [model], update: (_provider: string, _id: string, update: (value: typeof model) => void) => update(model),
@@ -63,22 +63,23 @@ function host() {
 		} },
 		aisdk: { hook: vi.fn(async (name, callback) => { hooks.set(name, callback); return registered(); }) },
 		tool: { transform: async (callback: (input: unknown) => void) => { callback({ add: (value: ToolInfo) => tools.push(value) }); return registered(); } },
+		session: { hook: vi.fn(async () => registered()) },
 		event: { subscribe: vi.fn(async function* () { /* empty public event stream */ }) },
 	};
-	return { context: context as unknown as Plugin.Context, methods, tools, hooks, model, provider, registrations };
+	return { context: context as unknown as Plugin.Context, methods, tools, hooks, model, provider, registrations, editor };
 }
 
 describe("V2 compatibility adapter", () => {
 	const event = vi.fn();
 	const callback = vi.fn();
-	const transport = vi.fn(async () => new Response("ok"));
+	const transport = vi.fn(async (_input: Request | string | URL, _init?: RequestInit) => new Response("ok"));
 	const loader = vi.fn(async (getAuth: () => Promise<unknown>) => {
 		await getAuth();
 		return { apiKey: "placeholder", fetch: transport };
 	});
 	beforeEach(() => {
 		vi.clearAllMocks();
-		mocks.loadAccounts.mockResolvedValue({ activeIndex: 0, accounts: [{ refreshToken: "test-refresh", accessToken: "test-access", expiresAt: 123 }] });
+		mocks.loadAccounts.mockResolvedValue({ activeIndex: 0, accounts: [{ refreshToken: "test-refresh", accessToken: "test-access", expiresAt: Date.now() + 3600000 }] });
 		callback.mockResolvedValue({ type: "success", access: "new-access", refresh: "new-refresh", expires: 456 });
 		mocks.runtime.mockResolvedValue({ event, auth: { loader, methods: [
 			{ type: "oauth", label: "Interactive setup", authorize: mocks.interactive },
@@ -150,6 +151,256 @@ describe("V2 compatibility adapter", () => {
 		expect(h.context.aisdk.hook).toHaveBeenCalledWith("sdk", expect.any(Function), { providerID: "openai" });
 		await cleanup();
 		expect(event).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: "server.instance.disposed" }) }));
+	});
+
+	it("carries native wire identity and long context into the shared transport only for that request", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const { normalizeModel } = await import("../lib/request/request-transformer.js");
+		const h = host();
+		h.model.modelID = Model.ID.make("future-native");
+		h.model.limit = { context: 872000, output: 128000 };
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		const sdkEvent: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+		const stop = new Error("wire captured");
+		transport.mockImplementationOnce(async () => {
+			expect(getV2ModelRequest()).toMatchObject({ model: "future-native", context: 872000 });
+			expect(normalizeModel("future-native")).toBe("future-native");
+			throw stop;
+		});
+		await h.hooks.get("sdk")?.(sdkEvent);
+		const language: AISDKHooks["language"] = { model: h.model, sdk: sdkEvent.sdk!, options: {} };
+		await h.hooks.get("language")?.(language);
+		await expect(language.language!.doGenerate({ prompt: [{ role: "user", content: [{ type: "text", text: "mock" }] }] })).rejects.toThrow("wire captured");
+		expect(getV2ModelRequest()).toBeUndefined();
+		await cleanup();
+	});
+
+	it("scopes each language model when the official host reuses one SDK across selections", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const h = host();
+		h.model.limit.context = 872000;
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		const sdkEvent: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+		await h.hooks.get("sdk")?.(sdkEvent);
+		const b = { ...h.model, id: Model.ID.make("b-selected"), modelID: Model.ID.make("future-b"), limit: { context: 128000, output: 1000 } };
+		const language: AISDKHooks["language"] = { model: b, sdk: sdkEvent.sdk!, options: {} };
+		await h.hooks.get("language")?.(language);
+		transport.mockImplementationOnce(async () => {
+			expect(getV2ModelRequest()).toMatchObject({ model: "future-b", context: 128000 });
+			throw new Error("B selected");
+		});
+		await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("B selected");
+		await cleanup();
+	});
+
+	it("uses subscription limits for existing selectors and preserves their request settings", async () => {
+		const discovery = await import("../lib/v2-model-discovery.js");
+		const catalog = vi.spyOn(discovery, "discoverV2Models").mockResolvedValue([
+			{ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make("future-new")), modelID: "future-new", limit: { context: 872000, output: 128000 } },
+			{ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make("gpt-5.5")), limit: { context: 872000, output: 128000 } },
+		]);
+		const h = host();
+		h.model.limit.context = 1050000;
+		h.model.settings = { reasoningEffort: "high" };
+		h.model.headers = { "x-custom-header": "FAKE_VALUE" };
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		const merged = h.editor.models.set.mock.calls[0]![1] as typeof h.model[];
+		expect(merged.find((model) => model.id === h.model.id)).toMatchObject({
+			limit: { context: 872000 }, settings: { reasoningEffort: "high" }, headers: h.model.headers,
+		});
+		expect(merged.find((model) => model.id === "future-new")).toMatchObject({ modelID: "future-new", limit: { context: 872000 } });
+		expect(merged.map((model) => model.id)).toEqual(["future-new", "gpt-5.5"]);
+		expect(catalog).toHaveBeenCalledTimes(1);
+		await cleanup();
+	});
+	it.each([["gpt-6.1-sol", 272000], ["gpt-6.1-sol-long", 872000]] as const)(
+		"sends %s with its subscription context instead of the host's 1050000 limit",
+		async (selector, context) => {
+			const discovery = await import("../lib/v2-model-discovery.js");
+			const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+			vi.spyOn(discovery, "discoverV2Models").mockResolvedValue(discovery.subscriptionModels({ models: [{
+				slug: "gpt-6.1-sol", display_name: "GPT-6.1 Sol", context_window: 272000, max_context_window: 872000,
+			}] }, "openai"));
+			const h = host();
+			h.model.id = Model.ID.make("gpt-6.1-sol");
+			h.model.modelID = h.model.id;
+			h.model.limit.context = 1050000;
+			const cleanup = await setupV2(h.context, mocks.runtime);
+			try {
+				const models = h.editor.models.set.mock.calls[0]![1] as typeof h.model[];
+				const selected = models.find((model) => model.id === selector)!;
+				expect(models.map((model) => model.id)).toEqual(["gpt-6.1-sol", "gpt-6.1-sol-long"]);
+				const sdkEvent: AISDKHooks["sdk"] = { model: selected, package: selected.package, options: {} };
+				await h.hooks.get("sdk")?.(sdkEvent);
+				const language: AISDKHooks["language"] = { model: selected, sdk: sdkEvent.sdk!, options: {} };
+				await h.hooks.get("language")?.(language);
+				transport.mockImplementationOnce(async (_input, init) => {
+					expect(getV2ModelRequest()).toMatchObject({ model: "gpt-6.1-sol", context });
+					expect(JSON.parse(String(init?.body)).model).toBe("gpt-6.1-sol");
+					throw new Error("subscription request captured");
+				});
+				await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("subscription request captured");
+			} finally { await cleanup(); }
+		},
+	);
+
+	it("publishes only candidate B's supported models and limits before a failed request", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const discovery = await import("../lib/v2-model-discovery.js");
+		const make = (id: string, context: number) => ({ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make(id)), limit: { context, output: 1000 } });
+		vi.spyOn(discovery, "discoverV2Models").mockResolvedValue([make("a-only", 872000), make("shared", 872000)]);
+		const h = host();
+		h.model.name = "Custom, not subscription-confirmed";
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		// Native State.reload re-folds transforms against the host/config baseline.
+		vi.mocked(h.context.provider.reload).mockImplementation(async () => {
+			await vi.mocked(h.context.provider.transform).mock.calls[0]![0](h.editor as never);
+		});
+		transport.mockImplementationOnce(async () => {
+			await getV2ModelRequest()?.onAccountSelected?.({ index: 1, models: Promise.resolve([make("b-only", 128000), make("shared", 128000)]) });
+			return new Response(JSON.stringify({ error: { message: "Candidate account #2 cannot serve original context" } }), { status: 503 });
+		});
+		const sdkEvent: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+		await h.hooks.get("sdk")?.(sdkEvent);
+		const language: AISDKHooks["language"] = { model: h.model, sdk: sdkEvent.sdk!, options: {} };
+		await h.hooks.get("language")?.(language);
+		await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("Candidate account #2");
+		expect(h.context.provider.reload).toHaveBeenCalledTimes(1);
+		const models = h.editor.models.set.mock.calls.at(-1)![1] as typeof h.model[];
+		expect(models.map((model) => model.id)).toEqual(["b-only", "shared"]);
+		expect(models.find((model) => model.id === "shared")?.limit.context).toBe(128000);
+		await cleanup();
+	});
+	it("reloads only when the candidate model catalog changes", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const discovery = await import("../lib/v2-model-discovery.js");
+		const catalog = [{ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make("FAKE_MODEL")) }];
+		vi.spyOn(discovery, "discoverV2Models").mockResolvedValue(catalog);
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		try {
+			let notify: NonNullable<ReturnType<typeof getV2ModelRequest>>["onAccountSelected"];
+			transport.mockImplementationOnce(async () => { notify = getV2ModelRequest()?.onAccountSelected; throw new Error("capture"); });
+			const sdkEvent: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+			await h.hooks.get("sdk")?.(sdkEvent);
+			const language: AISDKHooks["language"] = { model: h.model, sdk: sdkEvent.sdk!, options: {} };
+			await h.hooks.get("language")?.(language);
+			await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("capture");
+			await notify!({ index: 0, models: Promise.resolve(structuredClone(catalog)) });
+			expect(h.context.provider.reload).not.toHaveBeenCalled();
+			const changed = structuredClone(catalog);
+			changed[0].limit.context += 1000;
+			await notify!({ index: 0, models: Promise.resolve(changed) });
+			await notify!({ index: 1, models: Promise.resolve(structuredClone(changed)) });
+			expect(h.context.provider.reload).toHaveBeenCalledOnce();
+			const retryCatalog = structuredClone(changed);
+			retryCatalog[0].limit.context += 1000;
+			h.context.provider.reload.mockRejectedValueOnce(new Error("reload failed"));
+			await expect(notify!({ index: 1, models: Promise.resolve(retryCatalog) })).rejects.toThrow("reload failed");
+			await notify!({ index: 1, models: Promise.resolve(structuredClone(retryCatalog)) });
+			expect(h.context.provider.reload).toHaveBeenCalledTimes(3);
+			const concurrentCatalog = structuredClone(retryCatalog);
+			concurrentCatalog[0].limit.context += 1000;
+			let rejectReload!: (error: Error) => void;
+			h.context.provider.reload.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectReload = reject; }));
+			const pending = notify!({ index: 0, models: Promise.resolve(concurrentCatalog) });
+			const failed = expect(pending).rejects.toThrow("concurrent reload failed");
+			await vi.waitFor(() => expect(h.context.provider.reload).toHaveBeenCalledTimes(4));
+			await notify!({ index: 1, models: Promise.resolve(structuredClone(concurrentCatalog)) });
+			rejectReload(new Error("concurrent reload failed"));
+			await failed;
+			await notify!({ index: 1, models: Promise.resolve(structuredClone(concurrentCatalog)) });
+			expect(h.context.provider.reload).toHaveBeenCalledTimes(5);
+		} finally { await cleanup(); }
+	});
+
+	it("isolates candidate refreshes by project and ignores late discoveries and disposed callbacks", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const first = host();
+		const second = host("/tmp/opencode/other-project");
+		const cleanupFirst = await setupV2(first.context, mocks.runtime);
+		const cleanupSecond = await setupV2(second.context, mocks.runtime);
+		const capture = async (h: ReturnType<typeof host>) => {
+			let callback: NonNullable<ReturnType<typeof getV2ModelRequest>>["onAccountSelected"];
+			transport.mockImplementationOnce(async () => {
+				callback = getV2ModelRequest()?.onAccountSelected;
+				throw new Error("capture");
+			});
+			const event: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+			await h.hooks.get("sdk")?.(event);
+			const language: AISDKHooks["language"] = { model: h.model, sdk: event.sdk!, options: {} };
+			await h.hooks.get("language")?.(language);
+			await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("capture");
+			return callback!;
+		};
+		const notifyFirst = await capture(first);
+		const notifySecond = await capture(second);
+		const make = (id: string) => ({ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make(id)) });
+		let finishOld!: (models: Record<string, unknown>[]) => void;
+		const old = notifyFirst({ index: 0, models: new Promise((resolve) => { finishOld = resolve; }) });
+		await notifyFirst({ index: 1, models: Promise.resolve([make("new-b")]) });
+		await notifySecond({ index: 2, models: Promise.resolve([make("other-project")]) });
+		finishOld([make("stale-a")]);
+		await old;
+		for (const [h, expected] of [[first, "new-b"], [second, "other-project"]] as const) {
+			h.editor.models.set.mockClear();
+			await vi.mocked(h.context.provider.transform).mock.calls[0]![0](h.editor as never);
+			expect((h.editor.models.set.mock.calls.at(-1)![1] as typeof h.model[]).map((model) => model.id)).toEqual([expected]);
+			expect(h.context.provider.reload).toHaveBeenCalledTimes(1);
+		}
+		await cleanupFirst();
+		await notifyFirst({ index: 2, models: Promise.resolve([make("disposed")]) });
+		expect(first.context.provider.reload).toHaveBeenCalledTimes(1);
+		await cleanupSecond();
+	});
+
+	it("does not let an older credential refresh disable a newer selected account", async () => {
+		const { getV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const h = host();
+		let begin!: () => void;
+		const trigger = new Promise<void>((resolve) => { begin = resolve; });
+		vi.mocked(h.context.event.subscribe).mockImplementation(async function* () {
+			await trigger;
+			yield { type: "credential.updated" } as never;
+		});
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		const event: AISDKHooks["sdk"] = { model: h.model, package: h.provider.package, options: {} };
+		await h.hooks.get("sdk")?.(event);
+		const language: AISDKHooks["language"] = { model: h.model, sdk: event.sdk!, options: {} };
+		await h.hooks.get("language")?.(language);
+		let notify: NonNullable<ReturnType<typeof getV2ModelRequest>>["onAccountSelected"];
+		transport.mockImplementationOnce(async () => { notify = getV2ModelRequest()?.onAccountSelected; throw new Error("capture"); });
+		await expect(language.language!.doGenerate({ prompt: [] })).rejects.toThrow("capture");
+		let finish!: (value: null) => void;
+		mocks.loadAccounts.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		begin();
+		await vi.waitFor(() => expect(finish).toBeDefined());
+		await notify!({ index: 1, models: Promise.resolve([{ ...h.model, id: "new-b" }]) });
+		finish(null);
+		await vi.waitFor(() => expect(h.context.integration.connection.active).toHaveBeenCalled());
+		const next: AISDKHooks["language"] = { model: h.model, sdk: event.sdk!, options: {} };
+		await h.hooks.get("language")?.(next);
+		expect(next.language).toBeDefined();
+		await cleanup();
+	});
+
+	it("clears OAuth model choices when credential lifecycle discovery fails", async () => {
+		const discovery = await import("../lib/v2-model-discovery.js");
+		const catalog = vi.spyOn(discovery, "discoverV2Models")
+			.mockResolvedValueOnce([{ ...Model.Info.default(Provider.ID.make("openai"), Model.ID.make("future-retained")) }])
+			.mockResolvedValue([]);
+		const h = host();
+		vi.mocked(h.context.event.subscribe).mockImplementation(async function* () {
+			yield { type: "credential.updated" } as never;
+		});
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		await vi.waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
+		await vi.waitFor(() => expect(h.context.provider.reload).toHaveBeenCalledTimes(1));
+		h.editor.models.set.mockClear();
+		const transform = vi.mocked(h.context.provider.transform).mock.calls[0]![0];
+		await transform(h.editor as never);
+		expect(h.editor.models.set).toHaveBeenCalledWith("openai", []);
+		await cleanup();
 	});
 
 	it("leaves API-key-only OpenAI routing alone", async () => {
@@ -340,6 +591,45 @@ describe("V2 compatibility adapter", () => {
 		await cleanup();
 	});
 
+	it("offers no OAuth models until subscription discovery succeeds", async () => {
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		expect(h.editor.models.set).toHaveBeenCalledWith("openai", []);
+		await cleanup();
+	});
+	it("does not hand disabled pool credentials to the runtime loader", async () => {
+		mocks.loadAccounts.mockResolvedValue({ activeIndex: 0, accounts: [
+			{ enabled: false, refreshToken: "disabled", accessToken: "disabled" },
+			{ refreshToken: "enabled", accessToken: "enabled", expiresAt: Date.now() + 3600000 },
+		] });
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		await h.hooks.get("sdk")?.({ model: h.model, package: h.provider.package, options: {} });
+		const getAuth = loader.mock.calls.at(-1)![0];
+		expect(await getAuth()).toMatchObject({ refresh: "enabled" });
+		await cleanup();
+	});
+	it("registers native context and bounded retry recovery", async () => {
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		expect(h.context.session.hook).toHaveBeenCalledWith("retry", expect.any(Function), { providerID: "openai" });
+		expect(h.context.session.hook).toHaveBeenCalledWith("context", expect.any(Function), { providerID: "openai" });
+		await cleanup();
+	});
+	it("requires native approval before destructive execution, even with confirm=true", async () => {
+		const execute = vi.fn(async () => "removed");
+		mocks.runtime.mockResolvedValue({ event, auth: { loader, methods: [] }, tool: {
+			"codex-remove": { description: "Remove", args: { confirm: z.boolean(), index: z.number() }, execute },
+		} });
+		const h = host();
+		const cleanup = await setupV2(h.context, mocks.runtime);
+		try {
+			const call = { sessionID: "s", messageID: "m", id: "c", signal: new AbortController().signal, progress: vi.fn() } as unknown as Parameters<ToolInfo["execute"]>[1];
+			await expect(h.tools[0]!.execute({ confirm: true, index: 1 }, call)).rejects.toThrow(/confirmation|Permission/);
+			expect(execute).not.toHaveBeenCalled();
+		} finally { await cleanup(); }
+	});
+
 	it("registers every runtime tool and retains validation, defaults, and metadata", async () => {
 		const h = host();
 		const cleanup = await setupV2(h.context, mocks.runtime);
@@ -364,22 +654,23 @@ describe("V2 compatibility adapter", () => {
 		// The credential event fires once, then the stream idles — the consumer
 		// is then parked inside reload() while cleanup aborts the subscription.
 		(h.context as { event: unknown }).event = {
-			subscribe: vi.fn(async function* () {
+			subscribe: vi.fn(async function* ({ signal }: { signal: AbortSignal }) {
 				yield { type: "credential.updated", location: h.context.location };
-				await new Promise(() => {});
+				if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
 			}),
 		};
 		let releasePool: (value: unknown) => void = () => {};
 		const poolGate = new Promise((resolve) => { releasePool = resolve; });
 		mocks.loadAccounts
 			// setup's own hasOAuth() probe resolves normally…
-			.mockResolvedValueOnce({ activeIndex: 0, accounts: [{ refreshToken: "seed" }] })
+			.mockResolvedValueOnce({ activeIndex: 0, accounts: [{ refreshToken: "seed", accessToken: "seed-access", expiresAt: Date.now() + 3600000 }] })
+			.mockResolvedValueOnce({ activeIndex: 0, accounts: [{ refreshToken: "seed", accessToken: "seed-access", expiresAt: Date.now() + 3600000 }] })
 			// …but the credential-event reload parks inside hasOAuth() until the
 			// test releases it — i.e. teardown lands mid-reload.
 			.mockImplementationOnce(() => poolGate);
 		const cleanup = await setupV2(h.context, mocks.runtime);
 		await vi.waitFor(() =>
-			expect(mocks.loadAccounts.mock.calls.length).toBeGreaterThanOrEqual(2),
+			expect(mocks.loadAccounts.mock.calls.length).toBeGreaterThanOrEqual(3),
 		);
 		const teardown = cleanup();
 		releasePool({ activeIndex: 0, accounts: [{ refreshToken: "fresh" }] });
@@ -416,11 +707,16 @@ describe("V2 compatibility adapter", () => {
 		await cleanup();
 	});
 
-	it("skips disabled pool accounts when resolving the request credential", async () => {
+	it.each([false, true])("skips disabled pool accounts when resolving the request credential (expired=%s)", async (expired) => {
+		const refreshedTokens: string[] = [];
 		mocks.loadAccounts.mockResolvedValue({ activeIndex: 0, accounts: [
 			{ refreshToken: "disabled-refresh", enabled: false },
-			{ refreshToken: "enabled-refresh", accessToken: "enabled-access", expiresAt: 42 },
+			{ refreshToken: "enabled-refresh", accessToken: "enabled-access", expiresAt: expired ? 42 : Date.now() + 3600000 },
 		] });
+		mocks.refresh.mockImplementation(async (account: { refreshToken: string }) => {
+			refreshedTokens.push(account.refreshToken);
+			return { type: "success", refresh: "rotated-refresh", access: "updated-access", expires: Date.now() + 3600000 };
+		});
 		const h = host();
 		const cleanup = await setupV2(h.context, mocks.runtime);
 		let getAuth: (() => Promise<unknown>) | undefined;
@@ -430,7 +726,10 @@ describe("V2 compatibility adapter", () => {
 		});
 		await h.hooks.get("sdk")?.({ model: h.model, package: h.provider.package, options: {} });
 		if (getAuth === undefined) throw new Error("loader did not capture resolveAuth");
-		await expect(getAuth()).resolves.toMatchObject({ refresh: "enabled-refresh", access: "enabled-access" });
+		await expect(getAuth()).resolves.toMatchObject(expired
+			? { refresh: "rotated-refresh", access: "updated-access" }
+			: { refresh: "enabled-refresh", access: "enabled-access" });
+		expect(refreshedTokens).toEqual(expired ? ["enabled-refresh"] : []);
 		await cleanup();
 	});
 

@@ -15,15 +15,11 @@ the OpenAI Platform API.
 
 ## Which install mode should I use?
 
-```bash
-npx -y oc-codex-multi-auth@latest --modern
-```
-
-`--modern` fits most setups: it registers the plugin and writes the compact
-catalog of 11 base models with 59 `--variant` presets. Use no flag to keep
-your existing `provider.openai` untouched, `--full` to also get explicit
-selector IDs, `--legacy` for older OpenCode, or `--v2` for OpenCode 2.0.16+.
-See [Getting Started](getting-started.md).
+Clone `Lee20171010/oc-codex-multi-auth`, build it, install with
+`npm install --global .`, then run `oc-codex-multi-auth install --v2`
+to register the built checkout in OpenCode. Subscription models and Long selectors are discovered per account.
+The linked CLI also retains optional `--modern`, `--full` and `--legacy`
+catalog flags. See [Getting Started](getting-started.md).
 
 ## How do I log in?
 
@@ -45,8 +41,8 @@ Manage them with `codex-list`, `codex-switch`, `codex-warm`, and `codex-pool`.
 
 Locally, under `~/.opencode` — account JSON, plugin config, quota caches, and
 optional request logs. Outbound traffic goes to OpenAI (OAuth and inference),
-plus GitHub for prompt-template sync and the npm registry for the daily update
-check (both documented in [Privacy](privacy.md)). To store accounts in the OS
+plus GitHub for prompt-template sync. This maintained local-checkout build
+skips the upstream npm update check (see [Privacy](privacy.md)). To store accounts in the OS
 keychain instead, set `CODEX_KEYCHAIN=1`. Exact paths and deletion steps are
 on the same page.
 

@@ -15,13 +15,10 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 import { AccountManager } from "../lib/accounts.js";
 import { setStoragePathDirect, type AccountStorageV3 } from "../lib/storage.js";
-
-/** Longer than the 500ms debounce, short enough to keep the suite fast. */
-const PAST_DEBOUNCE_MS = 900;
 
 const TEST_STORAGE_PATH = join(
 	tmpdir(),
@@ -66,10 +63,14 @@ async function storedRefreshTokens(): Promise<string[]> {
 	return (await readStored()).accounts.map((account) => account.refreshToken);
 }
 
-const sleep = (ms: number): Promise<void> =>
-	new Promise((resolve) => setTimeout(resolve, ms));
+async function finishDebouncedSave(manager: AccountManager): Promise<void> {
+	await vi.advanceTimersByTimeAsync(500);
+	// The timer starts the transaction; advancing time does not finish real I/O.
+	await manager.flushPendingSave();
+}
 
 beforeEach(async () => {
+	vi.useFakeTimers();
 	// Redirect account storage before any manager exists, so no save in this
 	// file can reach the developer's real account file.
 	setStoragePathDirect(TEST_STORAGE_PATH);
@@ -83,6 +84,7 @@ afterEach(async () => {
 		manager.disposeShutdownHandler();
 		await manager.flushPendingSave();
 	}
+	vi.useRealTimers();
 	setStoragePathDirect(null);
 	await fs.rm(TEST_STORAGE_PATH, { force: true });
 });
@@ -95,7 +97,7 @@ describe("AccountManager.disposeShutdownHandler", () => {
 		// When a queued save is followed by disposal
 		manager.saveToDiskDebounced();
 		manager.disposeShutdownHandler();
-		await sleep(PAST_DEBOUNCE_MS);
+		await finishDebouncedSave(manager);
 
 		// Then the store still holds exactly the accounts it started with
 		await expect(storedRefreshTokens()).resolves.toEqual([...ON_DISK_ACCOUNTS]);
@@ -107,7 +109,7 @@ describe("AccountManager.disposeShutdownHandler", () => {
 
 		// When the manager is left live instead of disposed
 		manager.saveToDiskDebounced();
-		await sleep(PAST_DEBOUNCE_MS);
+		await finishDebouncedSave(manager);
 
 		// The other process's accounts remain and the stale account is not
 		// resurrected if it was deliberately removed from disk.
@@ -139,7 +141,7 @@ describe("AccountManager.disposeShutdownHandler", () => {
 		manager.markRateLimited(account!, 60 * 60_000, "codex", "gpt-5.1");
 		manager.saveToDiskDebounced();
 		manager.disposeShutdownHandler();
-		await sleep(PAST_DEBOUNCE_MS);
+		await finishDebouncedSave(manager);
 
 		// Then the block reached disk — dropping it would hand an exhausted
 		// account straight back to rotation — and membership is untouched
@@ -161,7 +163,7 @@ describe("AccountManager.disposeShutdownHandler", () => {
 		manager.markRateLimited(account!, 60 * 60_000, "codex", "gpt-5.1");
 		manager.saveToDiskDebounced();
 		manager.disposeShutdownHandler();
-		await sleep(PAST_DEBOUNCE_MS);
+		await finishDebouncedSave(manager);
 
 		// Then the accounts it never held keep their own records verbatim
 		const stored = await readStored();

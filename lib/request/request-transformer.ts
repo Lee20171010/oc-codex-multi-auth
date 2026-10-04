@@ -1,3 +1,4 @@
+import { getV2ModelRequest } from "../v2-request-scope.js";
 import { logDebug, logWarn } from "../logger.js";
 import {
 	TOOL_REMAP_MESSAGE,
@@ -66,6 +67,7 @@ const DEFAULT_NORMALIZED_MODEL = GPT_6_SOL_MODEL_ID;
  * @returns Normalized model name (e.g., "gpt-5-codex", "gpt-5.1-codex-max")
  */
 export function normalizeModel(model: string | undefined): string {
+	if (model && getV2ModelRequest()?.model === model) return model;
 	if (!model) return DEFAULT_NORMALIZED_MODEL;
 
 	// Strip provider prefix if present (e.g., "openai/gpt-5-codex" → "gpt-5-codex")

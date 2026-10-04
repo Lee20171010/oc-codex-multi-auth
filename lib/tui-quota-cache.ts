@@ -9,7 +9,7 @@ import {
 	parseCodexQuotaWindow,
 	type CodexQuotaWindowKind,
 } from "./quota-windows.js";
-import { renameWithWindowsRetry } from "./storage/atomic-write.js";
+import { renameWithWindowsRetry, writeFileAtomic } from "./storage/atomic-write.js";
 import type { CreditsBalance } from "./codex-credits.js";
 import type { CompactQuotaLimit } from "./tui-status.js";
 
@@ -364,6 +364,27 @@ export async function clearTuiQuotaSnapshot(cachePath?: string): Promise<void> {
 		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
 		throw error;
 	}
+}
+
+/** Account management and explicit repair invalidate both quota displays. */
+export async function readTuiQuotaInvalidation(cachePath: string): Promise<string | undefined> {
+	try { return await fs.readFile(`${cachePath}.invalidated`, "utf-8"); }
+	catch { return undefined; }
+}
+
+export async function clearTuiQuotaSnapshots(ownedOverviewPath?: string): Promise<void> {
+	const overviewPaths = [...new Set([getTuiQuotaOverviewCachePath(), ...(ownedOverviewPath ? [ownedOverviewPath] : [])])];
+	await Promise.all([
+		clearTuiQuotaSnapshot(),
+		...overviewPaths.map((path) => clearTuiQuotaSnapshot(path)),
+	]);
+	// A durable generation marker invalidates snapshots held by other processes,
+	// including a snapshot whose previous cache write failed.
+	const generation = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	await Promise.all(overviewPaths.map(async (path) => {
+		await fs.mkdir(dirname(path), { recursive: true });
+		await writeFileAtomic(`${path}.invalidated`, generation);
+	}));
 }
 
 export type TuiQuotaOverviewAccount = {

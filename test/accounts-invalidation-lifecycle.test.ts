@@ -58,8 +58,6 @@ import { OpenAIOAuthPlugin } from "../index.js";
 import { AccountManager } from "../lib/accounts.js";
 import { setStoragePathDirect } from "../lib/storage.js";
 
-const realSetTimeout = globalThis.setTimeout.bind(globalThis);
-
 describe("manager lifecycle after cache invalidation", () => {
 	let directory: string;
 	let path: string;
@@ -126,9 +124,14 @@ describe("manager lifecycle after cache invalidation", () => {
 		const gate = new Promise<void>((resolve) => { release = resolve; });
 		let markLoaded: () => void = () => {};
 		const loaded = new Promise<void>((resolve) => { markLoaded = resolve; });
-		vi.spyOn(AccountManager, "loadFromDisk").mockImplementation(async (...args: Parameters<typeof AccountManager.loadFromDisk>) => {
+		let markReloaded: () => void = () => {};
+		const reloaded = new Promise<void>((resolve) => { markReloaded = resolve; });
+		let loadCount = 0;
+		const load = vi.spyOn(AccountManager, "loadFromDisk").mockImplementation(async (...args: Parameters<typeof AccountManager.loadFromDisk>) => {
+			const firstLoad = loadCount++ === 0;
 			const manager = await realLoad(...args);
-			markLoaded();
+			if (firstLoad) markLoaded();
+			else markReloaded();
 			await gate;
 			return manager;
 		});
@@ -143,16 +146,12 @@ describe("manager lifecycle after cache invalidation", () => {
 		await tick();
 		await settle();
 
+		// Wait for the external reload's real I/O, not an arbitrary number of
+		// event-loop turns. Both snapshots are held at the gate until loaded.
+		await reloaded;
 		release();
+		await Promise.all(load.mock.results.map((result) => result.value));
 		await vi.advanceTimersByTimeAsync(5000);
-		// The reload's storage read completes on the threadpool; its callback
-		// needs a real event-loop turn, which fake-timer advancement never
-		// performs. Yield on the pre-captured real setTimeout so the pending
-		// read can land and the reload can install the fresh manager.
-		for (let spin = 0; spin < 10; spin++) {
-			await new Promise<void>((resolve) => { realSetTimeout(resolve, 0); });
-			await vi.advanceTimersByTimeAsync(100);
-		}
 		await pending;
 	};
 

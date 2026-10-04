@@ -47,6 +47,28 @@ describe("install-oc-codex-multi-auth script", () => {
 		expect(errorSpy).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		{ managedEntries: [] },
+		{ managedEntries: ["oc-codex-multi-auth"] },
+		{ managedEntries: ["oc-codex-multi-auth@6.27.0"] },
+	])("registers the CLI's built checkout for V2 with managed entries $managedEntries", async ({ managedEntries }) => {
+		tempHome = await createTempHome();
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+		const configDir = join(tempHome, ".config", "opencode");
+		const configPath = join(configDir, "opencode.json");
+		await mkdir(configDir, { recursive: true });
+		const providers = { openai: { models: { custom: { name: "Keep me" } } } };
+		await writeFile(configPath, JSON.stringify({ providers, plugins: ["another-plugin", ...managedEntries] }));
+		const args = ["install", "--v2"];
+		const options = { env: { HOME: tempHome, USERPROFILE: tempHome } };
+		await runInstaller(args, options);
+		const first = await readFile(configPath, "utf8");
+		const builtEntry = pathToFileURL(resolve(import.meta.dirname, "..", "dist")).href;
+		expect(JSON.parse(first)).toMatchObject({ providers, plugins: ["another-plugin", builtEntry] });
+		await runInstaller(args, options);
+		expect(await readFile(configPath, "utf8")).toBe(first);
+	});
+
 	it("registers V2 using native plugin entries and preserves a local checkout and provider config", async () => {
 		tempHome = await createTempHome();
 		vi.stubEnv("HOME", tempHome);
@@ -104,6 +126,25 @@ describe("install-oc-codex-multi-auth script", () => {
 		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
 		await runInstaller(["--v2", "--dry-run"], { env: { HOME: tempHome, USERPROFILE: tempHome } });
 		expect(await readdir(tempHome)).toEqual([]);
+	});
+
+	it.each(["--unknown", "--locla"])("rejects unknown installer option %s before writes", async (flag) => {
+		tempHome = await createTempHome();
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+		await expect(runInstaller(["--v2", flag], { env: { HOME: tempHome } })).rejects.toThrow("Unknown option for install command");
+		expect(await readdir(tempHome)).toEqual([]);
+	});
+
+	it("refuses malformed V2 plugins instead of replacing them", async () => {
+		tempHome = await createTempHome();
+		const { runInstaller } = await import("../scripts/install-oc-codex-multi-auth-core.js");
+		const configDir = join(tempHome, ".config", "opencode");
+		await mkdir(configDir, { recursive: true });
+		const path = join(configDir, "opencode.json");
+		const original = JSON.stringify({ plugins: "keep-invalid-for-manual-repair" });
+		await writeFile(path, original);
+		await expect(runInstaller(["--v2"], { env: { HOME: tempHome } })).rejects.toThrow("plugins must be an array");
+		expect(await readFile(path, "utf8")).toBe(original);
 	});
 
 	it("detects direct CLI execution after path normalization", async () => {

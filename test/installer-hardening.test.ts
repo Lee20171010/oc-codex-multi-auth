@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 // Regression coverage for installer hardening: JSONC truncation, non-list
 // plugin values, provider shape guards, unsafe merge keys in tui.json/V2,
@@ -128,7 +129,7 @@ describe("installer hardening (fuzz corpus regressions)", () => {
 		expect(Object.hasOwn(saved, "__proto__")).toBe(false);
 		expect(Object.hasOwn(saved, "constructor")).toBe(false);
 		expect(saved.keep).toBe("yes");
-		expect(saved.plugins).toContain("oc-codex-multi-auth");
+		expect(saved.plugins).toContain(pathToFileURL(resolve(import.meta.dirname, "..", "dist")).href);
 		expect(gatherStdout(logSpy)).toContain("V2 plugin registered");
 	});
 

@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	overview: vi.fn(),
 	cachedOverview: vi.fn(),
+	invalidation: vi.fn(),
 	promptStatus: vi.fn(),
 	resetsParams: vi.fn(),
 	sharedSnapshot: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("../lib/storage/state.js", () => ({
 vi.mock("../lib/tui-quota-cache.js", () => ({
 	readTuiQuotaSnapshot: mocks.sharedSnapshot,
 	readTuiQuotaOverviewSnapshot: mocks.cachedOverview,
+	readTuiQuotaInvalidation: mocks.invalidation,
 	isFreshTuiQuotaSnapshot: () => mocks.freshSnapshot,
 	TUI_QUOTA_OVERVIEW_CACHE_FILE: "overview.json",
 }));
@@ -50,6 +52,7 @@ beforeEach(() => {
 	resetV2StatusThrottle();
 	mocks.overview.mockReset();
 	mocks.cachedOverview.mockReset();
+	mocks.invalidation.mockReset();
 	mocks.sharedSnapshot.mockReset();
 	mocks.sharedSnapshot.mockResolvedValue(null);
 	mocks.quotaStatus = undefined;
@@ -90,7 +93,7 @@ it("marks the account serving requests rather than the selected pool account", a
 	expect((await readV2Status({ width: 80 })).accounts.map((account) => account.active)).toEqual([false, true]);
 });
 
-it("does not attribute a shared headers snapshot to another seeded project", async () => {
+it("keeps the selected account for project pools when headers lack project identity", async () => {
 	mocks.overview.mockResolvedValue(null);
 	mocks.sharedSnapshot.mockResolvedValue({
 		source: "headers", fingerprint: createUsageAccountFingerprint({ refreshToken: "private-refresh" }),
@@ -157,6 +160,17 @@ it("keeps the fetched pool when writing its cache failed", async () => {
 	expect((await readV2Status({ width: 80 })).text).toBe("pool 40%");
 	expect((await readV2Status({ width: 80 })).text).toBe("pool 40%");
 	expect(mocks.overview).toHaveBeenCalledTimes(1);
+});
+
+it("fetches current quota after a cross-process repair invalidates its in-memory snapshot", async () => {
+	mocks.overview.mockResolvedValue({ fetchedAt: Date.now(), accounts: [] });
+	mocks.invalidation.mockResolvedValue("FAKE_GENERATION_1");
+	await readV2Status({ width: 80 });
+	await readV2Status({ width: 80 });
+	expect(mocks.overview).toHaveBeenCalledTimes(1);
+	mocks.invalidation.mockResolvedValue("FAKE_GENERATION_2");
+	await readV2Status({ width: 80 });
+	expect(mocks.overview).toHaveBeenCalledTimes(2);
 });
 
 it("passes resetsMinUsedPercent to the V2 resets screen", async () => {

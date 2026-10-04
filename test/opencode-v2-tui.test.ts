@@ -23,7 +23,7 @@ afterEach(() => {
 describe("V2 accounts UI", () => {
 	it("exposes accounts without a mounted prompt and cleans up polling", async () => {
 		vi.useFakeTimers();
-		const slots = new Map<string, { render: (props: object) => { children: string } | null }>();
+		const slots = new Map<string, { render: (props: object) => { children: string; fg: string } | null }>();
 		const commands: Array<{ id: string; run: () => Promise<void> }> = [];
 		const status = vi.fn().mockResolvedValue({
 			text: "quota ready", details: "Quota details", showFor: "codex-models",
@@ -42,7 +42,7 @@ describe("V2 accounts UI", () => {
 			client: { rpc: () => ({ status }) }, theme: { text: { base: "white" } },
 			data: { session: { get: () => ({ model: { providerID: configuredProvider } }), message: { list: () => messages } } },
 			keymap: { layer: (factory: () => { commands: typeof commands }) => commands.push(...factory().commands) },
-			ui: { dialog: { alert }, slot: (claim: { append: string; render: (props: object) => { children: string } | null }) => {
+			ui: { dialog: { alert }, slot: (claim: { append: string; render: (props: object) => { children: string; fg: string } | null }) => {
 				slots.set(claim.append, claim);
 				return unregister;
 			} },
@@ -56,10 +56,15 @@ describe("V2 accounts UI", () => {
 		// The raw renderer width is sent — the status formatter owns the single
 		// reserve discount, so subtracting it here would double-count.
 		expect(status).toHaveBeenCalledWith({ width: 100 }, expect.objectContaining({ location: context.location }));
+		const beforePoll = status.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(1999);
+		expect(status).toHaveBeenCalledTimes(beforePoll);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status).toHaveBeenCalledTimes(beforePoll + 1);
 		await commands.find((command) => command.id === "codex.accounts")!.run();
 		expect(alert).toHaveBeenCalledWith(expect.objectContaining({ title: "Codex accounts", message: expect.stringContaining("opencode auth login") }));
-		expect(alert.mock.calls[0]?.[0].message).toContain("this project uses its own pool");
-		expect(alert.mock.calls[0]?.[0].message).toContain("global pool is used to seed it");
+		expect(alert.mock.calls[0]?.[0].message).toContain("this project uses its own independent pool");
+		expect(alert.mock.calls[0]?.[0].message).toContain("own independent pool");
 		expect(alert.mock.calls[0]?.[0].message).toContain('"perProjectAccounts" to true (per-project) or false (global)');
 		expect(alert.mock.calls[0]?.[0].message).toContain("CODEX_AUTH_PER_PROJECT_ACCOUNTS overrides this setting");
 		status.mockResolvedValueOnce({
@@ -77,6 +82,7 @@ describe("V2 accounts UI", () => {
 		expect(slots.get("prompt.footer.status")!.render({ sessionID: "test" })!.children).toBe("");
 		messages.push({ type: "assistant", model: { providerID: "openai" } }, { type: "user" });
 		expect(slots.get("prompt.footer.status")!.render({ sessionID: "test" })!.children).toBe("quota ready");
+		expect(slots.get("prompt.footer.status")!.render({ sessionID: "test" })!.fg).toBe("white");
 		configuredProvider = "openai";
 		messages.push({ type: "assistant", model: { providerID: "anthropic" } });
 		expect(slots.get("prompt.footer.status")!.render({ sessionID: "test" })!.children).toBe("");

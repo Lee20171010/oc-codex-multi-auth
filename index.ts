@@ -23,11 +23,14 @@
 
  */
 
+import { getV2ModelRequest } from "./lib/v2-request-scope.js";
+import { discoverAccountModels } from "./lib/v2-model-discovery.js";
 import { mkdir, readFile } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
 import { writeFileAtomic } from "./lib/storage/atomic-write.js";
 import { consumeLastWrittenAccountsDigest } from "./lib/storage/load-save.js";
 import { subscribeToStoragePathChanges } from "./lib/storage/state.js";
+import { normalizeManagedTags } from "./lib/account-management.js";
 import { isKeychainOptInEnabled } from "./lib/storage/keychain.js";
 import { AnyAccountStorageSchema } from "./lib/schemas.js";
 import { registerCleanup, unregisterCleanup } from "./lib/shutdown.js";
@@ -1520,18 +1523,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 			return `Account ${index + 1} (${details.join(", ")})`;
 		};
 
-		const normalizeAccountTags = (raw: string): string[] => {
-			return Array.from(
-				new Set(
-					raw
-						.split(",")
-						// Tags persist and render later — strip escapes/controls at
-						// write time, same as labels and notes.
-						.map((entry) => sanitizeDisplayText(entry.trim().toLowerCase()))
-						.filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
-				),
-			);
-		};
+		const normalizeAccountTags = normalizeManagedTags;
 
 		const supportsInteractiveMenus = (): boolean => {
 			if (process.env.FORCE_INTERACTIVE_MODE === "1") return true;
@@ -2715,7 +2707,9 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							}
 						}
 							const codexMode = getCodexMode(pluginConfig);
-							const requestTransformMode = getRequestTransformMode(pluginConfig);
+							const nativeModelRequest = getV2ModelRequest();
+							let nativeCandidateIndex: number | undefined;
+							const requestTransformMode = nativeModelRequest ? "native" : getRequestTransformMode(pluginConfig);
 							const fastSessionEnabled = getFastSession(pluginConfig);
 							const fastSessionStrategy = getFastSessionStrategy(pluginConfig);
 							const fastSessionMaxInputItems = getFastSessionMaxInputItems(pluginConfig);
@@ -3392,7 +3386,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							attempted.add(account.index);
 							// Hybrid's last-resort result is not necessarily eligible. Requests
 							// must honor active blocks rather than sending it upstream anyway.
-							if (!servingOnCredits && selectedIneligible) {
+							if (account.enabled === false || (!servingOnCredits && selectedIneligible)) {
 								continue;
 							}
 							if (creditsChoice) {
@@ -3611,6 +3605,16 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 							accountManager.saveToDiskDebounced();
 							continue;
 						}
+					if (nativeModelRequest && model) {
+						nativeCandidateIndex = account.index;
+						const models = discoverAccountModels("openai", accountId, accountAuth.access);
+						await nativeModelRequest.onAccountSelected?.({ index: account.index, models });
+						const catalog = await models;
+						const eligible = catalog.some((entry) => entry.modelID === model &&
+							typeof entry.limit === "object" && entry.limit !== null && "context" in entry.limit &&
+							typeof entry.limit.context === "number" && entry.limit.context >= nativeModelRequest.context);
+						if (!eligible) continue;
+					}
 											account.accountId = accountId;
 											if (!hadAccountId && tokenAccountId && accountId === tokenAccountId) {
 												account.accountIdSource = account.accountIdSource ?? "token";
@@ -4024,7 +4028,7 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 				customChain: unsupportedCodexFallbackChain,
 			});
 
-			if (fallbackModel) {
+			if (fallbackModel && (!nativeModelRequest || (fallbackOnUnsupportedCodexModel && Object.hasOwn(unsupportedCodexFallbackChain, model ?? "")))) {
 				const previousModel = model ?? "gpt-5-codex";
 				const previousModelFamily = modelFamily;
 				accountManager.refundToken(account, previousModelFamily, previousModel);
@@ -4411,6 +4415,14 @@ async function createPluginRuntime({ client, directory = process.cwd() }: {
 						}
 						if (restartAccountTraversalAfterWorkspaceDeactivation) {
 							continue;
+						}
+
+						if (nativeModelRequest) {
+							return new Response(JSON.stringify({ error: {
+								code: "subscription_account_unavailable",
+								message: `No eligible subscription account available for ${model} at context ${nativeModelRequest.context}; automatic model downgrade is disabled.${nativeCandidateIndex === undefined ? "" : ` Candidate account #${nativeCandidateIndex + 1} was selected, not served successfully. Reopen /models to select a supported model and retry; custom entries are not subscription confirmation.`}`,
+								candidateAccount: nativeCandidateIndex === undefined ? undefined : nativeCandidateIndex + 1,
+							} }), { status: 503, headers: { "content-type": "application/json" } });
 						}
 
 						// Shared by both terminal messages below: how many distinct accounts

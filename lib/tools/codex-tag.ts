@@ -4,9 +4,9 @@
  */
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
-import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { loadAccounts } from "../storage.js";
 import { AccountManager } from "../accounts.js";
-import { logWarn } from "../logger.js";
+import { mutateManagedAccount } from "../account-management.js";
 import { getWorkspaceIdentityKey } from "../storage/identity.js";
 import {
 	formatUiHeader,
@@ -14,7 +14,6 @@ import {
 	formatUiKeyValue,
 } from "../ui/format.js";
 import {
-	rethrowIfRetryable,
 	withToolErrorEnvelope,
 } from "./output.js";
 import { sanitizeDisplayText } from "../ui/display-text.js";
@@ -103,44 +102,11 @@ export function createCodexTagTool(ctx: ToolContext): ToolDefinition {
 				.map((entry) => sanitizeDisplayText(entry.trim()) ?? "")
 				.filter((entry) => entry.length > 0);
 			const identityKey = getWorkspaceIdentityKey(account);
-			let previousTags: string[] = [];
-			let persistedAccount = account;
-
-			// Same contract as codex-note: the handler reports its outcome so only
-			// real transaction failures (e.g. lock contention) escape and surface
-			// as retryable, machine-readable errors through the registry wrapper.
-			type TagOutcome = "ok" | "account-changed" | "persist-failed";
-			const outcome = await withAccountStorageTransaction<TagOutcome>(
-				async (current, persist) => {
-					const currentAccount = current?.accounts.find(
-						(candidate) => getWorkspaceIdentityKey(candidate) === identityKey,
-					);
-					if (!current || !currentAccount) {
-						return "account-changed";
-					}
-					previousTags = Array.isArray(currentAccount.accountTags)
-						? [...currentAccount.accountTags]
-						: [];
-					if (normalizedTags.length === 0) {
-						delete currentAccount.accountTags;
-					} else {
-						currentAccount.accountTags = normalizedTags;
-					}
-					try {
-						await persist(current);
-					} catch (error) {
-						// A compromised transaction lease surfaces through persist()
-						// too — let it escape so the wrapper marks the call retryable.
-						rethrowIfRetryable(error);
-						logWarn("Failed to save account tag update", {
-							error: String(error),
-						});
-						return "persist-failed";
-					}
-					persistedAccount = currentAccount;
-					return "ok";
-				},
-			);
+			const mutation = await mutateManagedAccount(resolvedIndex, { action: "tag", tags: normalizedTags }, identityKey);
+			const outcome = mutation.kind === "ok" ? "ok"
+				: mutation.kind === "save-failed" ? "persist-failed" : "account-changed";
+			const persistedAccount = mutation.kind === "ok" ? mutation.account : account;
+			const previousTags = mutation.kind === "ok" ? mutation.previousTags : [];
 
 			if (outcome === "account-changed") {
 				return "Account changed before tags could be updated. Retry codex-list and pick the account again.";
