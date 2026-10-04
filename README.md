@@ -1,9 +1,9 @@
 # oc-codex-multi-auth
 
-[![npm version](https://img.shields.io/npm/v/oc-codex-multi-auth.svg)](https://www.npmjs.com/package/oc-codex-multi-auth)
-[![npm downloads](https://img.shields.io/npm/dw/oc-codex-multi-auth.svg)](https://www.npmjs.com/package/oc-codex-multi-auth)
-[![CI](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/ndycode/oc-codex-multi-auth/actions/workflows/ci.yml)
-[![MIT license](https://img.shields.io/npm/l/oc-codex-multi-auth.svg)](LICENSE)
+[![CI](https://github.com/Lee20171010/oc-codex-multi-auth/actions/workflows/ci.yml/badge.svg)](https://github.com/Lee20171010/oc-codex-multi-auth/actions/workflows/ci.yml)
+[![MIT license](https://img.shields.io/github/license/Lee20171010/oc-codex-multi-auth.svg)](LICENSE)
+
+Maintained by [Lee20171010](https://github.com/Lee20171010/oc-codex-multi-auth), based on [ndycode's upstream](https://github.com/ndycode/oc-codex-multi-auth) v6.27.0. This fork adds subscription model discovery and Long selectors, native confirmation forms, and context repair with one automatic retry. npm and OpenCode use the same standalone checkout; see [Local enhancements](docs/LOCAL-ENHANCEMENTS.md).
 
 <img width="1227" height="702" alt="oc-codex-multi-auth OpenAI accounts picker in OpenCode — add accounts, check quotas, and per-account health" src="https://github.com/user-attachments/assets/b796eb2f-282e-468a-ba6a-acadf09d731b" />
 
@@ -29,13 +29,17 @@ Using the official Codex CLI rather than OpenCode? The sibling project [`codex-m
 Requires Node.js `>=22.19` and [OpenCode](https://opencode.ai).
 
 ```bash
-npx -y oc-codex-multi-auth@latest
+git clone https://github.com/Lee20171010/oc-codex-multi-auth.git
+cd oc-codex-multi-auth
+npm ci
+npm run build
+npm install --global .
+oc-codex-multi-auth install --v2
 ```
 
-> [!NOTE]
-> The former package name `oc-chatgpt-multi-auth` is retired. Install `oc-codex-multi-auth` for all new setups; see [docs/faq.md](docs/faq.md) for the rename details.
+`install --v2` registers the CLI checkout's `dist` file URL in OpenCode's `plugins` array. It preserves other plugins, provider settings and any explicit local registration, and backs up changed configuration. OpenCode 2.0.22 discovers the server and TUI through this entry. Keep the checkout in place and restart OpenCode. npm links the global `oc-codex-multi-auth` CLI to this same checkout. The package is installed from source; `private: true` prevents npm registry publishing under the upstream package name.
 
-With no flag, the installer only registers the plugin: it adds the plugin entry to `~/.config/opencode/opencode.json`, enables the TUI quota plugin in `~/.config/opencode/tui.json`, and refreshes the cached package. Your existing `provider.openai` model config is left alone. Add a flag to also install a model catalog:
+The checkout's CLI also retains upstream installer modes for optional catalog configuration:
 
 | Flag | Effect |
 | --- | --- |
@@ -50,11 +54,16 @@ With no flag, the installer only registers the plugin: it adds the plugin entry 
 
 Both `opencode.json` and `opencode.jsonc` are supported, comments and trailing commas included. Changed files are backed up first, and the installer refuses to overwrite a config it cannot parse.
 
-To update later without touching either config file:
+To update the maintained fork while retaining configuration:
 
 ```bash
-npx -y oc-codex-multi-auth@latest update
+git pull --ff-only origin main
+npm ci
+npm run build
+opencode service restart
 ```
+
+These commands run inside the checkout. Review upstream changes through the `upstream` remote and merge them into this fork deliberately. Local-checkout builds skip the upstream npm update check.
 
 Removal is manual — see [Uninstall / disable](docs/getting-started.md#uninstall--disable).
 
@@ -82,12 +91,12 @@ Headless or remote shell? Four OAuth methods are available (browser, open URL ma
 OpenCode **2.0.16+** loads the plugin through a V2 adapter; the account pool, OAuth login, and request pipeline are shared with V1.
 
 ```bash
-npx -y oc-codex-multi-auth@latest --v2
+oc-codex-multi-auth install --v2
 opencode service restart
 opencode auth login   # OpenAI -> Codex OAuth (Add account — ChatGPT Plus/Pro)
 ```
 
-`--v2` writes a `plugins` entry only — no model catalog — and refuses an existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them (edit the JSONC `plugins` list by hand instead). In V2, tool names normalize to `codex_list`, `codex_switch`, and so on; `/codex-accounts` and the **Codex accounts** palette command list the pool, and **Codex quota details** shows quota. V1's entrypoint remains for OpenCode 1.18.29+. See [Troubleshooting](docs/troubleshooting.md) for V2-specific issues.
+`install --v2` registers this checkout's built directory in `plugins` — no model catalog — and refuses an existing `opencode.jsonc` or V1 `plugin` entries rather than migrating them (edit the JSONC `plugins` list by hand instead). In V2, tool names normalize to `codex_list`, `codex_switch`, and so on; `/codex-accounts` and the **Codex accounts** palette command list the pool, and **Codex quota details** shows quota. V1's entrypoint remains for OpenCode 1.18.29+. See [Troubleshooting](docs/troubleshooting.md) for V2-specific issues.
 
 ## Command map
 
@@ -108,6 +117,12 @@ Everyday standalone commands:
 ```bash
 oc-codex-multi-auth status      # pool summary + storagePath
 oc-codex-multi-auth list        # accounts, --tag <name> to filter
+oc-codex-multi-auth switch 2    # select account 2 for every model family
+oc-codex-multi-auth label 2 "Work"
+oc-codex-multi-auth tag 2 "work,primary"
+oc-codex-multi-auth note 2 "Weekday primary"
+oc-codex-multi-auth pool set gpt-6.1-sol 1,2
+oc-codex-multi-auth pool set-mode gpt-6.1-sol strict
 oc-codex-multi-auth limits      # 5h/weekly usage; --sort account|usage|reset --asc|--desc --refresh
 oc-codex-multi-auth warm        # open every enabled account's usage window
 oc-codex-multi-auth doctor      # diagnostics; --deep, --fix
@@ -116,7 +131,9 @@ oc-codex-multi-auth health      # local token/account health
 oc-codex-multi-auth dashboard   # dashboard guidance
 ```
 
-These accept `--json` and `--config-path <file>` (`install`/`update` reject `--config-path`); `status`/`list`/`limits` redact identifiers unless `--include-sensitive` is passed. Via npx: `npx -y oc-codex-multi-auth@latest status --json`.
+These accept `--json` and `--config-path <file>` (`install`/`update` reject `--config-path`); `status`/`list`/`limits` redact identifiers unless `--include-sensitive` is passed. For JSON output: `oc-codex-multi-auth status --json`.
+
+Account numbers start at 1. Run management commands from the target project directory to select the same account pool as OpenCode. Empty strings clear labels, tags or notes; `pool` supports `status`, `set`, `add`, `remove`, `clear` and `set-mode`, with `--dry-run` for previews. Account mutations and model-pool settings share the agent tools' persistence logic. Quota checks follow upstream background monitoring and existing waiting checks. Manual recovery uses `doctor --fix` to verify credentials, clear unchanged local blocking records and invalidate both quota caches; `limits --refresh` reads current server usage. Failed credential verification requires `opencode auth login`.
 
 ## Rotation, in one paragraph
 
@@ -209,7 +226,7 @@ Most issues resolve by signing in again or running `codex-doctor fix=true` insid
 
 ## Release notes
 
-- Current stable: [v6.27.0](CHANGELOG.md) — `npx -y oc-codex-multi-auth@latest`
+- Upstream base: [v6.27.0](CHANGELOG.md); maintained enhancements: [Local enhancements](docs/LOCAL-ENHANCEMENTS.md).
 - Full release archive: [CHANGELOG.md](CHANGELOG.md)
 
 ## Terms and license

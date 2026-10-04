@@ -13,6 +13,7 @@ args.ts             # shared format/includeSensitive constants (values + descrip
 output.ts           # shared tool-output contract: error envelope, sanitizers, withToolErrorEnvelope wrapper
 doctor-repair.ts    # shared doctor repair pass (refresh + stale-state clear); used by codex-doctor and CLI --fix
 refresh-account.ts  # shared single-use refresh-token persistence; used by account-management tools
+../account-management.ts # shared switch/label/tag/note transactions; tools and standalone CLI use the same mutations
 codex-<name>.ts     # one file per tool: list, switch, warm, status, limits, reset, metrics, help, setup,
                     # doctor, next, label, tag, pool, note, dashboard, health, remove, refresh,
                     # export, import, diag, diff — plus codex-keychain.ts

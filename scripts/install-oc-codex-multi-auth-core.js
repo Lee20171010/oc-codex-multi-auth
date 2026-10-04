@@ -28,7 +28,8 @@ const STALE_MANAGED_MODEL_KEYS = new Set([
 	...["low", "medium", "high", "xhigh"].map((e) => `gpt-5.1-codex-max-${e}`),
 	...["medium", "high"].map((e) => `gpt-5.1-codex-mini-${e}`),
 ]);
-const STANDALONE_COMMANDS = new Set(["doctor", "status", "list", "limits", "dashboard", "health", "diag", "warm"]);
+const MANAGEMENT_COMMANDS = new Set(["switch", "label", "tag", "note", "pool"]);
+const STANDALONE_COMMANDS = new Set(["doctor", "status", "list", "limits", "dashboard", "health", "diag", "warm", ...MANAGEMENT_COMMANDS]);
 const INSTALLER_COMMANDS = new Set(["install"]);
 const UPDATE_COMMANDS = new Set(["update"]);
 
@@ -88,6 +89,52 @@ function parseStandaloneArgs(argv) {
 		throw new Error("--config-path requires a non-empty path.");
 	}
 	return options;
+}
+
+function parseManagementArgs(command, argv) {
+	const parsed = { json: false, help: false, configPath: undefined, input: {} };
+	const positional = [];
+	let literal = false;
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (!literal && arg === "--") { literal = true; continue; }
+		if (literal || !arg.startsWith("-")) { positional.push(arg); continue; }
+		if (arg === "--json") parsed.json = true;
+		else if (arg === "--help" || arg === "-h") parsed.help = true;
+		else if (arg === "--config-path") parsed.configPath = takeFlagValue(argv, i++, arg);
+		else if (arg.startsWith("--config-path=")) parsed.configPath = arg.slice("--config-path=".length);
+		else if (command === "pool" && arg === "--dry-run") parsed.input.dryRun = true;
+		else if (command === "pool" && arg === "--include-sensitive") parsed.input.includeSensitive = true;
+		else if (command === "pool" && arg === "--mode") parsed.input.poolMode = takeFlagValue(argv, i++, arg);
+		else if (command === "pool" && arg.startsWith("--mode=")) parsed.input.poolMode = arg.slice("--mode=".length);
+		else throw new Error(`Unknown option for ${command}: ${arg}`);
+	}
+	if (parsed.help) return parsed;
+	if (parsed.configPath !== undefined && !parsed.configPath.trim()) throw new Error("--config-path requires a non-empty path.");
+	const number = (value) => {
+		if (!/^[1-9]\d*$/.test(value ?? "") || !Number.isSafeInteger(Number(value))) {
+			throw new Error("Account numbers must be positive integers (1-based).");
+		}
+		return Number(value);
+	};
+	if (command === "pool") {
+		const [action = "status", model, ...accounts] = positional;
+		parsed.input.action = action;
+		parsed.input.model = model;
+		if (action === "set-mode") {
+			if (accounts.length > 1 || (accounts.length && parsed.input.poolMode)) throw new Error("Specify one pool mode.");
+			parsed.input.poolMode ??= accounts[0];
+		} else {
+			if ((action === "status" || action === "clear") && accounts.length) throw new Error(`Unexpected accounts for pool ${action}.`);
+			parsed.input.accounts = accounts.length ? accounts.join(",").split(",").map(number) : undefined;
+		}
+	} else {
+		const expected = command === "switch" ? 1 : 2;
+		if (positional.length !== expected) throw new Error(`Usage: ${PACKAGE_NAME} ${command} <account>${expected === 2 ? " <value> (empty string clears)" : ""}`);
+		parsed.input.index = number(positional[0]);
+		if (expected === 2) parsed.input.value = positional[1];
+	}
+	return parsed;
 }
 
 /**
@@ -156,6 +203,16 @@ function printHelp(write = console.log) {
 		"  health              Check local token/account health\n" +
 		"  diag                Alias for doctor --deep\n" +
 		"  warm                Open every enabled account's usage window now (one request each)\n\n" +
+		"Account management (1-based account numbers):\n" +
+		"  switch <account>         Select the active account for every model family\n" +
+		"  label <account> <value>  Set the display label; empty string clears\n" +
+		"  tag <account> <tags>     Set comma-separated tags; empty string clears\n" +
+		"  note <account> <value>   Set the account note; empty string clears\n" +
+		"  pool [status|set|add|remove|clear|set-mode] [model] [accounts|mode]\n" +
+		"                          Manage model pools; accounts are comma-separated\n" +
+		"  --config-path <path>     Select an account file explicitly\n" +
+		"  --json                   Print a structured result\n" +
+		"  pool --dry-run           Preview a pool mutation\n\n" +
 		"Limits options:\n" +
 		"  --sort account|usage|reset  Order accounts by number, by usage, or by next reset\n" +
 		"  --asc, --desc               Direction (default --asc: lowest number, least used, earliest reset)\n" +
@@ -170,7 +227,7 @@ function printHelp(write = console.log) {
 		"  - Clears OpenCode plugin cache\n\n" +
 		"Options:\n" +
 		"  --plugin-only      Register plugins without changing provider.openai\n" +
-		"  --v2               Register for OpenCode V2 (includes automatic quota UI loading)\n" +
+		"  --v2               Register this checkout's dist for OpenCode V2 (server and quota UI)\n" +
 		"  --modern           Force compact modern config (11 base OAuth models + --variant presets)\n" +
 		"  --full             Install compact base models plus 59 explicit selector entries\n" +
 		"  --legacy           Force explicit legacy config (59 preset model entries)\n" +
@@ -1402,6 +1459,7 @@ function summarizeStandaloneAccounts(storage, includeSensitive, tag) {
 			const accountUserId = trimmedUserId || undefined;
 			return {
 				index,
+				accountNumber: index + 1,
 				label: account?.accountLabel ?? `Account ${index + 1}`,
 				email: maskValue(account?.email, includeSensitive),
 				accountId: maskValue(accountId, includeSensitive),
@@ -1446,7 +1504,7 @@ function printStandaloneResult(command, payload, json) {
 				.filter(Boolean)
 				.join(", ");
 			const name = identity ? `${account.label} (${identity})` : account.label;
-			console.log(`- [${account.index}] ${name} enabled=${account.enabled} refresh=${account.hasRefreshToken} access=${account.hasAccessToken}`);
+			console.log(`- [${account.accountNumber}] ${name} enabled=${account.enabled} refresh=${account.hasRefreshToken} access=${account.hasAccessToken}`);
 		}
 	}
 	// Failure and repair diagnostics go to stderr so `status 2>/dev/null`
@@ -2592,7 +2650,48 @@ function printLimitsResult(payload, json, render) {
 	}
 }
 
+async function runManagementCommand(command, argv, options) {
+	let parsed;
+	try {
+		parsed = parseManagementArgs(command, argv);
+	} catch (error) {
+		const payload = { ok: false, command, error: "INVALID_ARGUMENT", message: formatErrorForLog(error) };
+		if (argv.includes("--json")) console.log(JSON.stringify(payload, null, 2));
+		else console.error(payload.message);
+		return { exitCode: 1, action: command };
+	}
+	if (parsed.help) { printHelp(); return { exitCode: 0, action: "help" }; }
+	const resolution = resolveStandaloneStorage(parsed, options.env ?? process.env, options.projectDir);
+	let payload;
+	const restoreKeychain = suspendKeychainForSelectedFile(parsed);
+	try {
+		const selectedFileError = keychainSelectedFileError(parsed);
+		if (selectedFileError) throw new Error(selectedFileError);
+		const loadRuntime = options.loadManagementRuntime ?? (() => loadDistModules(
+			["storage.js", "standalone-management.js", "shutdown.js"], "account management",
+		));
+		const [storageMod, managementMod, shutdownMod] = await loadRuntime();
+		pointStorageModuleAtResolution(storageMod, resolution);
+		shutdownMod.setShutdownOwnsProcess(true);
+		payload = await managementMod.executeStandaloneManagement(command, parsed.input);
+	} catch (error) {
+		payload = { ok: false, command, error: "MANAGEMENT_FAILED", message: formatErrorForLog(error) };
+	} finally {
+		restoreKeychain?.();
+	}
+	payload = { ...payload, storagePath: resolution.storagePath, storageScope: resolution.scope };
+	if (parsed.json) console.log(JSON.stringify(payload, null, 2));
+	else {
+		const write = payload.ok ? console.log : console.error;
+		write(payload.message ?? JSON.stringify(payload, null, 2));
+		write(`Storage: ${resolution.storagePath} (${resolution.scope})`);
+		if (payload.warning) console.error(payload.warning);
+	}
+	return { exitCode: payload.ok ? 0 : 1, action: command, storagePath: resolution.storagePath, storageScope: resolution.scope };
+}
+
 export async function runStandaloneCommand(command, argv = [], options = {}) {
+	if (MANAGEMENT_COMMANDS.has(command)) return runManagementCommand(command, argv, options);
 	let parsed;
 	try {
 		parsed = parseStandaloneArgs(argv);
@@ -2717,6 +2816,7 @@ export async function runStandaloneCommand(command, argv = [], options = {}) {
 		totalAccounts,
 		shownAccounts: accounts.length,
 		activeIndex: typeof storage?.activeIndex === "number" ? storage.activeIndex : 0,
+		activeAccountNumber: totalAccounts > 0 ? (storage?.activeIndex ?? 0) + 1 : null,
 		activeIndexByFamily: storage?.activeIndexByFamily ?? {},
 		accounts,
 		error,
@@ -3481,6 +3581,7 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		}
 		const existing = existsSync(paths.configPath) ? await readJson(paths.configPath) : {};
 		if (!isPlainObject(existing)) throw new Error("OpenCode config root must be an object");
+		if (existing.plugins !== undefined && !Array.isArray(existing.plugins)) throw new Error("OpenCode plugins must be an array");
 		if (Array.isArray(existing.plugin) && existing.plugin.length > 0) {
 			throw new Error("OpenCode V1 plugin entries are present. Use a separate V2 config or migrate them manually; --v2 will not remove your V1 registration.");
 		}
@@ -3492,7 +3593,7 @@ export async function runInstaller(argv = process.argv.slice(2), options = {}) {
 		);
 		next.plugins = normalizePluginList(existing.plugins, log, {
 			baseDirectory: paths.configDir, cacheDirectory: paths.cacheDir,
-		});
+		}).map((entry) => entry === PACKAGE_NAME ? pathToFileURL(join(repoRoot, "dist")).href : entry);
 		next.$schema ??= "https://opencode.ai/config.json";
 		if (dryRun) log(`[dry-run] Would register V2 plugin in ${paths.configPath}`);
 		else if (formatJson(existing) !== formatJson(next)) {

@@ -26,6 +26,8 @@ lib/
 ├── ui/                     # ansi, auth-menu, beginner, confirm, format, runtime, select, theme — terminal UI
 ├── types/                  # dependency type shims (napi-rs-keyring.d.ts)
 ├── account-display.ts      # account identity rendering + maskEmail privacy
+├── account-management.ts   # durable switch/label/tag/note transactions shared by tools and CLI
+├── standalone-management.ts # CLI adapter for shared account and model-pool operations
 ├── auto-update-checker.ts  # npm latest-version check → cache refresh notice
 ├── circuit-breaker.ts      # failure isolation
 ├── cli.ts                  # auth/login CLI prompt helpers

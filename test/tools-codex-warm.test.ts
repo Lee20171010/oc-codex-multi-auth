@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import type { ToolContext } from "../lib/tools/index.js";
 import {
@@ -10,6 +12,7 @@ import type { AccountStorageV3 } from "../lib/storage.js";
 
 vi.mock("../lib/storage.js", () => ({
 	loadAccounts: vi.fn(),
+	getStoragePath: () => join(process.env.HOME ?? tmpdir(), "FAKE_WARM_POOL", "accounts.json"),
 	withAccountStorageTransaction: vi.fn(),
 }));
 

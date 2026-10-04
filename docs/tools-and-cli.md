@@ -82,7 +82,7 @@ codex-keychain command="status"
 
 ### Account numbering
 
-Two conventions coexist, and they are different on purpose:
+Account numbers match command inputs and terminal listings:
 
 - **Inputs are 1-based.** `index`, `account`, and `accounts[]` arguments and
   interactive pickers number accounts from 1 — the same numbers `codex-list`
@@ -90,16 +90,13 @@ Two conventions coexist, and they are different on purpose:
 - **Tool JSON output stays 1-based.** `format="json"` emits `index`/
   `activeIndex` numbered like the pickers; the raw storage position is
   emitted separately as `zeroBasedIndex`.
-- **Standalone CLI output is 0-based.** `--json` `index` fields and the
-  `[N]` labels are the account's raw position in the storage array, so the
-  first account prints as `[0]`. When scripting, feed tool arguments the
-  1-based number — or read `zeroBasedIndex` if you need the storage offset.
+- **CLI terminal listings and management/limits JSON are 1-based.** For compatibility, inventory commands such as `list --json` retain 0-based `index` and `activeIndex`; use their new `accountNumber` and `activeAccountNumber` fields as management inputs.
 
 ### Operational notes
 
 - **`codex-pool`** accepts 1-based numbers but persists **stable account IDs** in `~/.opencode/openai-codex-auth-config.json`. The fetch path re-reads plugin config each request, so mutations apply on the next request.
 - **`codex-reset`**: `action="consume"` is irreversible and needs `confirm=true`; `dryRun=true` previews.
-- **`codex-doctor fix=true`**: refreshes enabled accounts and clears stale cooldown/rate-limit/quota markers **only after a successful refresh** — shared logic with CLI `doctor --fix` (`lib/tools/doctor-repair.ts`).
+- **`codex-doctor fix=true`**: refreshes enabled accounts and clears unchanged stale cooldown/rate-limit/quota markers **only after a successful refresh**, and invalidates both account and pool quota display caches — shared logic with CLI `doctor --fix` (`lib/tools/doctor-repair.ts`). Verify current server usage with `limits --refresh`. A failed credential refresh requires `opencode auth login`.
 - **`codex-keychain rollback`**: restores the newest `.migrated-to-keychain.<ts>` backup next to the accounts file, deletes the keychain entry, and restores the flagged-accounts store's own `.migrated-to-keychain.<ts>` backup the same way so quarantined credentials are not left keychain-only. When a live JSON file exists, `confirm=true` is required and the current file is archived as `.pre-rollback.<ts>` first.
 - **Tool `codex-health` vs CLI `health`.** The tool makes real network calls (refresh-token validation). The CLI scans local storage only.
 - **`maskEmail`** in plugin config renders emails as `us***@example.com` in shared screens; labels are preferred over emails.
@@ -108,7 +105,7 @@ Two conventions coexist, and they are different on purpose:
 
 ## Standalone CLI
 
-Bin: `oc-codex-multi-auth` (or `npx -y oc-codex-multi-auth@latest …`).
+Bin: `oc-codex-multi-auth`, linked to the maintained checkout with `npm install --global .`.
 
 | Command | Role |
 | --- | --- |
@@ -117,6 +114,11 @@ Bin: `oc-codex-multi-auth` (or `npx -y oc-codex-multi-auth@latest …`).
 | `doctor` | Local account/config diagnostics |
 | `status` | Account/config status |
 | `list` | List configured accounts |
+| `switch <account>` | Switch the active account for all model families |
+| `label <account> <value>` | Set or clear a display label |
+| `tag <account> <csv>` | Set or clear normalized comma-separated tags |
+| `note <account> <value>` | Set or clear a private note |
+| `pool [status\|set\|add\|remove\|clear\|set-mode] [model] [accounts/mode]` | Manage model account pools and routing mode |
 | `limits` | 5-hour and weekly usage per account + plan-weighted pool total |
 | `dashboard` | Prints guidance (does not start a server; use `codex-dashboard` in OpenCode) |
 | `health` | Local token/account health summary (no network) |
@@ -137,18 +139,36 @@ directory — a stray `.opencode` inside `$HOME` does not turn `~` into a projec
 so the CLI resolves the global pool from `$HOME` or a markerless directory. Run
 it from inside a real project to see that project's pool.
 
+Project pools are independent. Add accounts with `opencode auth login` from the project directory; management commands report an empty selected pool rather than copying credentials. Model-pool rules are saved in the shared plugin config, just like `codex-pool`.
+
+```bash
+oc-codex-multi-auth switch 2
+oc-codex-multi-auth label 2 "Work"
+oc-codex-multi-auth tag 2 "work,primary"
+oc-codex-multi-auth note 2 "Weekday primary"
+oc-codex-multi-auth note 2 ""                  # clear
+oc-codex-multi-auth pool set gpt-6.1-sol 1,2
+oc-codex-multi-auth pool add gpt-6.1-sol 3
+oc-codex-multi-auth pool remove gpt-6.1-sol 1 --dry-run
+oc-codex-multi-auth pool set-mode gpt-6.1-sol strict
+oc-codex-multi-auth pool status --json
+oc-codex-multi-auth pool clear gpt-6.1-sol
+```
+
+Labels, tags and notes accept an empty string to clear them. Label and note limits match the tools (60 and 240 characters). Account writes use shared locked, atomic storage transactions; account changes are observed by OpenCode, and pool rules apply on the next request.
+
 A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the write-capable commands — restore it through `codex-keychain rollback` instead.
 
 ### Keychain routing per command
 
 - `status`, `list`, `health`, `dashboard`, and `doctor` (without `--fix`) parse the resolved JSON file directly — no keychain.
-- `warm`, `limits`, and `doctor --fix` run through the plugin's compiled storage runtime, so they honor `CODEX_KEYCHAIN=1`. An explicit `--config-path` forces keychain off for that run.
+- `warm`, `limits`, `doctor --fix`, `switch`, `label`, `tag`, `note` and `pool` run through the plugin's compiled storage runtime, so they honor `CODEX_KEYCHAIN=1`. An explicit `--config-path` forces keychain off for that run.
 
 ### Standalone options
 
 | Flag | Applies to | Effect |
 | --- | --- | --- |
-| `--json` | `doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm` | Machine-readable JSON output (**not** `install`/`update` — they reject it as an unknown option) |
+| `--json` | all standalone commands | Machine-readable JSON output (`install`/`update` reject it) |
 | `--include-sensitive` | account listing output | Raw identity fields instead of masked |
 | `--tag <tag>` / `--tag=<tag>` | account listing (incl. `limits`) | Filter accounts by tag |
 | `--config-path <path>` / `--config-path=<path>` | all standalone commands | Explicit accounts file (see storage resolution) |
@@ -157,6 +177,8 @@ A `--config-path` naming a `.migrated-to-keychain.<ts>` file is refused for the 
 | `--asc` / `--desc` | `limits` | Sort direction (default `--asc`) |
 | `--deep` | `doctor` (implied by `diag`) | Technical snapshot details |
 | `--fix` | `doctor` | Verify-refresh enabled accounts, then clear stale cooldown/rate-limit/quota markers |
+| `--dry-run` | `pool` | Preview pool mutations without saving |
+| `--mode preferred\|strict` | `pool` | Set the model pool's routing mode |
 | `--help`, `-h` | all | Print usage |
 
 `warm` exits non-zero if any enabled account fails; disabled accounts are skipped. `limits` exits 1 when storage cannot be read or a required live read fails. `doctor --fix` exits non-zero if any repair fails or the storage file cannot be read.
@@ -185,7 +207,7 @@ Accounts: 11
 Sort:     reset (asc)
 Readings: the plugin's last readings, taken 2026-09-27 13:17:22 (14m ago); --refresh reads every account live
 
-- [0] work@example.com id:c487c4
+- [1] work@example.com id:c487c4
   Weekly limit:     100% used
   Renews:           2026-09-30 15:14:08 (in 3d 22h)
   Plan:             Pro (20x)

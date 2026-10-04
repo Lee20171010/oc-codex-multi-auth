@@ -430,10 +430,10 @@ describe("clock audit", () => {
 		it("AUDIT QUIRK: 'reset-at: -1' survives the \\d+ gate and Date.parse reads it as Jan 1 2001 (quota-windows.ts:135-138)", () => {
 			// The numeric branch rejects "-1" (not all digits), so it falls into
 			// Date.parse — which leniently parses "-1" as a year/month fragment
-			// landing at 978278400000 (2001-01-01T00:00:00Z). Returned as a PAST
+			// landing at local midnight on Jan 1 2001. Returned as a PAST
 			// stamp, then dropped by every future-gated consumer — harmless but
 			// surprising: a malformed header yields a 25-year-old "reset".
-			expect(parseQuotaResetAtMs(headers({ [`${P}-reset-at`]: "-1" }), P, T0)).toBe(978278400000);
+			expect(parseQuotaResetAtMs(headers({ [`${P}-reset-at`]: "-1" }), P, T0)).toBe(new Date(2001, 0, 1).getTime());
 			const h = headers({
 				[`${P}-used-percent`]: "100",
 				[`${P}-window-minutes`]: "300",
@@ -1017,7 +1017,8 @@ describe("clock audit", () => {
 				if (vi.getTimerCount() > 0) {
 					await vi.advanceTimersByTimeAsync(250);
 				}
-				await new Promise((resolve) => setImmediate(resolve));
+				// Synchronize with the real filesystem work before pumping its next retry.
+				await fs.stat(dir);
 			}
 		}
 

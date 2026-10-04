@@ -1,6 +1,6 @@
 import { getCodexTuiGlyphMode, getCodexTuiMaskEmail, getCodexTuiMaskEmailInQuotaDetails, getQuotaDisplay, getQuotaStatus, loadPluginConfig } from "./config.js";
 import { fetchTuiQuotaOverview, toQuotaOverviewAccounts } from "./tui-quota-overview.js";
-import { readTuiQuotaSnapshot, readTuiQuotaOverviewSnapshot, isFreshTuiQuotaSnapshot, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "./tui-quota-cache.js";
+import { readTuiQuotaSnapshot, readTuiQuotaOverviewSnapshot, readTuiQuotaInvalidation, isFreshTuiQuotaSnapshot, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "./tui-quota-cache.js";
 import { formatPromptStatusText, formatQuotaDetailsText, formatQuotaCreditsStatusLines, formatQuotaOverviewStatusLines, formatQuotaResetsStatusLines, type CompactQuotaStatus } from "./tui-status.js";
 import { dirname, join } from "node:path";
 import { getStoragePath, loadAccounts } from "./storage.js";
@@ -12,7 +12,7 @@ import { sanitizeDisplayText } from "./ui/display-text.js";
 /** Same cadence as the V1 prompt status poll. */
 const OVERVIEW_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 type PoolOverview = Awaited<ReturnType<typeof fetchTuiQuotaOverview>>;
-const lastOverviewAttempt = new Map<string, { at: number; snapshot: PoolOverview }>();
+const lastOverviewAttempt = new Map<string, { at: number; snapshot: PoolOverview; invalidation?: string }>();
 
 /** Test hook: forget when each pool was last fetched. */
 export function resetV2StatusThrottle(): void {
@@ -29,13 +29,14 @@ export function resetV2StatusThrottle(): void {
  */
 async function loadPoolOverview(cachePath: string): Promise<PoolOverview> {
 	const now = Date.now();
+	const invalidation = await readTuiQuotaInvalidation(cachePath);
 	const last = lastOverviewAttempt.get(cachePath);
-	if (last !== undefined && now - last.at < OVERVIEW_REFRESH_INTERVAL_MS) {
+	if (last !== undefined && last.invalidation === invalidation && now - last.at < OVERVIEW_REFRESH_INTERVAL_MS) {
 		const cached = await readTuiQuotaOverviewSnapshot(cachePath);
 		if (!last.snapshot) return cached;
 		return cached && cached.fetchedAt >= last.snapshot.fetchedAt ? cached : last.snapshot;
 	}
-	const entry: { at: number; snapshot: PoolOverview } = { at: now, snapshot: undefined };
+	const entry: { at: number; snapshot: PoolOverview; invalidation?: string } = { at: now, snapshot: undefined, invalidation };
 	lastOverviewAttempt.set(cachePath, entry);
 	entry.snapshot = await fetchTuiQuotaOverview({ cachePath, now });
 	return entry.snapshot;
@@ -50,8 +51,7 @@ export async function readV2Status({ width }: { width: number }) {
 	const glyphMode = getCodexTuiGlyphMode(config);
 	const snapshot = await readTuiQuotaSnapshot();
 	const pool = await loadAccounts();
-	// The headers cache is global: project pools seeded from the same accounts
-	// share fingerprints, so it cannot attribute a request to this project.
+	// The headers cache is global and carries no project identity.
 	const servingIndex = !getCurrentProjectRoot() && snapshot?.source === "headers" && isFreshTuiQuotaSnapshot(snapshot)
 		? pool?.accounts.findIndex((account) => createUsageAccountFingerprint(account) === snapshot.fingerprint)
 		: undefined;

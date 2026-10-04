@@ -1,6 +1,7 @@
 {
   "name": "oc-codex-multi-auth",
   "version": "6.27.0",
+  "private": true,
   "description": "OpenCode plugin for ChatGPT Plus/Pro OAuth with Codex/GPT-5 routing, multi-account rotation, account switching, health checks, diagnostics, and recovery tools",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,7 +20,7 @@
   "author": "ndycode",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ndycode/oc-codex-multi-auth.git"
+    "url": "git+https://github.com/Lee20171010/oc-codex-multi-auth.git"
   },
   "keywords": [
     "opencode",
@@ -51,9 +52,9 @@
     "typescript",
     "nodejs"
   ],
-  "homepage": "https://github.com/ndycode/oc-codex-multi-auth#readme",
+  "homepage": "https://github.com/Lee20171010/oc-codex-multi-auth#readme",
   "bugs": {
-    "url": "https://github.com/ndycode/oc-codex-multi-auth/issues"
+    "url": "https://github.com/Lee20171010/oc-codex-multi-auth/issues"
   },
   "scripts": {
     "build": "node scripts/clean-dist.js && tsc && node scripts/copy-oauth-success.js",
@@ -123,8 +124,10 @@
     "@ai-sdk/openai": "^3.0.117",
     "@napi-rs/keyring": "~1.2.0",
     "@opencode-ai/plugin": ">=1.14.22 <1.14.42",
-    "@opencode/plugin": "^2.0.16",
+    "@opencode/ai": "^2.0.22",
+    "@opencode/plugin": "^2.0.22",
     "@opentui/solid": "^0.5.12",
+    "effect": "^4.0.0-beta.59",
     "proper-lockfile": "^4.1.2",
     "solid-js": "^1.9.11",
     "zod": "^4.3.6"
@@ -136,8 +139,8 @@
     "@babel/core": "^7.29.6",
     "ajv@<6.14.0": "^6.14.0",
     "brace-expansion": "^5.0.9",
-    "seroval@<=1.5.2": "^1.5.6",
-    "seroval-plugins@<=1.5.2": "^1.5.6",
+    "seroval": "^1.5.6",
+    "seroval-plugins": "^1.5.6",
     "minimatch@<9.0.7": "^9.0.7",
     "minimatch@>=10.0.0 <10.2.3": "^10.2.3",
     "nanoid": "^3.3.18",

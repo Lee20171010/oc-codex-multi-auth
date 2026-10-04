@@ -4,12 +4,11 @@
  */
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
-import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { loadAccounts } from "../storage.js";
 import { AccountManager } from "../accounts.js";
-import { logWarn } from "../logger.js";
+import { mutateManagedAccount } from "../account-management.js";
 import { getWorkspaceIdentityKey } from "../storage/identity.js";
 import {
-	rethrowIfRetryable,
 	withToolErrorEnvelope,
 } from "./output.js";
 import { sanitizeDisplayText } from "../ui/display-text.js";
@@ -83,41 +82,10 @@ export function createCodexNoteTool(ctx: ToolContext): ToolDefinition {
 				return "Note is too long (max 240 characters).";
 			}
 
-			let persistedAccount = account;
-
-			// The handler reports its outcome instead of throwing so only real
-			// transaction failures (e.g. StorageTransactionContentionError) escape
-			// — the registry wrapper surfaces them as retryable, machine-readable
-			// errors instead of a success-looking "failed to persist" string.
-			type NoteOutcome = "ok" | "account-changed" | "persist-failed";
-			const outcome = await withAccountStorageTransaction<NoteOutcome>(
-				async (current, persist) => {
-					const currentAccount = current?.accounts.find(
-						(candidate) => getWorkspaceIdentityKey(candidate) === identityKey,
-					);
-					if (!current || !currentAccount) {
-						return "account-changed";
-					}
-					if (normalizedNote.length === 0) {
-						delete currentAccount.accountNote;
-					} else {
-						currentAccount.accountNote = normalizedNote;
-					}
-					try {
-						await persist(current);
-					} catch (error) {
-						// A compromised transaction lease surfaces through persist()
-						// too — let it escape so the wrapper marks the call retryable.
-						rethrowIfRetryable(error);
-						logWarn("Failed to save account note update", {
-							error: String(error),
-						});
-						return "persist-failed";
-					}
-					persistedAccount = currentAccount;
-					return "ok";
-				},
-			);
+			const mutation = await mutateManagedAccount(resolvedIndex, { action: "note", value: normalizedNote }, identityKey);
+			const outcome = mutation.kind === "ok" ? "ok"
+				: mutation.kind === "save-failed" ? "persist-failed" : "account-changed";
+			const persistedAccount = mutation.kind === "ok" ? mutation.account : account;
 
 			if (outcome === "account-changed") {
 				return "Account changed before its note could be updated. Retry codex-list and pick the account again.";

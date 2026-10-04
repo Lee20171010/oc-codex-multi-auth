@@ -6,9 +6,11 @@ import { join } from "node:path";
 import { createRedeemRequestId } from "../lib/codex-reset.js";
 import { createCodexResetTool } from "../lib/tools/codex-reset.js";
 import type { ToolContext } from "../lib/tools/index.js";
+import * as quotaCache from "../lib/tui-quota-cache.js";
 
 vi.mock("../lib/storage.js", () => ({
 	loadAccounts: vi.fn(),
+	getStoragePath: () => join(tmpdir(), "FAKE_RESET_POOL", "accounts.json"),
 	withAccountStorageTransaction: vi.fn(),
 }));
 
@@ -155,6 +157,7 @@ describe("codex-reset tool", () => {
 	});
 
 	it("redeems the credit once when confirmed, and reports the new usage", async () => {
+		const clearCaches = vi.spyOn(quotaCache, "clearTuiQuotaSnapshots").mockResolvedValue(undefined);
 		const fetchMock = mockCodexFetch();
 		const execute = createCodexResetTool(buildCtx()).execute as ToolExecute;
 
@@ -169,6 +172,16 @@ describe("codex-reset tool", () => {
 		expect(body.redeem_request_id).toBeTruthy();
 		expect(output).toContain("redeemed RateLimitResetCredit_1");
 		expect(output).toContain("new usage:");
+		expect(clearCaches).toHaveBeenCalledOnce();
+	});
+	it("reports a completed redemption honestly when quota cache cleanup fails", async () => {
+		const fetchMock = mockCodexFetch();
+		vi.spyOn(quotaCache, "clearTuiQuotaSnapshots").mockRejectedValue(new Error("FAKE_CACHE_FAILURE"));
+		const execute = createCodexResetTool(buildCtx()).execute as ToolExecute;
+		const result = JSON.parse(await execute({ action: "consume", confirm: true, format: "json" }));
+		expect(result).toMatchObject({ redeemed: true, quotaCachesCleared: false,
+			quotaCacheClearError: expect.stringContaining("limits --refresh") });
+		expect(callsTo(fetchMock, CONSUME_URL)).toHaveLength(1);
 	});
 	it("preserves new limits recorded during redemption and retires only the markers actually cleared", async () => {
 		const future = Date.now() + 3_600_000;

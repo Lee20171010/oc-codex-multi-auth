@@ -4,7 +4,7 @@
 rotation with health scoring and cooldowns, quota-aware Codex/GPT routing
 (GPT-5.6/GPT-6/Daybreak responses-lite included), diagnostics and recovery tools.
 The npm bin is an installer for OpenCode config plus a thin standalone CLI
-(`doctor`, `status`, `list`, `limits`, `dashboard`, `health`, `diag`, `warm`,
+(`doctor`, `status`, `list`, `limits`, `switch`, `label`, `tag`, `note`, `pool`, `dashboard`, `health`, `diag`, `warm`,
 `update`) — not a daemon.
 
 - OpenCode V1 loads `index.ts` (provider plugin) and `tui.ts` (prompt quota status) from the built `dist/` exports.
@@ -99,10 +99,19 @@ The installer writes the real `~/.config/opencode/opencode.json` and `tui.json` 
 whoever runs it:
 
 ```bash
-npx -y oc-codex-multi-auth@latest          # register plugin entries only
-npx -y oc-codex-multi-auth@latest --full   # also install the explicit model catalog
-npx -y oc-codex-multi-auth@latest update   # refresh package cache; never reads/writes config
+npm ci
+npm run build
+npm install --global .   # link the maintained checkout's CLI
+oc-codex-multi-auth install --v2
 ```
+
+This fork is maintained at `Lee20171010/oc-codex-multi-auth`. The V2 installer
+registers the CLI checkout's absolute `dist` file URL in OpenCode's `plugins`
+array, preserving other configuration and explicit local registrations. Keep `origin` on the maintained fork and `upstream` on
+the author's repository. Use a standalone clone, not a linked worktree.
+Updates use `git pull --ff-only origin main`, `npm ci`, a build and a host restart.
+Local-checkout builds skip the upstream npm update check. The legacy CLI
+`update` command only clears package caches; it does not update this checkout.
 
 Other modes: `--modern` (compact config), `--legacy` (explicit-only), `--v2`,
 `--plugin-only`, `--dry-run`, `--no-cache-clear`. An existing plugin entry is

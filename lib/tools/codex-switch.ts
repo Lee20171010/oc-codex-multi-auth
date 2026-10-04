@@ -4,17 +4,17 @@
  */
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
-import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { loadAccounts } from "../storage.js";
 import { AccountManager } from "../accounts.js";
 import { logWarn } from "../logger.js";
-import { MODEL_FAMILIES } from "../prompts/codex.js";
+import { mutateManagedAccount } from "../account-management.js";
 import { clearTuiQuotaSnapshot } from "../tui-quota-cache.js";
 import {
 	formatUiHeader,
 	formatUiItem,
 	formatUiKeyValue,
 } from "../ui/format.js";
-import { rethrowIfRetryable, withToolErrorEnvelope } from "./output.js";
+import { withToolErrorEnvelope } from "./output.js";
 import type { ToolContext } from "./index.js";
 
 export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
@@ -97,56 +97,15 @@ export function createCodexSwitchTool(ctx: ToolContext): ToolDefinition {
 				resolvedIndex = selectedIndex + 1;
 			}
 
-			type SwitchOutcome =
-				| { kind: "invalid"; accountCount: number }
-				| { kind: "save-failed"; label: string }
-				| { kind: "ok"; label: string };
-
-			const outcome = await withAccountStorageTransaction<SwitchOutcome>(
-				async (current, persist) => {
-					const accounts = current?.accounts ?? [];
-					const targetIndex = (resolvedIndex ?? 0) - 1;
-					if (
-						!current ||
-						!Number.isInteger(targetIndex) ||
-						targetIndex < 0 ||
-						targetIndex >= accounts.length
-					) {
-						return { kind: "invalid", accountCount: accounts.length };
-					}
-
-					const now = Date.now();
-					const account = accounts[targetIndex];
-					if (account) {
-						account.lastUsed = now;
-						account.lastSwitchReason = "rotation";
-					}
-
-					const storage = current;
-					storage.activeIndex = targetIndex;
-					storage.activeIndexByFamily = storage.activeIndexByFamily ?? {};
-					for (const family of MODEL_FAMILIES) {
-						storage.activeIndexByFamily[family] = targetIndex;
-					}
-
-					const label = formatCommandAccountLabel(account, targetIndex, {
-						maskEmail,
-						peerAccounts: accounts,
-					});
-					try {
-						await persist(storage);
-					} catch (saveError) {
-						// Lease compromise surfaces through persist() — let it escape
-						// so the wrapper reports a retryable contention error.
-						rethrowIfRetryable(saveError);
-						logWarn("Failed to save account switch", {
-							error: String(saveError),
-						});
-						return { kind: "save-failed", label };
-					}
-					return { kind: "ok", label };
-				},
+			const mutation = await mutateManagedAccount(resolvedIndex, { action: "switch" });
+			const label = formatCommandAccountLabel(
+				mutation.kind === "ok" ? mutation.account : initialStorage.accounts[resolvedIndex - 1],
+				mutation.kind === "ok" ? mutation.index : resolvedIndex - 1,
+				{ maskEmail, peerAccounts: mutation.kind === "ok" ? mutation.accounts : initialStorage.accounts },
 			);
+			const outcome = mutation.kind === "account-changed"
+				? { kind: "invalid" as const, accountCount: initialStorage.accounts.length }
+				: { ...mutation, label };
 
 			if (outcome.kind === "invalid") {
 				if (ui.v2Enabled) {

@@ -37,8 +37,10 @@ import {
 } from "../codex-usage.js";
 import { getQuotaDisplay, loadPluginConfig } from "../config.js";
 import type { QuotaDisplayMode } from "../quota-display.js";
-import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { getStoragePath, loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { dirname, join } from "node:path";
 import { clearUnchangedRecoveryState } from "../accounts/stale-state.js";
+import { clearTuiQuotaSnapshots, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "../tui-quota-cache.js";
 import { findAccountIndexByIdentity } from "./refresh-account.js";
 import {
 	formatUiHeader,
@@ -129,6 +131,8 @@ function emptyConsumeJsonPayload(): {
 	credits: CodexResetCredit[];
 	blocksCleared: boolean;
 	blocksClearError: string | null;
+	quotaCachesCleared: boolean;
+	quotaCacheClearError: string | null;
 	result: {
 		code: string | null;
 		windowsReset: unknown;
@@ -148,6 +152,8 @@ function emptyConsumeJsonPayload(): {
 		credits: [],
 		blocksCleared: false,
 		blocksClearError: null,
+		quotaCachesCleared: false,
+		quotaCacheClearError: null,
 		result: null,
 		planType: null,
 		limits: null,
@@ -495,6 +501,15 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					blocksClearError = "could not clear local rate-limit/quota markers";
 				}
 
+				let quotaCachesCleared = false;
+				let quotaCacheClearError: string | undefined;
+				try {
+					await clearTuiQuotaSnapshots(join(dirname(getStoragePath()), TUI_QUOTA_OVERVIEW_CACHE_FILE));
+					quotaCachesCleared = true;
+				} catch {
+					quotaCacheClearError = "could not clear quota display caches; run limits --refresh";
+				}
+
 				let usageAfter: CodexUsageSummary | undefined;
 				let usageError: string | undefined;
 				try {
@@ -527,6 +542,8 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 						reason: "redeemed",
 						blocksCleared,
 						blocksClearError: blocksClearError ?? null,
+						quotaCachesCleared,
+						quotaCacheClearError: quotaCacheClearError ?? null,
 						credit,
 						availableCount: Math.max(0, summary.availableCount - 1),
 						credits: remainingCredits,
@@ -546,6 +563,7 @@ export function createCodexResetTool(ctx: ToolContext): ToolDefinition {
 					`  ${formatCodexResetConsumeResult(result)}`,
 					...(blocksCleared ? ["  cleared local rate-limit/quota markers"] : []),
 					...(blocksClearError ? [`  Note: ${blocksClearError}; the credit was redeemed.`] : []),
+					...(quotaCacheClearError ? [`  Note: ${quotaCacheClearError}; the credit was redeemed.`] : []),
 					"",
 					...(usageAfter
 						? ["new usage:", ...buildUsageLines(usageAfter, quotaDisplay)]

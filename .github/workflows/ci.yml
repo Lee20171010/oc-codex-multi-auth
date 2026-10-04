@@ -26,15 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Node 18 is absent on purpose: vitest 4 declares
-        # `engines: ^20.0.0 || ^22.0.0 || >=24.0.0`, and on Node 18 the suite
-        # fails 226 tests across 21 files with `Hook timed out` in ordinary
-        # afterEach blocks. The package itself still supports Node 18, so that
-        # claim is tested by the consumer-smoke job below rather than dropped.
-        node: ['20', '22', '24']
+        # Cover the declared minimum and the current desktop runtime.
+        node: ['22.19.0', '24']
         os: [ubuntu-latest]
         include:
-          - node: '20'
+          - node: '24'
             os: windows-latest
     steps:
       - name: Checkout
@@ -65,17 +61,14 @@ jobs:
       - name: Test
         run: npm test
 
-  # package.json declares `engines: >=18.0.0`, but the quality job cannot test
-  # Node 18 because the dev toolchain requires >=20. This job defends the claim
-  # from the consumer's side instead: pack the real tarball, install it, and run
-  # the CLI on Node 18. It never loads vitest or eslint.
+  # Exercise the packed CLI on supported runtimes as a consumer would.
   consumer-smoke:
     name: Consumer smoke (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: ['18']
+        node: ['22.19.0', '24']
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -96,7 +89,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Pack the publishable tarball
+      - name: Pack the installable tarball
         run: npm pack --pack-destination "$RUNNER_TEMP"
 
       - name: Install the tarball and run the CLI
@@ -128,10 +121,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node 20
+      - name: Setup Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
 
       - name: Install dependencies

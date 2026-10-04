@@ -445,7 +445,7 @@ vi.mock("../lib/storage.js", async () => {
 	const actual = await vi.importActual<typeof import("../lib/storage.js")>("../lib/storage.js");
 
 	return {
-	getStoragePath: () => "/mock/path/accounts.json",
+	getStoragePath: () => join(process.env.HOME ?? tmpdir(), "FAKE_INDEX_POOL", "accounts.json"),
 	loadAccounts: vi.fn(async () => cloneMockStorage()),
 	saveAccounts: vi.fn(async (nextStorage: typeof mockStorage) => {
 		mockStorage.version = nextStorage.version;
@@ -3340,7 +3340,7 @@ describe("OpenAIOAuthPlugin", () => {
 			}>(await plugin.tool["codex-doctor"].execute({ deep: true, format: "json" }));
 
 			expect(result.summary.totalAccounts).toBe(1);
-			expect(result.technicalSnapshot?.storagePath).toBe("/mock/path/accounts.json");
+			expect(result.technicalSnapshot?.storagePath).toBe("<HOME>/FAKE_INDEX_POOL/accounts.json");
 			expect(result.technicalSnapshot?.routingVisibility.selectionExplainability).toBeDefined();
 		});
 	});
@@ -4694,6 +4694,77 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 		return { plugin, sdk, mockClient };
 	};
 
+	it("native discovery rotates past an account without its own long-context entitlement", async () => {
+		const helpers = await import("../lib/request/fetch-helpers.js");
+		vi.mocked(helpers.transformRequestForCodex).mockImplementation(async (init) => ({ updatedInit: init!, body: JSON.parse(String(init?.body)) }));
+		const { resolveRequestAccountId } = await import("../lib/accounts.js");
+		vi.mocked(resolveRequestAccountId).mockImplementation((storedId) => storedId);
+		setMockManagedAccounts([
+			{ accountId: "acc-small", refreshToken: "r-small" },
+			{ accountId: "acc-long", refreshToken: "r-long" },
+		]);
+		const discovery = await import("../lib/v2-model-discovery.js");
+		const catalogs = vi.spyOn(discovery, "discoverAccountModels").mockImplementation(async (_provider, accountId) => [
+			{ modelID: "future-native", limit: { context: accountId === "acc-long" ? 872000 : 272000 } },
+		]);
+		globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ content: "ok" })));
+		const { sdk } = await setupPlugin();
+		const { withV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const result = await withV2ModelRequest({ model: "future-native", context: 872000 }, () => sdk.fetch!("https://api.openai.com/v1/responses", {
+			method: "POST", body: JSON.stringify({ model: "future-native" }),
+		}));
+		expect(result.status).toBe(200);
+		expect(catalogs.mock.calls.map((call) => call[1])).toEqual(["acc-small", "acc-long"]);
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.body)).model).toBe("future-native");
+	});
+	it.each([false, true])("native quota rotation publishes B even when B rejects original long model (same wire ID: %s), then accepts B's model", async (sameModel) => {
+		const helpers = await import("../lib/request/fetch-helpers.js");
+		vi.mocked(helpers.transformRequestForCodex).mockImplementation(async (init) => ({ updatedInit: init!, body: JSON.parse(String(init?.body)) }));
+		const { resolveRequestAccountId } = await import("../lib/accounts.js");
+		vi.mocked(resolveRequestAccountId).mockImplementation((storedId) => storedId);
+		setMockManagedAccounts([{ accountId: "acc-a", refreshToken: "r-a" }, { accountId: "acc-b", refreshToken: "r-b" }]);
+		const discovery = await import("../lib/v2-model-discovery.js");
+		vi.spyOn(discovery, "discoverAccountModels").mockImplementation(async (_provider, accountId) => [
+			{ id: accountId === "acc-a" ? "a-only" : "b-only", modelID: accountId === "acc-a" || sameModel ? "a-only" : "b-only", limit: { context: accountId === "acc-a" ? 872000 : 128000 } },
+		]);
+		vi.mocked(helpers.handleErrorResponse).mockImplementationOnce(async (response) => ({ response, rateLimit: { retryAfterMs: 60_000, code: "usage_limit_reached" }, quotaHeadersAuthoritative: true }));
+		globalThis.fetch = vi.fn()
+			.mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "quota exhausted" } }), { status: 429, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-window-minutes": "300", "x-codex-primary-reset-after-seconds": "3600" } }))
+			.mockResolvedValue(new Response(JSON.stringify({ content: "ok" })));
+		const { sdk } = await setupPlugin();
+		const { withV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const selected = vi.fn(async (_candidate: { index: number; models: Promise<Record<string, unknown>[]> }) => {});
+		const response = await withV2ModelRequest({ model: "a-only", context: 872000, onAccountSelected: selected }, () => sdk.fetch!("https://api.openai.com/v1/responses", {
+			method: "POST", body: JSON.stringify({ model: "a-only" }),
+		}));
+		expect(response.status).toBe(503);
+		expect(selected.mock.calls.map(([candidate]) => candidate.index)).toEqual([0, 1]);
+		expect(await selected.mock.calls.at(-1)![0].models).toEqual([expect.objectContaining({ id: "b-only" })]);
+		expect(await response.text()).toContain("Candidate account #2");
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		const retryModel = sameModel ? "a-only" : "b-only";
+		const retry = await withV2ModelRequest({ model: retryModel, context: 128000, onAccountSelected: selected }, () => sdk.fetch!("https://api.openai.com/v1/responses", {
+			method: "POST", body: JSON.stringify({ model: retryModel }),
+		}));
+		expect(retry.status).toBe(200);
+		expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls.at(-1)?.[1]?.body)).model).toBe(retryModel);
+	});
+
+	it("native discovery fails explicitly when no selected account proves eligibility", async () => {
+		const discovery = await import("../lib/v2-model-discovery.js");
+		vi.spyOn(discovery, "discoverAccountModels").mockResolvedValue([]);
+		globalThis.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ content: "wrong" })));
+		const { sdk } = await setupPlugin();
+		const { withV2ModelRequest } = await import("../lib/v2-request-scope.js");
+		const response = await withV2ModelRequest({ model: "gpt-6-sol", context: 872000 }, () => sdk.fetch!("https://api.openai.com/v1/responses", {
+			method: "POST", body: JSON.stringify({ model: "gpt-6-sol" }),
+		}));
+		expect(response.status).toBe(503);
+		expect(await response.text()).toContain("No eligible subscription account");
+		expect(globalThis.fetch).not.toHaveBeenCalled();
+	});
+
 	describe("request config hot reload", () => {
 		let directory: string;
 		let configPath: string;
@@ -5029,6 +5100,24 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			expect(body.error.message).toContain('"spendCredits": true');
 		});
 
+		it.each([false, true])("keeps blocked requests on cached quota until manual repair or upstream monitoring (subscription=%s)", async (subscription) => {
+			const fetchRoute = routeFetch([]);
+			const { plugin, sdk } = await withSpendCredits(false, [exhausted("FAKE_EMAIL", "FAKE_ACCOUNT")]);
+			const discovery = await import("../lib/v2-model-discovery.js");
+			vi.spyOn(discovery, "discoverAccountModels").mockResolvedValue([{ modelID: "gpt-5.1", limit: { context: 128000 } }]);
+			const { withV2ModelRequest } = await import("../lib/v2-request-scope.js");
+			const hooks = plugin as unknown as import("@opencode-ai/plugin").Hooks;
+			for (let i = 0; i < 2; i++) {
+				await hooks["chat.message"]?.({ sessionID: "FAKE_SESSION" }, {} as never);
+				const response = await (subscription
+					? withV2ModelRequest({ model: "gpt-5.1", context: 128000 }, () => prompt(sdk)) : prompt(sdk));
+				expect(response.status).toBeGreaterThanOrEqual(400);
+			}
+			expect(quotaMonitorMock.runNow).not.toHaveBeenCalled();
+			expect(fetchRoute.usageReads()).toBe(0);
+			expect(fetchRoute.responseCalls()).toBe(0);
+		});
+
 		it("serves on the account with a credit balance and says so in a toast", async () => {
 			const seats = [exhausted("a@example.com", "acc-a"), exhausted("b@example.com", "acc-b")];
 			const fetchRoute = routeFetch(["0", "62500"]);
@@ -5052,6 +5141,7 @@ describe("OpenAIOAuthPlugin fetch handler", () => {
 			const response = await prompt(sdk);
 			expect(response.status).toBe(200);
 			expect(fetchRoute.usageReads()).toBe(0);
+			expect(quotaMonitorMock.runNow).not.toHaveBeenCalled();
 			expect(toastMessages(mockClient).some((message) => message.includes("Codex credits"))).toBe(false);
 		});
 

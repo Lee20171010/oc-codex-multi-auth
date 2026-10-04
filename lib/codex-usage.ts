@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { clearTuiQuotaSnapshots, TUI_QUOTA_OVERVIEW_CACHE_FILE } from "./tui-quota-cache.js";
 
 import { extractAccountId } from "./accounts.js";
 import { extractAccountUserId } from "./auth/token-utils.js";
@@ -49,6 +51,7 @@ import {
 } from "./ui/display-text.js";
 import {
 	withAccountStorageTransaction,
+	getStoragePath,
 	type AccountMetadataV3,
 	type AccountStorageV3,
 } from "./storage.js";
@@ -649,7 +652,8 @@ export function isUsageQuotaRecovered(windows: readonly LimitWindow[]): boolean 
 export async function persistUsageQuotaRecovery(account: AccountMetadataV3): Promise<boolean> {
 	const usageKey = getUsageAccountDedupeKey(account);
 	if (!usageKey) return false;
-	return withAccountStorageTransaction(async (current, persist) => {
+	const overviewPath = join(dirname(getStoragePath()), TUI_QUOTA_OVERVIEW_CACHE_FILE);
+	const recovered = await withAccountStorageTransaction(async (current, persist) => {
 		if (!current) return false;
 		let changed = false;
 		for (const storedAccount of current.accounts) {
@@ -665,6 +669,11 @@ export async function persistUsageQuotaRecovery(account: AccountMetadataV3): Pro
 		if (changed) await persist(current);
 		return changed;
 	});
+	if (recovered) {
+		try { await clearTuiQuotaSnapshots(overviewPath); }
+		catch { logWarn("Quota recovered, but quota display caches could not be cleared"); }
+	}
+	return recovered;
 }
 
 /**

@@ -4,9 +4,9 @@
  */
 
 import { tool, type ToolDefinition } from "@opencode-ai/plugin/tool";
-import { loadAccounts, withAccountStorageTransaction } from "../storage.js";
+import { loadAccounts } from "../storage.js";
 import { AccountManager } from "../accounts.js";
-import { logWarn } from "../logger.js";
+import { mutateManagedAccount } from "../account-management.js";
 import { sanitizeDisplayText } from "../ui/display-text.js";
 import {
 	formatUiHeader,
@@ -14,7 +14,6 @@ import {
 	formatUiKeyValue,
 } from "../ui/format.js";
 import {
-	rethrowIfRetryable,
 	withToolErrorEnvelope,
 } from "./output.js";
 import type { ToolContext } from "./index.js";
@@ -129,60 +128,13 @@ export function createCodexLabelTool(ctx: ToolContext): ToolDefinition {
 				return "Label is too long (max 60 characters).";
 			}
 
-			type LabelOutcome =
-				| { kind: "invalid"; accountCount: number }
-				| { kind: "not-found" }
-				| { kind: "save-failed" }
-				| {
-						kind: "ok";
-						accountLabel: string;
-						previousLabel: string;
-				  };
-
-			const outcome = await withAccountStorageTransaction<LabelOutcome>(
-				async (current, persist) => {
-					const storage = current;
-					const accounts = storage?.accounts ?? [];
-					const targetIndex = (resolvedIndex ?? 0) - 1;
-					if (
-						!Number.isInteger(targetIndex) ||
-						targetIndex < 0 ||
-						targetIndex >= accounts.length
-					) {
-						return { kind: "invalid", accountCount: accounts.length };
-					}
-
-					const account = accounts[targetIndex];
-					if (!account || !storage) {
-						return { kind: "not-found" };
-					}
-
-					const previousLabel = account.accountLabel?.trim() ?? "";
-					if (normalizedLabel.length === 0) {
-						delete account.accountLabel;
-					} else {
-						account.accountLabel = normalizedLabel;
-					}
-
-					try {
-						await persist(storage);
-					} catch (saveError) {
-						// Lease compromise surfaces through persist() — let it escape
-						// so the wrapper reports a retryable contention error.
-						rethrowIfRetryable(saveError);
-						logWarn("Failed to save account label update", {
-							error: String(saveError),
-						});
-						return { kind: "save-failed" };
-					}
-
-					const accountLabel = formatCommandAccountLabel(account, targetIndex, {
-						maskEmail,
-						peerAccounts: accounts,
-					});
-					return { kind: "ok", accountLabel, previousLabel };
-				},
-			);
+			const mutation = await mutateManagedAccount(resolvedIndex, { action: "label", value: normalizedLabel });
+			const outcome = mutation.kind === "ok" ? {
+				...mutation,
+				accountLabel: formatCommandAccountLabel(mutation.account, mutation.index, {
+					maskEmail, peerAccounts: mutation.accounts,
+				}),
+			} : mutation.kind === "account-changed" ? { kind: "not-found" as const } : mutation;
 
 			if (outcome.kind === "invalid") {
 				if (ui.v2Enabled) {

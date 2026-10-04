@@ -54,6 +54,9 @@ function solBody(): RequestBody {
 }
 
 describe("gpt-5.6 client identity (#196)", () => {
+	it("preserves the local Codex client version floor for newer catalogs", () => {
+		expect(DEFAULT_CODEX_CLIENT_VERSION).toBe("0.155.0");
+	});
 	it("sends the host (opencode) identity for a sol turn from an org-bearing account", () => {
 		// opencode's runtime injects its own UA; an earlier attempt may have
 		// left a stale org header on init. UA is normalized, org stripped.
