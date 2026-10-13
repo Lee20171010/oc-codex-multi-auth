@@ -4,6 +4,20 @@ import { recoveryKind, repairV2Context, registerV2Recovery } from "../lib/v2-rec
 import type { SessionDomain, SessionContext, SessionRetry } from "@opencode/plugin/promise/session";
 
 describe("native V2 context recovery", () => {
+	it("loads when the host rejects local AI runtime modules", async () => {
+		vi.resetModules();
+		vi.doMock("@opencode/ai", () => { throw new Error("Local AI runtime is not provided by the host"); });
+		try {
+			const recovery = await import("../lib/v2-recovery.js");
+			const call = Message.assistant([ToolCallPart.make({ id: "host-call", name: "read", input: {} })]);
+			expect(recovery.repairV2Context([call]).messages[1].content[0]).toMatchObject({
+				type: "tool-result", id: "host-call", result: { type: "error" },
+			});
+		} finally {
+			vi.doUnmock("@opencode/ai");
+			vi.resetModules();
+		}
+	});
 	it("repairs missing results before the next user and at the end without changing history", () => {
 		const call = Message.assistant([ToolCallPart.make({ id: "call-1", name: "write", input: {} })]);
 		const messages = [call, Message.user("Continue")];

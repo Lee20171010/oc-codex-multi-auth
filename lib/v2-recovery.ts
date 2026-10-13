@@ -1,4 +1,4 @@
-import { Message, ToolResultPart, type ToolCallPart } from "@opencode/ai";
+import type { Message, ToolCallPart } from "@opencode/ai";
 import type { SessionDomain } from "@opencode/plugin/promise/session";
 
 type Repair = "tools" | "reasoning-order" | "reasoning-disabled";
@@ -18,10 +18,11 @@ export function repairV2Context(messages: readonly Message[], mode?: Repair): { 
 	let repairs = 0;
 	const flush = () => {
 		if (!pending.size) return;
-		result.push(new Message({ role: "tool", content: [...pending.values()].map((call) => ToolResultPart.make({
+		result.push({ role: "tool", content: [...pending.values()].map((call) => ({
+			type: "tool-result" as const,
 			id: call.id, name: call.name, namespace: call.namespace,
-			result: "Tool execution ended without a result. The operation may have run; check its state before retrying.", resultType: "error",
-		})) }));
+			result: { type: "error" as const, value: "Tool execution ended without a result. The operation may have run; check its state before retrying." },
+		})) });
 		repairs += pending.size;
 		pending.clear();
 	};
@@ -47,7 +48,7 @@ export function repairV2Context(messages: readonly Message[], mode?: Repair): { 
 		}
 		if (!content.length) { if (message.content.length === 0) repairs++; continue; }
 		const changed = content.length !== message.content.length || content.some((part, i) => part !== message.content[i]);
-		result.push(changed ? new Message({ ...message, content, native: undefined }) : message);
+		result.push(changed ? { ...message, content, native: undefined } : message);
 		if (message.role === "assistant") for (const part of content) {
 			if (part.type === "tool-call" && !part.providerExecuted) pending.set(part.id, part);
 		}
